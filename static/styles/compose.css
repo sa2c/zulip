@@ -357,6 +357,10 @@ textarea.new_message_textarea {
     &.over_limit {
         box-shadow: 0 0 0 1pt hsl(0, 100%, 50%) !important;
     }
+
+    body.less_dense_mode & {
+        line-height: calc(20 / 14);
+    }
 }
 
 textarea.new_message_textarea,
