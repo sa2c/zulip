@@ -70,13 +70,13 @@ def send_initial_pms(user: UserProfile) -> None:
         ).format(help_url=help_url)
 
     content = (
-        _("Hello, and welcome to Zulip!") + "\n"
+        _("Hello, and welcome to ReCoN!") + "\n"
         "\n"
         + _("This is a private message from me, Welcome Bot.")
         + " "
         + _("Here are some tips to get you started:")
         + "\n"
-        "* " + _("Download our [Desktop and mobile apps]({apps_url})") + "\n"
+        "* " + _("Download our [Desktop and mobile Zulip apps]({apps_url})") + "\n"
         "* "
         + _("Customize your account and notifications on your [Settings page]({settings_url})")
         + "\n"
@@ -90,6 +90,10 @@ def send_initial_pms(user: UserProfile) -> None:
             "If you're not into keyboards, that's okay too; "
             "clicking anywhere on this message will also do the trick!"
         )
+        + "\n"
+        "* "
+        + _("Join some straems! For example, #**Python** for talking about the Python "
+                 " programming language, or #**ML** for discussion about Machine Learning")
     )
 
     content = content.format(

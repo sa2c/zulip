@@ -149,6 +149,11 @@ li.show-more-topics {
             text-decoration: none;
         }
     }
+   background-color: #233264;
+   color: white;
+   border-radius: 0px 10px 35px 0px;
+   padding-top: 10px;
+   padding-bottom: 10px;
 }
 
 #private-container,
@@ -173,7 +178,7 @@ li.show-more-topics {
     &.top_left_row:hover,
     &.bottom_left_row:hover,
     &#stream_filters li.highlighted_stream {
-        background-color: hsla(120, 12.3%, 71.4%, 0.38);
+        background-color: #7382b4;
         border-radius: 4px;
     }
 }
@@ -226,7 +231,7 @@ ul.filters {
 li.active-filter,
 li.active-sub-filter {
     font-weight: 600 !important;
-    background-color: hsl(202, 56%, 91%);
+    background-color: #435294;
     position: relative;
     border-radius: 4px;
 }

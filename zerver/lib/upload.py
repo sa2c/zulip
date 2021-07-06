@@ -33,7 +33,7 @@ from zerver.lib.avatar_hash import user_avatar_path
 from zerver.lib.exceptions import ErrorCode, JsonableError
 from zerver.models import Attachment, Message, Realm, RealmEmoji, UserProfile
 
-DEFAULT_AVATAR_SIZE = 100
+DEFAULT_AVATAR_SIZE = 256
 MEDIUM_AVATAR_SIZE = 500
 DEFAULT_EMOJI_SIZE = 64
 

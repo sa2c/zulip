@@ -178,3 +178,7 @@ USE_X_FORWARDED_PORT = True
 SOCIAL_AUTH_SAML_SP_ENTITY_ID = "http://localhost:9991"
 
 MEMCACHED_USERNAME = None
+
+
+DEFAULT_LOGO_URI = "/static/images/logo/recon-blue.svg"
+DEFAULT_NIGHT_LOGO_URI = "/static/images/logo/recon-white.svg"

@@ -1277,7 +1277,7 @@ class UserProfile(AbstractBaseUser, PermissionsMixin):
     default_all_public_streams: bool = models.BooleanField(default=False)
 
     # UI vars
-    enter_sends: Optional[bool] = models.BooleanField(null=True, default=False)
+    enter_sends: Optional[bool] = models.BooleanField(null=True, default=True)
     left_side_userlist: bool = models.BooleanField(default=False)
 
     # display settings

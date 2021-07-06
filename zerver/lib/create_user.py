@@ -68,7 +68,7 @@ def create_user_profile(
     tos_version: Optional[str],
     timezone: Optional[str],
     tutorial_status: str = UserProfile.TUTORIAL_WAITING,
-    enter_sends: bool = False,
+    enter_sends: bool = True,
     force_id: Optional[int] = None,
 ) -> UserProfile:
     now = timezone_now()

@@ -124,6 +124,7 @@ SENTRY_DSN: Optional[str] = None
 # File uploads and avatars
 DEFAULT_AVATAR_URI = "/static/images/default-avatar.png"
 DEFAULT_LOGO_URI = "/static/images/logo/zulip-org-logo.svg"
+DEFAULT_NIGHT_LOGO_URI = "/static/images/logo/zulip-org-logo.svg"
 S3_AVATAR_BUCKET = ""
 S3_AUTH_UPLOADS_BUCKET = ""
 S3_REGION = None
