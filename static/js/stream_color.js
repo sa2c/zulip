@@ -20,7 +20,7 @@ function update_table_stream_color(table, stream_name, color) {
                 .children(".messagebox")
                 .css(
                     "box-shadow",
-                    "inset 2px 0px 0px 0px " + style + ", -1px 0px 0px 0px " + style,
+                    "inset 7px 0px 0px 0px " + style + ", -6px 0px 0px 0px " + style,
                 );
             $messages
                 .children(".date_row")

@@ -56,7 +56,7 @@ def send_initial_pms(user: UserProfile) -> None:
                 " " + _("We also have a guide for [Setting up your organization]({help_url}).")
             ).format(help_url=help_url)
 
-        welcome_msg = _("Hello, and welcome to Zulip!") + "👋"
+        welcome_msg = _("Hello, and welcome to ReCoN!") + "👋"
         demo_org_warning = ""
         if user.realm.demo_organization_scheduled_deletion_date is not None:
             demo_org_warning = (

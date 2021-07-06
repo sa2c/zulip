@@ -23,6 +23,8 @@ def get_realm_logo_url(realm: Realm, night: bool) -> str:
         else:
             logo_version = realm.logo_version
         return upload_backend.get_realm_logo_url(realm.id, logo_version, night)
+    if night:
+        return settings.DEFAULT_NIGHT_LOGO_URI + "?version = 0"
     return settings.DEFAULT_LOGO_URI + "?version=0"
 
 

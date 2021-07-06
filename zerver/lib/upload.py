@@ -42,7 +42,7 @@ from zerver.models import (
     is_cross_realm_bot_email,
 )
 
-DEFAULT_AVATAR_SIZE = 100
+DEFAULT_AVATAR_SIZE = 256
 MEDIUM_AVATAR_SIZE = 500
 DEFAULT_EMOJI_SIZE = 64
 

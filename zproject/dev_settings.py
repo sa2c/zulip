@@ -194,3 +194,6 @@ SCIM_CONFIG: Dict[str, SCIMConfigDict] = {
         "name_formatted_included": True,
     }
 }
+
+DEFAULT_LOGO_URI = "/static/images/logo/recon-blue.svg"
+DEFAULT_NIGHT_LOGO_URI = "/static/images/logo/recon-white.svg"

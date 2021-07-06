@@ -89,6 +89,7 @@ def create_user_profile(
     timezone: str,
     default_language: str = "en",
     tutorial_status: str = UserProfile.TUTORIAL_WAITING,
+    enter_sends: bool = True,
     force_id: Optional[int] = None,
     force_date_joined: Optional[datetime] = None,
 ) -> UserProfile:

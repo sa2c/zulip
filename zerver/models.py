@@ -1486,7 +1486,7 @@ class UserBaseSettings(models.Model):
     """
 
     ### Generic UI settings
-    enter_sends = models.BooleanField(default=False)
+    enter_sends = models.BooleanField(default=True)
 
     ### Display settings. ###
     # left_side_userlist was removed from the UI in Zulip 6.0; the

@@ -6,6 +6,7 @@
 
     .new_message_button {
         margin-left: 4px;
+        color: #233264;
 
         .button.small {
             font-size: 1em;
@@ -33,6 +34,11 @@
             overflow: hidden;
             white-space: nowrap;
             text-overflow: ellipsis;
+            opacity: 0.7;
+
+            .compose_reply_button_recipient_label {
+                color: hsl(215, 47%, 30%);
+            }
         }
     }
 
@@ -61,6 +67,10 @@
     display: flex;
     flex-flow: column;
     box-sizing: border-box;
+    background-color: #233264;
+    color: white;
+    border-radius: 5px 5px 0px 0px;
+    border-color: white;
 }
 
 .message_comp {
@@ -229,8 +239,6 @@
     left: 0;
     z-index: 4;
     width: 100%;
-
-    background-color: hsl(0, 0%, 100%);
 }
 
 #compose-container {
@@ -275,6 +283,16 @@
 .collapse_composebox_button,
 #compose_close {
     display: none;
+    position: absolute;
+    right: 0;
+    opacity: 0.7;
+    color: white;
+}
+
+#compose_invite_users,
+#compose_private_stream_alert {
+    /* Don't overlap into the compose_close × */
+    margin-right: 10px;
 }
 
 .compose_resolved_topic,
@@ -468,6 +486,10 @@ input.recipient_box {
     padding-bottom: 3px;
     margin-bottom: 0;
     font-weight: 600;
+    border: 1px solid #7283b4;
+    background-color: #435294;
+    color: hsl(0, 0%, 100%);
+    float: right;
     font-size: 0.9em;
 
     .loader {
