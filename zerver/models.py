@@ -1286,7 +1286,7 @@ class UserProfile(AbstractBaseUser, PermissionsMixin):
     # Values for it are URL suffix after `#`.
     default_view: str = models.TextField(default="recent_topics")
     dense_mode: bool = models.BooleanField(default=True)
-    fluid_layout_width: bool = models.BooleanField(default=False)
+    fluid_layout_width: bool = models.BooleanField(default=True)
     high_contrast_mode: bool = models.BooleanField(default=False)
     translate_emoticons: bool = models.BooleanField(default=False)
     twenty_four_hour_time: bool = models.BooleanField(default=False)
