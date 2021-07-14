@@ -107,10 +107,7 @@ def update_last_reminder(user_profile: Optional[UserProfile]) -> None:
 
 
 def compute_navbar_logo_url(page_params: Dict[str, Any]) -> str:
-    if (
-        page_params["color_scheme"] == 2
-        and page_params["realm_night_logo_source"] != Realm.LOGO_DEFAULT
-    ):
+    if page_params["color_scheme"] == 2:
         navbar_logo_url = page_params["realm_night_logo_url"]
     else:
         navbar_logo_url = page_params["realm_logo_url"]
