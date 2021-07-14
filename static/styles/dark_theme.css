@@ -136,6 +136,10 @@
     }
 
     body,
+    .messagebox-content {
+        background-color: hsl(212, 28%, 18%);
+    }
+
     .app-main,
     .header-main,
     #message_view_header_underpadding,
@@ -160,6 +164,11 @@
         }
     }
 
+    #compose_buttons
+    .new_message_button {
+        color: hsl(215, 47%, 80%);
+    }
+
     .compose-send-status-close {
         color: hsl(0, 0%, 100%);
         opacity: 1;
@@ -178,6 +187,7 @@
     .group_name_search_section,
     .column-right .right-sidebar {
         border-color: hsla(0, 0%, 0%, 0.2);
+        background-color: #233264;
     }
 
     .dark .message_label_clickable.stream_label,
