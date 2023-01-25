@@ -57,22 +57,24 @@
         </ul>
     </div>
 
-    <div id="private_messages_sticky_header" class="private_messages_container zoom-out hidden-for-spectators">
-        <div id="private_messages_section">
-            <div id="private_messages_section_header" class="zoom-out zoom-in-sticky">
-                <span id="pm_tooltip_container">
-                    <i id="toggle_private_messages_section_icon" class="fa fa-sm fa-caret-down toggle_private_messages_section zoom-in-hide" aria-hidden="true"></i>
-                    <h4 class="sidebar-title toggle_private_messages_section">{{t 'PRIVATE MESSAGES' }}</h4>
-                </span>
-                <span class="unread_count"></span>
-                <a id="show_all_private_messages" href="#narrow/is/private">
-                    <i class="fa fa-align-right" aria-label="{{t 'All private messages' }}"></i>
-                </a>
+    <div class="private_messages_header_container">
+        <div id="private_messages_sticky_header" class="private_messages_container zoom-out hidden-for-spectators">
+            <div id="private_messages_section">
+                <div id="private_messages_section_header" class="zoom-out zoom-in-sticky">
+                    <span id="pm_tooltip_container">
+                        <i id="toggle_private_messages_section_icon" class="fa fa-sm fa-caret-down toggle_private_messages_section zoom-in-hide" aria-hidden="true"></i>
+                        <h4 class="sidebar-title toggle_private_messages_section">{{t 'PRIVATE MESSAGES' }}</h4>
+                     </span>
+                    <span class="unread_count"></span>
+                    <a id="show_all_private_messages" href="#narrow/is/private">
+                        <i class="fa fa-align-right" aria-label="{{t 'All private messages' }}"></i>
+                    </a>
+                </div>
             </div>
+            <a class="zoom-out-hide" id="hide_more_private_messages">
+                <span> {{t 'back to streams' }}</span>
+            </a>
         </div>
-        <a class="zoom-out-hide" id="hide_more_private_messages">
-            <span> {{t 'back to streams' }}</span>
-        </a>
     </div>
     {{~!-- squash whitespace --~}}
     <div id="left_sidebar_scroll_container" class="scrolling_list" data-simplebar>
