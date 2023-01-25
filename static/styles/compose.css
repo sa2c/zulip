@@ -289,6 +289,14 @@
     color: white;
 }
 
+.expand_composebox_button {
+    margin-right: 20px;
+}
+
+.collapse_composebox_button {
+    margin-right: 20px;
+}
+
 #compose_invite_users,
 #compose_private_stream_alert {
     /* Don't overlap into the compose_close × */
