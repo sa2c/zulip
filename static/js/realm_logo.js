@@ -82,7 +82,7 @@ export function render() {
         );
     }
 
-    if (settings_data.using_dark_theme() && page_params.realm_night_logo_source !== "D") {
+    if (settings_data.using_dark_theme()) {
         $("#realm-logo").attr("src", page_params.realm_night_logo_url);
     } else {
         $("#realm-logo").attr("src", page_params.realm_logo_url);
