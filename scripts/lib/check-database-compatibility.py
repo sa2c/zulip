@@ -67,6 +67,9 @@ missing.difference_update(
 # https://github.com/python-social-auth/social-app-django/pull/25
 missing.discard(("default", "0005_auto_20160727_2333"))
 
+# This migration got lost, but is redundant to migrations from later rebases anyway
+missing.discard(('zerver',  '0173_auto_20180727_1553'))
+
 for key, migration in loader.disk_migrations.items():
     missing.discard(key)
     missing.difference_update(migration.replaces)
