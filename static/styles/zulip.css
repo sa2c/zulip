@@ -9,7 +9,7 @@ which often needs to be respected by both
 the elements above it and below it on
 the y-axis, due to absolute positioning.
 */
-$header_padding_bottom: 10px;
+$header_padding_bottom: 0px;
 
 /*
 Our sidebars (and anything that top-align
