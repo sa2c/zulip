@@ -633,6 +633,7 @@
         .topic-list .filter-topics,
         > .bottom_left_row {
             background-color: hsl(208, 31%, 24%);
+            color: hsl(202, 56%, 91%);
         }
     }
 
