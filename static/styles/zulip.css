@@ -9,7 +9,7 @@ which often needs to be respected by both
 the elements above it and below it on
 the y-axis, due to absolute positioning.
 */
-$header_padding_bottom: 0px;
+$header_padding_bottom: 10px;
 
 /*
 Our sidebars (and anything that top-align
@@ -18,7 +18,7 @@ go beneath the header.
 */
 $sidebar_top: calc($header_height + $header_padding_bottom);
 
-$left_sidebar_collapse_widget_gutter: 10px;
+$left_sidebar_collapse_widget_gutter: 0px;
 $left_sidebar_width: 270px;
 $right_sidebar_width: 250px;
 
