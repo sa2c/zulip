@@ -218,7 +218,7 @@
     Our sidebars (and anything that top-align
     with them) go beneath the header.
     */
-    --left-sidebar-collapse-widget-gutter: 10px;
+    --left-sidebar-collapse-widget-gutter: 0px;
     /* The width of the empty space in the sidebar to separate
        content from the edge of the window */
     --left-sidebar-far-left-gutter-size: 10px;
@@ -522,8 +522,8 @@
     --color-background: hsl(0deg 0% 94%);
     --color-background-widget-input: hsl(0deg 0% 100%);
     --color-background-navbar: hsl(0deg 0% 97%);
-    --color-background-active-narrow-filter: hsl(202deg 56% 91%);
-    --color-background-hover-narrow-filter: hsl(120deg 12.3% 71.4% / 38%);
+    --color-background-active-narrow-filter: #233264;
+    --color-background-hover-narrow-filter: #435294;
     --color-navbar-bottom-border: hsl(0deg 0% 80%);
     --color-unread-marker: hsl(217deg 64% 59%);
     --color-masked-unread-marker: hsl(0deg 0% 80%);
@@ -568,7 +568,7 @@
     --color-background-tab-picker-tab-option-active: hsl(0deg 0% 100% / 35%);
     --color-background-popover: hsl(0deg 0% 100%);
     --color-background-alert-word: hsl(18deg 100% 84%);
-    --color-buddy-list-highlighted-user: hsl(120deg 12.3% 71.4% / 38%);
+    --color-buddy-list-highlighted-user: #7382b4;
     --color-border-sidebar: hsl(0deg 0% 87%);
 
     /* Recent view */
@@ -587,7 +587,7 @@
     --color-compose-send-button-background-interactive: hsl(240deg 41% 50%);
     --color-compose-send-button-focus-border: hsl(232deg 20% 10%);
     --color-compose-send-button-focus-shadow: hsl(230deg 100% 20%);
-    --color-compose-send-control-button: hsl(240deg 30% 50% / 80%);
+    --color-compose-send-control-button: white;
     --color-compose-send-control-button-background: transparent;
     --color-compose-send-control-button-interactive: hsl(240deg 30% 50%);
     --color-compose-send-control-button-background-interactive: hsl(
@@ -932,7 +932,7 @@
     --color-background-modal: hsl(212deg 28% 18%);
     --color-background-invitee-emails-pill-container: hsl(0deg 0% 0% / 20%);
     --color-unmuted-or-followed-topic-list-item: hsl(236deg 33% 90%);
-    --color-recipient-bar-controls-spinner: hsl(0deg 0% 100%);
+    --color-recipient-bar-controls-spinner: #233264;
     --color-background-search: hsl(0deg 0% 20%);
     --color-background-search-option-hover: hsl(0deg 0% 30%);
     --color-search-box-hover-shadow: hsl(0deg 0% 0% / 30%);

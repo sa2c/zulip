@@ -87,7 +87,7 @@ export function render(): void {
         $("#realm-night-logo-upload-widget .image-block").attr("src", realm.realm_night_logo_url);
     }
 
-    if (settings_data.using_dark_theme() && realm.realm_night_logo_source !== "D") {
+    if (settings_data.using_dark_theme()) {
         $("#realm-navbar-wide-logo").attr("src", realm.realm_night_logo_url);
     } else {
         $("#realm-navbar-wide-logo").attr("src", realm.realm_logo_url);

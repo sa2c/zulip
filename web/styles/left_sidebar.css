@@ -42,6 +42,11 @@ li.show-more-topics {
         /* 12px at 14px/1em */
         font-size: 0.8571em;
     }
+   background-color: #233264;
+   color: white;
+   border-radius: 0px 10px 0px 0px;
+   padding-top: 10px;
+   padding-bottom: 10px;
 }
 
 #streams_inline_icon,
@@ -168,11 +173,14 @@ li.show-more-topics {
 }
 
 #left_sidebar_scroll_container {
+    background-color: #233264;
+    color: #fff;
     outline: none;
     overflow: hidden auto;
     position: relative;
     z-index: 0;
     width: 100%;
+    border-radius: 0px 0px 35px 0px;
 
     .direct-messages-container {
         margin-left: 0;

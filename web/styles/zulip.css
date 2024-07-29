@@ -70,11 +70,16 @@ blockquote p {
 
 a {
     cursor: pointer;
+    color: #7283b4;
 
     &.message_label_clickable:hover {
         cursor: pointer;
-        color: hsl(200deg 100% 40%);
+        color: #d3e2f4;
     }
+}
+
+.close {
+    opacity: 0.7;
 }
 
 code,
@@ -585,6 +590,14 @@ body.has-overlay-scrollbar {
     position: relative;
 }
 
+.column-middle-inner.tab-content {
+    padding-right: 6px;
+}
+
+.column-middle.column-overlay.recipient-bar-main {
+    padding-right: 6px;
+}
+
 textarea,
 input {
     font-family: "Source Sans 3 VF", sans-serif;
@@ -1035,6 +1048,16 @@ strong {
     }
 }
 
+.nav > li > a:hover {
+    background-color: #435294;
+    text-shadow: 0 1px 0 hsla(0,0%,100%,.5);
+}
+
+.on_hover_topic_edit {
+    opacity: 0.25;
+    color: white;
+}
+
 .has_actions_popover .info {
     opacity: 1;
     visibility: visible;
@@ -1304,6 +1327,16 @@ nav {
         .left-sidebar-toggle-button .left-sidebar-toggle-unreadcount {
             top: 10px;
             left: 21px;
+        }
+        .company-name {
+            display: inline-block;
+            vertical-align: top;
+            margin-top: 12px;
+            margin-left: 8px;
+            font-size: 1.2rem;
+            letter-spacing: 0.1em;
+            color: #233264;
+            cursor: pointer;
         }
     }
 

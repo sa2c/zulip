@@ -86,7 +86,7 @@ them in your [Inbox](/#inbox).
 """)
 
         content = _("""
-Hello, and welcome to Zulip!👋 {inform_about_tracked_onboarding_messages_text}
+Hello, and welcome to ReCoN!👋 {inform_about_tracked_onboarding_messages_text}
 
 {getting_started_text} {organization_setup_text}
 

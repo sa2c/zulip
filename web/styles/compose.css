@@ -17,6 +17,7 @@
             min-width: inherit;
             line-height: var(--line-height-compose-buttons);
             padding: 3px 10px;
+            color: #233264;
         }
 
         .compose_mobile_button {
@@ -78,6 +79,11 @@
             overflow: hidden;
             white-space: nowrap;
             text-overflow: ellipsis;
+            opacity: 0.7;
+
+            .compose_reply_button_recipient_label {
+                color: hsl(215, 47%, 30%);
+            }
         }
 
         #new_conversation_button {
@@ -128,6 +134,10 @@
     display: flex;
     flex-flow: column;
     box-sizing: border-box;
+    background-color: #233264;
+    color: white;
+    border-radius: 5px 5px 0px 0px;
+    border-color: white;
 
     &:hover {
         .composebox-buttons > button {
@@ -460,7 +470,7 @@
     position: absolute;
     top: 0;
     right: 0;
-    color: var(--color-compose-send-control-button);
+    color: --color-compose-send-control-button;
     background: transparent;
     font-size: 12.5px;
     font-weight: normal;
@@ -491,6 +501,20 @@
     &:focus-visible {
         outline-color: var(--color-compose-focus-ring);
     }
+}
+
+.expand_composebox_button {
+    margin-right: 20px;
+}
+
+.collapse_composebox_button {
+    margin-right: 20px;
+}
+
+#compose_invite_users,
+#compose_private_stream_alert {
+    /* Don't overlap into the compose_close × */
+    margin-right: 10px;
 }
 
 .main-view-banner {

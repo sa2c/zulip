@@ -5,6 +5,11 @@ $user_status_emoji_width: 24px;
     & a:hover {
         text-decoration: none;
     }
+    background-color: #233264;
+    color: white;
+    padding-bottom: 10px;
+    padding-top: 10px;
+    border-radius: 10px 0px 0px 10px;
 }
 
 .right-sidebar-title {
