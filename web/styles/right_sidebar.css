@@ -163,7 +163,7 @@ $user_status_emoji_width: 24px;
     }
 
     & a {
-        color: inherit;
+        color: white;
         margin-left: 0;
     }
 }
@@ -172,12 +172,11 @@ $user_status_emoji_width: 24px;
     display: flex;
     align-items: center;
     cursor: pointer;
-    background-color: var(--color-background);
     line-height: 1;
     position: sticky;
     top: 0;
     z-index: 1;
-    color: var(--color-text-default);
+    color: var(--color-text-sidebar-heading);
 }
 
 .buddy-list-heading {

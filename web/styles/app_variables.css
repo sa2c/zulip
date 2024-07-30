@@ -508,8 +508,8 @@
 
     /* Colors used across the app */
     --color-date: hsl(0deg 0% 15% / 75%);
-    --color-background-private-message-header: hsl(46deg 35% 93%);
-    --color-background-private-message-content: hsl(45deg 20% 96%);
+    --color-background-private-message-header: #233264;
+    --color-background-private-message-content: #233264;
     --color-background-stream-message-content: hsl(0deg 0% 100%);
     --color-selected-message-outline: hsl(217deg 64% 59% / 60%);
     --color-message-list-border: hsl(0deg 0% 0% / 16%);
@@ -531,7 +531,7 @@
     --color-background-modal: hsl(0deg 0% 98%);
     --color-background-invitee-emails-pill-container: hsl(0deg 0% 100%);
     --color-unmuted-or-followed-topic-list-item: hsl(0deg 0% 20%);
-    --color-outline-focus: hsl(215deg 47% 50%);
+    --color-outline-focus: #7283b4;
     --color-background-search: hsl(0deg 0% 100%);
     --color-background-search-option-hover: hsl(0deg 0% 94%);
     --color-search-box-hover-shadow: hsl(0deg 0% 0% / 10%);
@@ -626,7 +626,7 @@
     --color-composebox-button-hover: var(--color-text-default);
     --color-composebox-button-background: hsl(0deg 100% 100% / 60%);
     --color-composebox-button-background-hover: hsl(0deg 0% 95%);
-    --color-message-formatting-controls-container: hsl(232deg 30% 96%);
+    --color-message-formatting-controls-container: #435294;
     --color-message-content-container-border: hsl(0deg 0% 0% / 10%);
     --color-message-content-container-border-focus: hsl(0deg 0% 57%);
     --color-compose-control-button-background-hover: hsl(0deg 0% 0% / 5%);
@@ -652,7 +652,7 @@
     --color-text-item: hsl(0deg 0% 40%);
     --color-text-personal-menu-no-status: hsl(0deg 0% 50%);
     --color-text-personal-menu-some-status: hsl(0deg 0% 40%);
-    --color-text-sidebar-heading: hsl(0deg 0% 43%);
+    --color-text-sidebar-heading: hsl(0deg 0% 70%);
     --color-text-sidebar-popover-menu: hsl(0deg 0% 20%);
     --color-text-user-card-secondary: var(--grey-550);
     --color-text-url: hsl(200deg 100% 40%);

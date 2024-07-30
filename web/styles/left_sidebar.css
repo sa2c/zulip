@@ -147,6 +147,8 @@ li.show-more-topics {
 
         .unread_count {
             display: inline;
+    background-color: #233264;
+    border-radius: 0 0 100px 0;
         }
     }
 
@@ -162,6 +164,11 @@ li.show-more-topics {
             opacity: 1;
         }
     }
+}
+
+.left-sidebar {
+    background-color: #233264;
+    border-radius: 0 0 100px 0;
 }
 
 .left-sidebar-navigation-area {
@@ -374,12 +381,12 @@ li.show-more-topics {
 ul.filters {
     list-style-type: none;
     margin-left: 0;
-    color: hsl(0deg 0% 20% / 100%);
+    color: white;
     /* Streams take a standard row height. */
     line-height: var(--line-height-sidebar-row);
 
     & a {
-        color: inherit;
+        color: white;
 
         &:focus {
             text-decoration: none;
@@ -1188,7 +1195,6 @@ li.topic-list-item {
     position: sticky;
     /* Keep sticky within SimpleBar context. */
     top: 0;
-    background-color: var(--color-background);
     /* Ideally, 0px should work here, but maybe simplebar is doing something
        that is creating `0.5px` extra gap in zoomed-in windows. */
     z-index: 1;
