@@ -1456,3 +1456,8 @@ li.topic-list-item {
         z-index: 1;
     }
 }
+
+.heading-markers-and-controls {
+    color: white;
+    opacity: 0.7;
+}
