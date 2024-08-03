@@ -509,7 +509,7 @@
     /* Colors used across the app */
     --color-date: hsl(0deg 0% 15% / 75%);
     --color-background-private-message-header: #233264;
-    --color-background-private-message-content: #7283b4;
+    --color-background-private-message-content: #b3c7fc;
     --color-background-stream-message-content: hsl(0deg 0% 100%);
     --color-selected-message-outline: hsl(217deg 64% 59% / 60%);
     --color-message-list-border: hsl(0deg 0% 0% / 16%);

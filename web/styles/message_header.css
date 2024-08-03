@@ -98,10 +98,10 @@
         font-weight: 600;
         height: 17px;
         line-height: 17px;
-        color: var(--color-text-message-header);
+        color: white;
 
         &:hover {
-            color: var(--color-text-message-header) !important;
+            color: white !important;
             text-decoration: none;
         }
 
