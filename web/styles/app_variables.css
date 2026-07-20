@@ -1470,7 +1470,7 @@
     );
 
     /* Text colors */
-    --color-text-default: light-dark(hsl(0deg 0% 20%), hsl(0deg 0% 87%));
+    --color-text-default: #7283b4;
     /* Unlike the light theme, the dark theme renders message
        text in the default color. */
     --color-text-message-default: black;
@@ -1781,13 +1781,10 @@
     );
 
     /* Markdown code colors */
-    --color-markdown-code-text: light-dark(
-        hsl(0deg 0% 0%),
-        hsl(0deg 0% 100% / 85%)
-    );
+    --color-markdown-code-text: black;
     --color-markdown-code-background: light-dark(
-        hsl(0deg 0% 0% / 6%),
-        hsl(0deg 0% 100% / 8%)
+        hsl(0deg 0% 100% / 8%),
+        hsl(0deg 0% 0% / 6%)
     );
     --color-markdown-code-background-mentions: light-dark(
         hsl(0deg 0% 0% / 7%),
@@ -1831,10 +1828,7 @@
         hsl(180deg 8% 65% / 100%),
         hsl(180deg 5% 50% / 100%)
     );
-    --color-message-action-visible: light-dark(
-        hsl(216deg 43% 20% / 50%),
-        hsl(217deg 41% 90% / 50%)
-    );
+    --color-message-action-visible: hsl(217deg 41% 40% / 40%);
     --color-message-action-interactive: light-dark(
         hsl(216deg 43% 20% / 100%),
         hsl(217deg 41% 90% / 100%)
@@ -3147,7 +3141,7 @@
     --box-shadow-unread-counter-normal: none;
 
     /* Text colors */
-    --color-text-sender-name: hsl(0deg 0% 100% / 85%);
+    --color-text-sender-name: #233264;
     --color-text-other-mention: hsl(0deg 0% 100% / 80%);
     --color-text-empty-list-message: hsl(0deg 0% 67%);
 
