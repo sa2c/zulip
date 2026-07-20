@@ -7,7 +7,6 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
     dependencies = [
         ("zerver", "0558_realmuserdefault_web_animate_image_previews_and_more"),
-        ("zerver", "0559_merge_20240803_0832"),
     ]
 
     operations = [
