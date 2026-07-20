@@ -20,6 +20,7 @@
 /zproject/apns-dev.pem
 /zproject/apns-dev-key.p8
 /zproject/dev-secrets.conf
+/zproject/dev_saml.cert
 /zproject/custom_dev_settings.py
 /tools/conf.ini
 /tools/custom_provision
@@ -31,13 +32,11 @@
 package-lock.json
 
 /.vagrant
-/var/*
-!/var/puppeteer
-/var/puppeteer/*
-!/var/puppeteer/test_credentials.d.ts
+/var
 
 /.dmypy.json
 /.ruff_cache
+/.venv
 
 # Generated i18n data
 /locale/en
@@ -60,8 +59,6 @@ zulip-git-version
 
 ## Files (or really symlinks) created in a prod deployment
 /zproject/prod_settings.py
-/zulip-current-venv
-/zulip-py3-venv
 
 ## Files left by various editors and local environments
 # (Ideally these should be in everyone's respective personal gitignore files.)

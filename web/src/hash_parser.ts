@@ -1,3 +1,7 @@
+// See the Zulip URL spec at https://zulip.com/api/zulip-urls
+
+import {type NarrowTerm, narrow_operator_schema} from "./state_data.ts";
+
 export function get_hash_category(hash?: string): string {
     // given "#channels/subscribed", returns "channels"
     return hash ? hash.replace(/^#/, "").split(/\//)[0]! : "";
@@ -36,17 +40,17 @@ export function get_current_hash_section(): string {
 
 export function is_same_server_message_link(url: string): boolean {
     // A same server message link always has category `narrow`,
-    // section `stream` or `dm`, and ends with `/near/<message_id>`,
+    // section `channel` or `dm`, and ends with `/near/<message_id>`,
     // where <message_id> is a sequence of digits.
     return (
         get_hash_category(url) === "narrow" &&
-        (get_hash_section(url) === "stream" || get_hash_section(url) === "dm") &&
+        (get_hash_section(url) === "channel" || get_hash_section(url) === "dm") &&
         get_nth_hash_section(url, -2) === "near" &&
         /^\d+$/.test(get_nth_hash_section(url, -1))
     );
 }
 
-export function is_overlay_hash(hash: string): boolean {
+export function is_overlay_hash(hash: string | undefined): boolean {
     // Hash changes within this list are overlays and should not unnarrow (etc.)
     const overlay_list = [
         // In 2024, stream was renamed to channel in the Zulip API and UI.
@@ -66,6 +70,7 @@ export function is_overlay_hash(hash: string): boolean {
         "search-operators",
         "about-zulip",
         "scheduled",
+        "reminders",
         "user",
     ];
     const main_hash = get_hash_category(hash);
@@ -116,7 +121,17 @@ export function is_in_specified_hash_category(hash_categories: string[]): boolea
     return hash_categories.includes(main_hash);
 }
 
-export const allowed_web_public_narrows = [
+export function is_an_allowed_web_public_narrow(
+    operator: NarrowTerm["operator"],
+    operand: NarrowTerm["operand"],
+): boolean {
+    if (operator === "is" && operand === "resolved") {
+        return true;
+    }
+    return allowed_web_public_narrow_operators.includes(operator);
+}
+
+export const allowed_web_public_narrow_operators = [
     "channels",
     "channel",
     "streams",
@@ -151,14 +166,26 @@ export function is_spectator_compatible(hash: string): boolean {
         "all_messages",
         "feed",
         "about-zulip",
+        "topics",
     ];
 
     const main_hash = get_hash_category(hash);
 
     if (main_hash === "narrow") {
-        const hash_section = get_hash_section(hash);
-        if (!allowed_web_public_narrows.includes(hash_section)) {
-            return false;
+        const hash_components = hash
+            .split(/\//)
+            .filter((hash_component) => hash_component !== "#narrow");
+
+        for (let i = 0; i < hash_components.length; i += 2) {
+            const hash_section = hash_components[i]!.replace(/^-/, "");
+            const second_hash_section = hash_components[i + 1]!;
+            const operator = narrow_operator_schema.safeParse(hash_section);
+            if (
+                !operator.success ||
+                !is_an_allowed_web_public_narrow(operator.data, second_hash_section)
+            ) {
+                return false;
+            }
         }
         return true;
     }

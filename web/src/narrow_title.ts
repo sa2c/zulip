@@ -1,15 +1,16 @@
-import _ from "lodash";
 import assert from "minimalistic-assert";
 
-import * as favicon from "./favicon";
-import type {Filter} from "./filter";
-import {$t} from "./i18n";
-import * as inbox_util from "./inbox_util";
-import * as people from "./people";
-import * as recent_view_util from "./recent_view_util";
-import {realm} from "./state_data";
-import * as unread from "./unread";
-import type {FullUnreadCountsData} from "./unread";
+import {electron_bridge} from "./electron_bridge.ts";
+import * as favicon from "./favicon.ts";
+import type {Filter} from "./filter.ts";
+import {$t} from "./i18n.ts";
+import * as inbox_util from "./inbox_util.ts";
+import * as people from "./people.ts";
+import * as recent_view_util from "./recent_view_util.ts";
+import {realm} from "./state_data.ts";
+import * as stream_data from "./stream_data.ts";
+import * as unread from "./unread.ts";
+import type {FullUnreadCountsData} from "./unread.ts";
 
 export let unread_count = 0;
 let pm_count = 0;
@@ -34,51 +35,31 @@ export function compute_narrow_title(filter?: Filter): string {
     }
 
     if (filter.has_operator("channel")) {
-        if (!filter._sub) {
+        const sub = stream_data.get_sub_by_id_string(
+            filter.terms_with_operator("channel")[0]!.operand,
+        );
+        if (!sub) {
             // The stream is not set because it does not currently
-            // exist (possibly due to a stream name change), or it
-            // is a private stream and the user is not subscribed.
+            // exist, or it is a private stream and the user is not
+            // subscribed.
             return filter_title;
         }
         if (filter.has_operator("topic")) {
-            const topic_name = filter.operands("topic")[0];
+            const topic_name = filter.terms_with_operator("topic")[0]!.operand;
             return "#" + filter_title + " > " + topic_name;
         }
         return "#" + filter_title;
     }
 
     if (filter.has_operator("dm")) {
-        const emails = filter.operands("dm")[0]!;
-        const user_ids = people.emails_strings_to_user_ids_string(emails);
+        const user_ids = filter.terms_with_operator("dm")[0]!.operand;
 
-        if (user_ids !== undefined) {
-            return people.get_recipients(user_ids);
+        if (people.is_valid_user_ids(user_ids)) {
+            return people.format_recipients(String(user_ids), "long");
         }
-        if (emails.includes(",")) {
+
+        if (user_ids.length > 1) {
             return $t({defaultMessage: "Invalid users"});
-        }
-        return $t({defaultMessage: "Invalid user"});
-    }
-
-    if (
-        _.isEqual(filter._sorted_term_types, ["sender", "has-reaction"]) &&
-        filter.operands("sender")[0] === people.my_current_email()
-    ) {
-        return $t({defaultMessage: "Reactions"});
-    }
-
-    if (filter.has_operator("sender")) {
-        const user = people.get_by_email(filter.operands("sender")[0]!);
-        if (user) {
-            if (people.is_my_user_id(user.user_id)) {
-                return $t({defaultMessage: "Messages sent by you"});
-            }
-            return $t(
-                {defaultMessage: "Messages sent by {sender}"},
-                {
-                    sender: user.full_name,
-                },
-            );
         }
         return $t({defaultMessage: "Invalid user"});
     }
@@ -113,11 +94,9 @@ export function update_unread_counts(counts: FullUnreadCountsData): void {
     favicon.update_favicon(unread_count, pm_count);
 
     // Notify the current desktop app's UI about the new unread count.
-    if (window.electron_bridge !== undefined) {
-        window.electron_bridge.send_event("total_unread_count", unread_count);
-    }
+    electron_bridge?.send_event("total_unread_count", unread_count);
 
-    // TODO: Add a `window.electron_bridge.updateDirectMessageCount(new_pm_count);` call?
+    // TODO: Add a `electron_bridge.updateDirectMessageCount(new_pm_count);` call?
     redraw_title();
 }
 

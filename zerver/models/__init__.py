@@ -3,9 +3,11 @@ from zerver.models.alert_words import AlertWord as AlertWord
 from zerver.models.bots import BotConfigData as BotConfigData
 from zerver.models.bots import BotStorageData as BotStorageData
 from zerver.models.bots import Service as Service
+from zerver.models.channel_folders import ChannelFolder as ChannelFolder
 from zerver.models.clients import Client as Client
 from zerver.models.custom_profile_fields import CustomProfileField as CustomProfileField
 from zerver.models.custom_profile_fields import CustomProfileFieldValue as CustomProfileFieldValue
+from zerver.models.devices import Device as Device
 from zerver.models.drafts import Draft as Draft
 from zerver.models.groups import GroupGroupMembership as GroupGroupMembership
 from zerver.models.groups import NamedUserGroup as NamedUserGroup
@@ -32,6 +34,7 @@ from zerver.models.messages import Reaction as Reaction
 from zerver.models.messages import SubMessage as SubMessage
 from zerver.models.messages import UserMessage as UserMessage
 from zerver.models.muted_users import MutedUser as MutedUser
+from zerver.models.navigation_views import NavigationView as NavigationView
 from zerver.models.onboarding_steps import OnboardingStep as OnboardingStep
 from zerver.models.prereg_users import EmailChangeStatus as EmailChangeStatus
 from zerver.models.prereg_users import MultiuseInvite as MultiuseInvite
@@ -49,8 +52,10 @@ from zerver.models.realm_playgrounds import RealmPlayground as RealmPlayground
 from zerver.models.realms import Realm as Realm
 from zerver.models.realms import RealmAuthenticationMethod as RealmAuthenticationMethod
 from zerver.models.realms import RealmDomain as RealmDomain
+from zerver.models.realms import RealmExport as RealmExport
 from zerver.models.recipients import DirectMessageGroup as DirectMessageGroup
 from zerver.models.recipients import Recipient as Recipient
+from zerver.models.saved_snippets import SavedSnippet as SavedSnippet
 from zerver.models.scheduled_jobs import AbstractScheduledJob as AbstractScheduledJob
 from zerver.models.scheduled_jobs import MissedMessageEmailAddress as MissedMessageEmailAddress
 from zerver.models.scheduled_jobs import ScheduledEmail as ScheduledEmail
@@ -58,6 +63,7 @@ from zerver.models.scheduled_jobs import ScheduledMessage as ScheduledMessage
 from zerver.models.scheduled_jobs import (
     ScheduledMessageNotificationEmail as ScheduledMessageNotificationEmail,
 )
+from zerver.models.streams import ChannelEmailAddress as ChannelEmailAddress
 from zerver.models.streams import DefaultStream as DefaultStream
 from zerver.models.streams import DefaultStreamGroup as DefaultStreamGroup
 from zerver.models.streams import Stream as Stream

@@ -1,61 +1,60 @@
 import $ from "jquery";
 import Cookies from "js-cookie";
 import assert from "minimalistic-assert";
+import type * as tippy from "tippy.js";
+import * as z from "zod/mini";
 
 import render_dialog_default_language from "../templates/default_language_modal.hbs";
 
-import * as channel from "./channel";
-import * as dialog_widget from "./dialog_widget";
-import * as emojisets from "./emojisets";
-import * as hash_parser from "./hash_parser";
-import {$t_html, get_language_list_columns, get_language_name} from "./i18n";
-import {
-    LEGACY_FONT_SIZE_PX,
-    LEGACY_LINE_HEIGHT_PERCENT,
-    NON_COMPACT_MODE_FONT_SIZE_PX,
-    NON_COMPACT_MODE_LINE_HEIGHT_PERCENT,
-} from "./information_density";
-import * as loading from "./loading";
-import * as overlays from "./overlays";
-import {page_params} from "./page_params";
-import type {RealmDefaultSettings} from "./realm_user_settings_defaults";
-import * as settings_components from "./settings_components";
-import type {GenericUserSettings} from "./settings_config";
-import type {RequestOpts} from "./settings_ui";
-import * as settings_ui from "./settings_ui";
-import {realm} from "./state_data";
-import * as ui_report from "./ui_report";
-import {user_settings} from "./user_settings";
-import type {UserSettings} from "./user_settings";
+import * as channel from "./channel.ts";
+import * as dialog_widget from "./dialog_widget.ts";
+import * as dropdown_widget from "./dropdown_widget.ts";
+import * as emojisets from "./emojisets.ts";
+import {$t, $t_html, get_language_list_columns} from "./i18n.ts";
+import * as information_density from "./information_density.ts";
+import * as loading from "./loading.ts";
+import * as overlays from "./overlays.ts";
+import {page_params} from "./page_params.ts";
+import type {RealmDefaultSettings} from "./realm_user_settings_defaults.ts";
+import * as settings_components from "./settings_components.ts";
+import type {RequestOpts} from "./settings_ui.ts";
+import * as settings_ui from "./settings_ui.ts";
+import * as ui_report from "./ui_report.ts";
+import {user_settings, user_settings_schema} from "./user_settings.ts";
+import type {UserSettings} from "./user_settings.ts";
+import * as util from "./util.ts";
 
-type SettingsPanel = {
+export type SettingsPanel = {
     container: string;
-    settings_object: GenericUserSettings;
-    for_realm_settings: boolean;
     notification_sound_elem: string | null;
-};
+} & (
+    | {
+          settings_object: UserSettings;
+          for_realm_settings: false;
+      }
+    | {
+          settings_object: RealmDefaultSettings;
+          for_realm_settings: true;
+      }
+);
 
-type UserSettingsProperty = Exclude<
-    keyof UserSettings,
-    "available_notification_sounds" | "emojiset_choices"
->;
+export const user_settings_property_schema = z.keyof(
+    z.omit(user_settings_schema, {available_notification_sounds: true, emojiset_choices: true}),
+);
+type UserSettingsProperty = z.output<typeof user_settings_property_schema>;
 
 const meta = {
     loaded: false,
 };
 
 export let user_settings_panel: SettingsPanel;
-
-export let user_default_language_name: string | undefined;
-
-export function set_default_language_name(name: string | undefined): void {
-    user_default_language_name = name;
-}
+let default_language_dropdown_widget: dropdown_widget.DropdownWidget;
 
 function change_display_setting(
     data: Record<string, string | boolean | number>,
     $status_el: JQuery,
     success_continuation?: (response_data: unknown) => void,
+    error_continuation?: (response_data: unknown) => void,
     success_msg_html?: string,
     sticky?: boolean,
 ): void {
@@ -70,6 +69,10 @@ function change_display_setting(
 
     if (success_continuation !== undefined) {
         opts.success_continuation = success_continuation;
+    }
+
+    if (error_continuation !== undefined) {
+        opts.error_continuation = error_continuation;
     }
 
     if (sticky && success_msg_html) {
@@ -98,102 +101,24 @@ function spectator_default_language_modal_post_render(): void {
         });
 }
 
-function org_notification_default_language_modal_post_render(): void {
-    $("#language_selection_modal")
-        .find(".language")
-        .on("click", (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            dialog_widget.close();
+export function launch_default_language_setting_modal_for_spectator(): void {
+    const selected_language = user_settings.default_language;
 
-            const $link = $(e.target).closest("a[data-code]");
-            const setting_value = $link.attr("data-code");
-            assert(setting_value !== undefined);
-            const new_language = $link.attr("data-name");
-            assert(new_language !== undefined);
-            const $language_element = $(
-                "#org-notifications .language_selection_widget .language_selection_button span",
-            );
-            $language_element.text(new_language);
-            $language_element.attr("data-language-code", setting_value);
-            settings_components.save_discard_realm_settings_widget_status_handler(
-                $("#org-notifications"),
-            );
-        });
-}
-
-function user_default_language_modal_post_render(): void {
-    $("#language_selection_modal")
-        .find(".language")
-        .on("click", (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            dialog_widget.close();
-
-            const $link = $(e.target).closest("a[data-code]");
-            const setting_value = $link.attr("data-code");
-            assert(setting_value !== undefined);
-            const data = {default_language: setting_value};
-
-            const new_language = $link.attr("data-name");
-            assert(new_language !== undefined);
-            $("#user-preferences .language_selection_widget .language_selection_button span").text(
-                new_language,
-            );
-            $("#user-preferences .language_selection_widget .language_selection_button span").attr(
-                "data-language-code",
-                setting_value,
-            );
-
-            change_display_setting(
-                data,
-                $("#settings_content").find(".general-settings-status"),
-                undefined,
-                $t_html(
-                    {
-                        defaultMessage:
-                            "Saved. Please <z-link>reload</z-link> for the change to take effect.",
-                    },
-                    {
-                        "z-link": (content_html) =>
-                            `<a class='reload_link'>${content_html.join("")}</a>`,
-                    },
-                ),
-                true,
-            );
-        });
-}
-
-function default_language_modal_post_render(): void {
-    if (page_params.is_spectator) {
-        spectator_default_language_modal_post_render();
-    } else if (hash_parser.get_current_hash_category() === "organization") {
-        org_notification_default_language_modal_post_render();
-    } else {
-        user_default_language_modal_post_render();
-    }
-}
-
-export function launch_default_language_setting_modal(): void {
-    let selected_language = user_settings.default_language;
-
-    if (hash_parser.get_current_hash_category() === "organization") {
-        selected_language = realm.realm_default_language;
-    }
-
-    const html_body = render_dialog_default_language({
-        language_list: get_language_list_columns(selected_language),
+    const modal_content_html = render_dialog_default_language({
+        language_list: get_language_list_columns(selected_language).toSorted((a, b) =>
+            util.strcmp(a.name_with_percent, b.name_with_percent),
+        ),
     });
 
     dialog_widget.launch({
-        html_heading: $t_html({defaultMessage: "Select language"}),
-        html_body,
-        html_submit_button: $t_html({defaultMessage: "Close"}),
+        modal_title_html: $t_html({defaultMessage: "Select language"}),
+        modal_content_html,
+        modal_submit_button_text: $t({defaultMessage: "Close"}),
         id: "language_selection_modal",
         close_on_submit: true,
         focus_submit_on_open: true,
         single_footer_button: true,
-        post_render: default_language_modal_post_render,
+        post_render: spectator_default_language_modal_post_render,
         on_click() {
             // We perform no actions since the 'close_on_submit' field takes care
             // of closing the modal.
@@ -212,7 +137,11 @@ export function set_up(settings_panel: SettingsPanel): void {
     $container
         .find(".setting_demote_inactive_streams")
         .val(settings_object.demote_inactive_streams);
-    $container.find(".setting_color_scheme").val(settings_object.color_scheme);
+    $container
+        .find(
+            `.setting_color_scheme[value='${CSS.escape(settings_object.color_scheme.toString())}']`,
+        )
+        .prop("checked", true);
     $container.find(".setting_web_home_view").val(settings_object.web_home_view);
     $container
         .find(".setting_twenty_four_hour_time")
@@ -237,61 +166,91 @@ export function set_up(settings_panel: SettingsPanel): void {
         .find(".setting_web_stream_unreads_count_display_policy")
         .val(settings_object.web_stream_unreads_count_display_policy);
 
-    update_information_density_settings_visibility($container, settings_object, {});
+    information_density.enable_or_disable_control_buttons($container);
 
     if (for_realm_settings) {
         // For the realm-level defaults page, we use the common
-        // settings_org.js handlers, so we can return early here.
+        // settings_org.ts handlers, so we can return early here.
         return;
     }
 
     // Common handler for sending requests to the server when an input
     // element is changed.
-    $container.on(
-        "change",
-        "input[type=checkbox], .information-density-settings input[type=text], select",
-        function (this: HTMLElement, e) {
-            const $input_elem = $(e.currentTarget);
-            const setting = $input_elem.attr("name");
-            assert(setting !== undefined);
-            const data: Record<string, string | boolean | number> = {};
-            const setting_value = settings_components.get_input_element_value(this)!;
-            data[setting] = setting_value;
+    $container.on("change", "input[type=checkbox], select", function (this: HTMLElement, e) {
+        const $input_elem = $(e.currentTarget);
+        const setting = $input_elem.attr("name");
+        assert(setting !== undefined);
+        const data: Record<string, string | boolean | number> = {};
+        const setting_value = settings_components.get_input_element_value(this)!;
+        assert(typeof setting_value !== "object");
+        data[setting] = setting_value;
 
-            if (setting === "dense_mode") {
-                data.web_font_size_px = setting_value
-                    ? LEGACY_FONT_SIZE_PX
-                    : NON_COMPACT_MODE_FONT_SIZE_PX;
-                data.web_line_height_percent = setting_value
-                    ? LEGACY_LINE_HEIGHT_PERCENT
-                    : NON_COMPACT_MODE_LINE_HEIGHT_PERCENT;
-            }
+        const $status_element = $input_elem
+            .closest(".subsection-parent")
+            .find(".alert-notification");
+        change_display_setting(data, $status_element);
+    });
 
-            if (
-                ((setting === "web_font_size_px" && setting_value !== LEGACY_FONT_SIZE_PX) ||
-                    (setting === "web_line_height_percent" &&
-                        setting_value !== LEGACY_LINE_HEIGHT_PERCENT)) &&
-                user_settings.dense_mode
-            ) {
-                data.dense_mode = false;
-            }
+    $container.find(".info-density-button").on("click", function (this: HTMLElement, e) {
+        e.preventDefault();
+        const changed_property = z
+            .enum(["web_font_size_px", "web_line_height_percent"])
+            .parse($(this).closest(".button-group").attr("data-property"));
+        const original_value = user_settings[changed_property];
 
-            let success_continuation;
-            if (["dense_mode", "web_font_size_px", "web_line_height_percent"].includes(setting)) {
-                success_continuation = () => {
-                    update_information_density_settings_visibility(
-                        $container,
-                        settings_object,
-                        data,
-                    );
-                };
-            }
-            const $status_element = $input_elem
-                .closest(".subsection-parent")
-                .find(".alert-notification");
-            change_display_setting(data, $status_element, success_continuation);
-        },
-    );
+        const new_value = information_density.update_information_density_settings(
+            $(this),
+            changed_property,
+            true,
+        );
+        const data = {[changed_property]: new_value};
+
+        const $status_element = $(this).closest(".subsection-parent").find(".alert-notification");
+        information_density.enable_or_disable_control_buttons($container);
+
+        const error_continuation: () => void = () => {
+            information_density.update_information_density_settings(
+                $(this),
+                changed_property,
+                true,
+                original_value,
+            );
+            information_density.enable_or_disable_control_buttons($container);
+        };
+        change_display_setting(data, $status_element, undefined, error_continuation);
+    });
+
+    $container.find(".setting_color_scheme").on("change", function () {
+        const $input_elem = $(this);
+        const new_theme_code = $input_elem.val();
+        assert(new_theme_code !== undefined);
+
+        const $status_element = $input_elem
+            .closest(".subsection-parent")
+            .find(".alert-notification");
+
+        const opts: RequestOpts = {
+            error_continuation() {
+                setTimeout(() => {
+                    const prev_theme_code = user_settings.color_scheme;
+                    $input_elem
+                        .parent()
+                        .find(
+                            `.setting_color_scheme[value='${CSS.escape(prev_theme_code.toString())}']`,
+                        )
+                        .prop("checked", true);
+                }, 500);
+            },
+        };
+
+        settings_ui.do_settings_change(
+            channel.patch,
+            "/json/settings",
+            {color_scheme: new_theme_code},
+            $status_element,
+            opts,
+        );
+    });
 
     $container.find(".setting_emojiset_choice").on("click", function () {
         const data = {emojiset: $(this).val()};
@@ -344,6 +303,8 @@ export function set_up(settings_panel: SettingsPanel): void {
             },
         });
     });
+
+    render_language_dropdown_widget();
 }
 
 export async function report_emojiset_change(settings_panel: SettingsPanel): Promise<void> {
@@ -356,7 +317,7 @@ export async function report_emojiset_change(settings_panel: SettingsPanel): Pro
     await emojisets.select(settings_panel.settings_object.emojiset);
 
     const $spinner = $(settings_panel.container).find(".emoji-preferences-settings-status");
-    if ($spinner.length) {
+    if ($spinner.length > 0) {
         loading.destroy_indicator($spinner);
         ui_report.success(
             $t_html({defaultMessage: "Emoji set changed successfully!"}),
@@ -376,7 +337,7 @@ export function report_user_list_style_change(settings_panel: SettingsPanel): vo
     // implementation is wrong, though, in that it displays the UI
     // update in all active browser windows.
     const $spinner = $(settings_panel.container).find(".information-settings-status");
-    if ($spinner.length) {
+    if ($spinner.length > 0) {
         loading.destroy_indicator($spinner);
         ui_report.success(
             $t_html({defaultMessage: "User list style changed successfully!"}),
@@ -394,13 +355,6 @@ export function update_page(property: UserSettingsProperty): void {
     }
     const $container = $(user_settings_panel.container);
     let value = user_settings[property];
-
-    // The default_language button text updates to the language
-    // name and not the value of the user_settings property.
-    if (property === "default_language") {
-        $container.find(".default_language_name").text(user_default_language_name ?? "");
-        return;
-    }
 
     // settings_org.set_input_element_value doesn't support radio
     // button widgets like these.
@@ -420,41 +374,57 @@ export function update_page(property: UserSettingsProperty): void {
     settings_components.set_input_element_value($input_elem, value);
 }
 
-export function update_information_density_settings_visibility(
-    $container: JQuery,
-    settings_object: UserSettings | RealmDefaultSettings,
-    request_data: Record<string, boolean | number | string>,
+function language_select_callback(
+    event: JQuery.ClickEvent,
+    dropdown: tippy.Instance,
+    widget: dropdown_widget.DropdownWidget,
 ): void {
-    if (page_params.development_environment) {
-        $container.find(".information-density-settings").show();
+    dropdown.hide();
+    event.preventDefault();
+    event.stopPropagation();
+    widget.render();
+
+    const current_value = widget.current_value;
+    assert(current_value !== undefined);
+    const data = {default_language: current_value};
+    change_display_setting(
+        data,
+        $("#user-preferences").find(".general-settings-status"),
+        undefined,
+        undefined,
+        $t_html(
+            {
+                defaultMessage:
+                    "Saved. Please <z-link>reload</z-link> for the change to take effect.",
+            },
+            {
+                "z-link": (content_html) => `<a class='reload_link'>${content_html.join("")}</a>`,
+            },
+        ),
+        true,
+    );
+}
+
+export function set_default_language(default_language: string): void {
+    if (!default_language_dropdown_widget) {
         return;
     }
+    default_language_dropdown_widget.render(default_language);
+}
 
-    const dense_mode = request_data.dense_mode ?? settings_object.dense_mode;
-    const web_font_size_px = request_data.web_font_size_px ?? settings_object.web_font_size_px;
-    const web_line_height_percent =
-        request_data.web_line_height_percent ?? settings_object.web_line_height_percent;
-
-    if (dense_mode) {
-        $container.find(".information-density-settings").hide();
-        return;
-    }
-
-    if (
-        web_font_size_px === NON_COMPACT_MODE_FONT_SIZE_PX &&
-        web_line_height_percent === NON_COMPACT_MODE_LINE_HEIGHT_PERCENT
-    ) {
-        $container.find(".information-density-settings").hide();
-        return;
-    }
-
-    $container.find(".information-density-settings").show();
+function render_language_dropdown_widget(): void {
+    default_language_dropdown_widget = new dropdown_widget.DropdownWidget({
+        widget_name: "default_language",
+        get_options: settings_components.language_options,
+        item_click_callback: language_select_callback,
+        default_id: user_settings.default_language,
+        $events_container: $("#user-preferences .preferences-settings-form"),
+        unique_id_type: "string",
+    });
+    default_language_dropdown_widget.setup();
 }
 
 export function initialize(): void {
-    const user_language_name = get_language_name(user_settings.default_language);
-    set_default_language_name(user_language_name);
-
     user_settings_panel = {
         container: "#user-preferences",
         settings_object: user_settings,

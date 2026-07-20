@@ -1,9 +1,6 @@
-import inspect
 import os
-import types
-from collections import abc
-from collections.abc import Callable, Mapping, Sequence
-from typing import Any, Union, get_args, get_origin
+from collections.abc import Callable, Mapping
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import yaml
@@ -12,7 +9,7 @@ from django.urls import URLPattern
 from django.utils import regex_helper
 from pydantic import TypeAdapter
 
-from zerver.lib.request import _REQ, arguments_map
+from zerver.lib.request import arguments_map
 from zerver.lib.rest import rest_dispatch
 from zerver.lib.test_classes import ZulipTestCase
 from zerver.lib.typed_endpoint import parse_view_func_signature
@@ -33,6 +30,7 @@ from zerver.openapi.openapi import (
     validate_schema,
 )
 from zerver.tornado.views import get_events, get_events_backend
+from zilencer.auth import remote_server_dispatch
 
 TEST_ENDPOINT = "/messages/{message_id}"
 TEST_METHOD = "patch"
@@ -45,6 +43,7 @@ VARMAP = {
     "boolean": bool,
     "object": dict,
     "NoneType": type(None),
+    "number": float,
 }
 
 
@@ -74,7 +73,7 @@ class OpenAPIToolsTest(ZulipTestCase):
     """
 
     def test_get_openapi_fixture(self) -> None:
-        actual = get_openapi_fixture(TEST_ENDPOINT, TEST_METHOD, TEST_RESPONSE_BAD_REQ)
+        actual = get_openapi_fixture(TEST_ENDPOINT, TEST_METHOD, TEST_RESPONSE_BAD_REQ)[0]["value"]
         expected = {
             "code": "BAD_REQUEST",
             "msg": "You don't have permission to edit this message",
@@ -206,47 +205,32 @@ class OpenAPIArgumentsTest(ZulipTestCase):
     # This will be filled during test_openapi_arguments:
     checked_endpoints: set[str] = set()
     pending_endpoints = {
+        #### For current endpoint documentation priorities see
+        #### https://chat.zulip.org/#narrow/channel/412-api-documentation/topic/Undocumented.20endpoint.20priorities/with/2397881
         #### TODO: These endpoints are a priority to document:
         # These are a priority to document but don't match our normal URL schemes
         # and thus may be complicated to document with our current tooling.
         # (No /api/v1/ or /json prefix).
         "/avatar/{email_or_id}",
-        ## This one is in zulip.yaml, but not the actual docs.
-        # "/api/v1/user_uploads/{realm_id_str}/{filename}",
-        ## And this one isn't, and isn't really representable
+        ## This one isn't really representable
         # "/user_uploads/{realm_id_str}/{filename}",
         #### These realm administration settings are valuable to document:
-        # List data exports for organization (GET) or request one (POST)
-        "/export/realm",
         # Delete a data export.
         "/export/realm/{export_id}",
-        # Manage default streams and default stream groups
+        # Default stream groups are an unfinished feature and therefore
+        # shouldn't be added to the documentation until that's completed.
         "/default_stream_groups/create",
         "/default_stream_groups/{group_id}",
         "/default_stream_groups/{group_id}/streams",
-        # Single-stream settings alternative to the bulk endpoint
-        # users/me/subscriptions/properties; probably should just be a
-        # section of the same page.
-        "/users/me/subscriptions/{stream_id}",
-        #### Mobile-app only endpoints; important for mobile developers.
-        # Mobile interface for development environment login
-        "/dev_list_users",
         #### These personal settings endpoints have modest value to document:
         "/users/me/avatar",
-        "/users/me/api_key/regenerate",
-        # Much more valuable would be an org admin bulk-upload feature.
-        "/users/me/profile_data",
         #### Should be documented as part of interactive bots documentation
-        "/bot_storage",
         "/submessage",
         "/zcommand",
         #### These "organization settings" endpoint have modest value to document:
         "/realm",
-        "/realm/domains",
-        "/realm/domains/{domain}",
         "/bots",
         "/bots/{bot_id}",
-        "/bots/{bot_id}/api_key/regenerate",
         #### These "organization settings" endpoints have low value to document:
         "/realm/profile_fields/{field_id}",
         "/realm/icon",
@@ -263,7 +247,17 @@ class OpenAPIArgumentsTest(ZulipTestCase):
         "/rest-error-handling",
         # Zulip outgoing webhook payload
         "/zulip-outgoing-webhook",
-        "/jwt/fetch_api_key",
+        #### Bouncer endpoints
+        # Higher priority to document
+        "/remotes/push/e2ee/notify",
+        # Lower priority to document
+        "/remotes/server/register",
+        "/remotes/server/register/transfer",
+        "/remotes/server/register/verify_challenge",
+        "/remotes/server/deactivate",
+        "/remotes/server/analytics",
+        "/remotes/server/analytics/status",
+        "/remotes/server/billing",
     }
 
     # Endpoints in the API documentation that don't use rest_dispatch
@@ -271,6 +265,7 @@ class OpenAPIArgumentsTest(ZulipTestCase):
     documented_post_only_endpoints = {
         "fetch_api_key",
         "dev_fetch_api_key",
+        "jwt/fetch_api_key",
     }
 
     # Endpoints where the documentation is currently failing our
@@ -309,43 +304,6 @@ so maybe we shouldn't mark it as intentionally undocumented in the URLs.
             for undocumented_path in undocumented_paths:
                 msg += f"\n + {undocumented_path}"
             raise AssertionError(msg)
-
-    def get_type_by_priority(
-        self, types: Sequence[type | tuple[type, object]]
-    ) -> type | tuple[type, object]:
-        priority = {list: 1, dict: 2, str: 3, int: 4, bool: 5}
-        tyiroirp = {1: list, 2: dict, 3: str, 4: int, 5: bool}
-        val = 6
-        for t in types:
-            if isinstance(t, tuple):
-                return t  # e.g. (list, dict) or (list, str)
-            v = priority.get(t, 6)
-            if v < val:
-                val = v
-        return tyiroirp.get(val, types[0])
-
-    def get_standardized_argument_type(self, t: Any) -> type | tuple[type, object]:
-        """Given a type from the typing module such as List[str] or Union[str, int],
-        convert it into a corresponding Python type. Unions are mapped to a canonical
-        choice among the options.
-        E.g. typing.Union[typing.List[typing.Dict[str, typing.Any]], NoneType]
-        needs to be mapped to list."""
-
-        origin = get_origin(t)
-
-        if origin is None:
-            # Then it's most likely one of the fundamental data types
-            # I.E. Not one of the data types from the "typing" module.
-            return t
-        elif origin in (Union, types.UnionType):
-            subtypes = [self.get_standardized_argument_type(st) for st in get_args(t)]
-            return self.get_type_by_priority(subtypes)
-        elif origin in [list, abc.Sequence]:
-            [st] = get_args(t)
-            return (list, self.get_standardized_argument_type(st))
-        elif origin in [dict, abc.Mapping]:
-            return dict
-        raise AssertionError(f"Unknown origin {origin}")
 
     def render_openapi_type_exception(
         self,
@@ -430,17 +388,25 @@ do not match the types declared in the implementation of {function.__name__}.\n"
             # matching that of our OpenAPI spec. If not so, hint that the
             # Json[T] wrapper might be missing from the type annotation.
             if actual_param.request_var_name in json_request_var_names:
-                self.assertEqual(
-                    actual_param_schema.get("contentMediaType"),
-                    "application/json",
-                    USE_JSON_CONTENT_TYPE_HINT.format(
-                        param_name=actual_param.param_name,
-                        param_type=actual_param.param_type,
-                    ),
-                )
-                # actual_param_schema is a json_schema. Reference:
-                # https://docs.pydantic.dev/latest/api/json_schema/#pydantic.json_schema.GenerateJsonSchema.json_schema
-                actual_param_schema = actual_param_schema["contentSchema"]
+                # skipping this check for send_message_backend 'to' parameter because it is a
+                # special case where the content type of the parameter is application/json but the
+                # parameter may or may not be JSON encoded since previously we also accepted a raw
+                # string and some ad-hoc bot might still depend on sending a raw string.
+                if (
+                    function.__name__ != "send_message_backend"
+                    or actual_param.param_name != "req_to"
+                ):
+                    self.assertEqual(
+                        actual_param_schema.get("contentMediaType"),
+                        "application/json",
+                        USE_JSON_CONTENT_TYPE_HINT.format(
+                            param_name=actual_param.param_name,
+                            param_type=actual_param.param_type,
+                        ),
+                    )
+                    # actual_param_schema is a json_schema. Reference:
+                    # https://docs.pydantic.dev/latest/api/json_schema/#pydantic.json_schema.GenerateJsonSchema.json_schema
+                    actual_param_schema = actual_param_schema["contentSchema"]
             elif "contentMediaType" in actual_param_schema:
                 function_schema_type = schema_type(actual_param_schema, defs_mapping)
                 # We do not specify that the content type of int or bool
@@ -450,7 +416,7 @@ do not match the types declared in the implementation of {function.__name__}.\n"
                 self.assertIn(
                     function_schema_type,
                     (int, bool),
-                    f'\nUnexpected content type {actual_param_schema["contentMediaType"]} on function parameter {actual_param.param_name}, which does not match the OpenAPI definition.',
+                    f"\nUnexpected content type {actual_param_schema['contentMediaType']} on function parameter {actual_param.param_name}, which does not match the OpenAPI definition.",
                 )
             function_params.add(
                 (actual_param.request_var_name, schema_type(actual_param_schema, defs_mapping))
@@ -468,79 +434,14 @@ do not match the types declared in the implementation of {function.__name__}.\n"
         OpenAPI data defines a different type than that actually accepted by the function.
         Otherwise, we print out the exact differences for convenient debugging and raise an
         AssertionError."""
-        # Iterate through the decorators to find the original function, wrapped
-        # by has_request_variables/typed_endpoint, so we can parse its
+        # Iterate through the decorators to find the original
+        # function, wrapped by typed_endpoint, so we can parse its
         # arguments.
-        use_endpoint_decorator = False
         while (wrapped := getattr(function, "__wrapped__", None)) is not None:
-            # TODO: Remove this check once we replace has_request_variables with
-            # typed_endpoint.
-            if getattr(function, "use_endpoint", False):
-                use_endpoint_decorator = True
             function = wrapped
 
-        if use_endpoint_decorator:
+        if len(openapi_parameters) > 0:
             return self.validate_json_schema(function, openapi_parameters)
-
-        openapi_params: set[tuple[str, type | tuple[type, object]]] = set()
-        json_params: dict[str, type | tuple[type, object]] = {}
-        for openapi_parameter in openapi_parameters:
-            name = openapi_parameter.name
-            if openapi_parameter.json_encoded:
-                # If content_type is application/json, then the
-                # parameter needs to be handled specially, as REQ can
-                # either return the application/json as a string or it
-                # can either decode it and return the required
-                # elements. For example `to` array in /messages: POST
-                # is processed by REQ as a string and then its type is
-                # checked in the view code.
-                #
-                # Meanwhile `profile_data` in /users/{user_id}: GET is
-                # taken as array of objects. So treat them separately.
-                json_params[name] = schema_type(openapi_parameter.value_schema)
-                continue
-            openapi_params.add((name, schema_type(openapi_parameter.value_schema)))
-
-        function_params: set[tuple[str, type | tuple[type, object]]] = set()
-
-        for pname, defval in inspect.signature(function).parameters.items():
-            defval = defval.default
-            if isinstance(defval, _REQ):
-                # TODO: The below inference logic in cases where
-                # there's a converter function declared is incorrect.
-                # Theoretically, we could restructure the converter
-                # function model so that we can check what type it
-                # excepts to be passed to make validation here
-                # possible.
-
-                vtype = self.get_standardized_argument_type(function.__annotations__[pname])
-                vname = defval.post_var_name
-                assert vname is not None
-                if vname in json_params:
-                    # Here we have two cases.  If the REQ type is
-                    # string then there is no point in comparing as
-                    # JSON can always be returned as string.  Ideally,
-                    # we wouldn't use REQ for a JSON object without a
-                    # validator in these cases, but it does happen.
-                    #
-                    # If the REQ type is not string then, insert the
-                    # REQ and OpenAPI data types of the variable in
-                    # the respective sets so that they can be dealt
-                    # with later.  In either case remove the variable
-                    # from `json_params`.
-                    if vtype is str:
-                        json_params.pop(vname, None)
-                        continue
-                    else:
-                        openapi_params.add((vname, json_params[vname]))
-                        json_params.pop(vname, None)
-                function_params.add((vname, vtype))
-
-        # After the above operations `json_params` should be empty.
-        assert len(json_params) == 0
-        diff = openapi_params - function_params
-        if diff:  # nocoverage
-            self.render_openapi_type_exception(function, openapi_params, function_params, diff)
 
     def check_openapi_arguments_for_view(
         self,
@@ -550,7 +451,7 @@ do not match the types declared in the implementation of {function.__name__}.\n"
         method: str,
         tags: set[str],
     ) -> None:
-        # Our accounting logic in the `has_request_variables()`
+        # Our accounting logic in the `typed_endpoint`
         # code means we have the list of all arguments
         # accepted by every view function in arguments_map.
         accepted_arguments = set(arguments_map[function_name])
@@ -575,7 +476,7 @@ so maybe we shouldn't include it in pending_endpoints.
 
             try:
                 # Don't include OpenAPI parameters that live in
-                # the path; these are not extracted by REQ.
+                # the path; these are not extracted by typed_endpoint.
                 openapi_parameters = get_openapi_parameters(
                     url_pattern, method, include_url_parameters=False
                 )
@@ -591,8 +492,7 @@ so maybe we shouldn't include it in pending_endpoints.
             #   some processing to match with OpenAPI rules
             #
             # * accepted_arguments is the full set of arguments
-            #   this method accepts (from the REQ declarations in
-            #   code).
+            #   this method accepts.
             #
             # * The documented parameters for the endpoint as recorded in our
             #   OpenAPI data in zerver/openapi/zulip.yaml.
@@ -604,19 +504,21 @@ so maybe we shouldn't include it in pending_endpoints.
             openapi_parameter_names = {parameter.name for parameter in openapi_parameters}
 
             if len(accepted_arguments - openapi_parameter_names) > 0:  # nocoverage
-                print("Undocumented parameters for", url_pattern, method, function_name)
-                print(" +", openapi_parameter_names)
-                print(" -", accepted_arguments)
+                if url_pattern not in self.buggy_documentation_endpoints:
+                    print("Undocumented parameters for", url_pattern, method, function_name)
+                    print(" +", openapi_parameter_names)
+                    print(" -", accepted_arguments)
                 assert url_pattern in self.buggy_documentation_endpoints
             elif len(openapi_parameter_names - accepted_arguments) > 0:  # nocoverage
-                print(
-                    "Documented invalid parameters for",
-                    url_pattern,
-                    method,
-                    function_name,
-                )
-                print(" -", openapi_parameter_names)
-                print(" +", accepted_arguments)
+                if url_pattern not in self.buggy_documentation_endpoints:
+                    print(
+                        "Documented invalid parameters for",
+                        url_pattern,
+                        method,
+                        function_name,
+                    )
+                    print(" -", openapi_parameter_names)
+                    print(" +", accepted_arguments)
                 assert url_pattern in self.buggy_documentation_endpoints
             else:
                 self.assertEqual(openapi_parameter_names, accepted_arguments)
@@ -625,12 +527,12 @@ so maybe we shouldn't include it in pending_endpoints.
 
     def test_openapi_arguments(self) -> None:
         """This end-to-end API documentation test compares the arguments
-        defined in the actual code using @has_request_variables and
-        REQ(), with the arguments declared in our API documentation
+        defined in the actual code using @typed_endpoint,
+        with the arguments declared in our API documentation
         for every API endpoint in Zulip.
 
-        First, we import the fancy-Django version of zproject/urls.py
-        by doing this, each has_request_variables wrapper around each
+        First, we import the fancy-Django version of zproject/urls.py and
+        zilencer/urls.py. By doing this, each typed_endpoint wrapper around each
         imported view function gets called to generate the wrapped
         view function and thus filling the global arguments_map variable.
         Basically, we're exploiting code execution during import.
@@ -638,22 +540,30 @@ so maybe we shouldn't include it in pending_endpoints.
             Then we need to import some view modules not already imported in
         urls.py. We use this different syntax because of the linters complaining
         of an unused import (which is correct, but we do this for triggering the
-        has_request_variables decorator).
+        typed_endpoint decorator).
 
             At the end, we perform a reverse mapping test that verifies that
         every URL pattern defined in the OpenAPI documentation actually exists
         in code.
         """
 
+        from zilencer import urls as zilencer_urlconf
+        from zproject import tornado_urls as tornado_urlconf
         from zproject import urls as urlconf
 
         # We loop through all the API patterns, looking in particular
-        # for those using the rest_dispatch decorator; we then parse
-        # its mapping of (HTTP_METHOD -> FUNCTION).
-        for p in urlconf.v1_api_and_json_patterns + urlconf.v1_api_mobile_patterns:
+        # for those using the rest_dispatch or remote_server_dispatch decorator;
+        # we then parse its mapping of (HTTP_METHOD -> FUNCTION).
+        for p in (
+            urlconf.v1_api_and_json_patterns
+            + urlconf.v1_api_mobile_patterns
+            + zilencer_urlconf.v1_api_bouncer_patterns
+            + tornado_urlconf.api_and_json_patterns
+        ):
             methods_endpoints: dict[str, Any] = {}
-            if p.callback is not rest_dispatch:
-                # Endpoints not using rest_dispatch don't have extra data.
+            if p.callback not in [rest_dispatch, remote_server_dispatch]:
+                # Endpoints not using rest_dispatch or remote_server_dispatch
+                # don't have extra data.
                 if str(p.pattern) in self.documented_post_only_endpoints:
                     methods_endpoints = dict(POST=p.callback)
                 else:
@@ -673,11 +583,11 @@ so maybe we shouldn't include it in pending_endpoints.
                 if function is get_events:
                     # Work around the fact that the registered
                     # get_events view function isn't where we do
-                    # @has_request_variables.
+                    # @typed_endpoint.
                     #
                     # TODO: Make this configurable via an optional argument
-                    # to has_request_variables, e.g.
-                    # @has_request_variables(view_func_name="zerver.tornado.views.get_events")
+                    # to typed_endpoint, e.g.
+                    # @typed_endpoint(view_func_name="zerver.tornado.views.get_events")
                     function = get_events_backend
 
                 function_name = f"{function.__module__}.{function.__name__}"
@@ -845,7 +755,7 @@ class TestCurlExampleGeneration(ZulipTestCase):
         expected_curl_example = [
             "```curl",
             "curl -sSX GET -G http://localhost:9991/api/v1/get_stream_id \\",
-            "    -u BOT_EMAIL_ADDRESS:BOT_API_KEY \\",
+            "    -u EMAIL_ADDRESS:API_KEY \\",
             "    --data-urlencode stream=Denmark",
             "```",
         ]
@@ -874,7 +784,7 @@ class TestCurlExampleGeneration(ZulipTestCase):
         expected_curl_example = [
             "```curl",
             "curl -sSX POST http://localhost:9991/api/v1/mark_stream_as_read \\",
-            "    -u BOT_EMAIL_ADDRESS:BOT_API_KEY \\",
+            "    -u EMAIL_ADDRESS:API_KEY \\",
             "    --data-urlencode stream_id=1 \\",
             "    --data-urlencode bool_param=false",
             "```",
@@ -888,19 +798,27 @@ class TestCurlExampleGeneration(ZulipTestCase):
             self.curl_example("/endpoint", "BREW")  # see: HTCPCP
 
     def test_generate_and_render_curl_with_array_example(self) -> None:
-        generated_curl_example = self.curl_example("/messages", "GET")
+        generated_curl_example = self.curl_example(
+            "/messages",
+            "GET",
+            exclude=[
+                "use_first_unread_anchor",
+                "message_ids",
+                "allow_empty_topic_name",
+                "anchor_date",
+            ],
+        )
         expected_curl_example = [
             "```curl",
             "curl -sSX GET -G http://localhost:9991/api/v1/messages \\",
-            "    -u BOT_EMAIL_ADDRESS:BOT_API_KEY \\",
+            "    -u EMAIL_ADDRESS:API_KEY \\",
             "    --data-urlencode anchor=43 \\",
             "    --data-urlencode include_anchor=false \\",
             "    --data-urlencode num_before=4 \\",
             "    --data-urlencode num_after=8 \\",
             '    --data-urlencode \'narrow=[{"operand": "Denmark", "operator": "channel"}]\' \\',
             "    --data-urlencode client_gravatar=false \\",
-            "    --data-urlencode apply_markdown=false \\",
-            "    --data-urlencode use_first_unread_anchor=true",
+            "    --data-urlencode apply_markdown=false",
             "```",
         ]
         self.assertEqual(generated_curl_example, expected_curl_example)
@@ -912,7 +830,7 @@ class TestCurlExampleGeneration(ZulipTestCase):
         expected_curl_example = [
             "```curl",
             "curl -sSX GET -G http://localhost:9991/api/v1/endpoint \\",
-            "    -u BOT_EMAIL_ADDRESS:BOT_API_KEY \\",
+            "    -u EMAIL_ADDRESS:API_KEY \\",
             '    --data-urlencode \'param1={"key": "value"}\'',
             "```",
         ]
@@ -941,7 +859,7 @@ class TestCurlExampleGeneration(ZulipTestCase):
         expected_curl_example = [
             "```curl",
             "curl -sSX GET -G http://localhost:9991/api/v1/endpoint/35 \\",
-            "    -u BOT_EMAIL_ADDRESS:BOT_API_KEY \\",
+            "    -u EMAIL_ADDRESS:API_KEY \\",
             '    --data-urlencode \'param2={"key": "value"}\'',
             "```",
         ]
@@ -949,12 +867,13 @@ class TestCurlExampleGeneration(ZulipTestCase):
 
     def test_generate_and_render_curl_wrapper(self) -> None:
         generated_curl_example = render_curl_example(
-            "/get_stream_id:GET:email:key", api_url="https://zulip.example.com/api"
+            "/get_stream_id:GET", api_url="https://zulip.example.com/api"
         )
         expected_curl_example = [
+            "{!curl-auth-credentials.md!}\n\n",
             "```curl",
             "curl -sSX GET -G https://zulip.example.com/api/v1/get_stream_id \\",
-            "    -u email:key \\",
+            "    -u EMAIL_ADDRESS:API_KEY \\",
             "    --data-urlencode stream=Denmark",
             "```",
         ]
@@ -962,18 +881,26 @@ class TestCurlExampleGeneration(ZulipTestCase):
 
     def test_generate_and_render_curl_example_with_excludes(self) -> None:
         generated_curl_example = self.curl_example(
-            "/messages", "GET", exclude=["client_gravatar", "apply_markdown"]
+            "/messages",
+            "GET",
+            exclude=[
+                "client_gravatar",
+                "apply_markdown",
+                "use_first_unread_anchor",
+                "message_ids",
+                "allow_empty_topic_name",
+                "anchor_date",
+            ],
         )
         expected_curl_example = [
             "```curl",
             "curl -sSX GET -G http://localhost:9991/api/v1/messages \\",
-            "    -u BOT_EMAIL_ADDRESS:BOT_API_KEY \\",
+            "    -u EMAIL_ADDRESS:API_KEY \\",
             "    --data-urlencode anchor=43 \\",
             "    --data-urlencode include_anchor=false \\",
             "    --data-urlencode num_before=4 \\",
             "    --data-urlencode num_after=8 \\",
-            '    --data-urlencode \'narrow=[{"operand": "Denmark", "operator": "channel"}]\' \\',
-            "    --data-urlencode use_first_unread_anchor=true",
+            '    --data-urlencode \'narrow=[{"operand": "Denmark", "operator": "channel"}]\'',
             "```",
         ]
         self.assertEqual(generated_curl_example, expected_curl_example)
@@ -1001,6 +928,9 @@ class OpenAPIAttributesTest(ZulipTestCase):
             "scheduled_messages",
             "mobile",
             "invites",
+            "reminders",
+            "navigation_views",
+            "bots",
         ]
         paths = OpenAPISpec(OPENAPI_SPEC_PATH).openapi()["paths"]
         for path, path_item in paths.items():
@@ -1038,9 +968,17 @@ class OpenAPIAttributesTest(ZulipTestCase):
                             )
                         continue
                     validate_schema(schema)
-                    assert validate_against_openapi_schema(
-                        schema["example"], path, method, status_code
-                    )
+                    if "example" not in schema:
+                        assert "examples" in response["content"]["application/json"]
+                        examples = response["content"]["application/json"]["examples"]
+                        for example in examples:
+                            assert validate_against_openapi_schema(
+                                examples[example]["value"], path, method, status_code
+                            )
+                    else:
+                        assert validate_against_openapi_schema(
+                            schema["example"], path, method, status_code
+                        )
 
 
 class OpenAPIRegexTest(ZulipTestCase):
@@ -1052,14 +990,9 @@ class OpenAPIRegexTest(ZulipTestCase):
         # Some of the undocumented endpoints which are very similar to
         # some of the documented endpoints.
         assert find_openapi_endpoint("/users/me/presence") is None
-        assert find_openapi_endpoint("/users/me/subscriptions/23") is None
         assert find_openapi_endpoint("/users/iago/subscriptions/23") is None
         assert find_openapi_endpoint("/messages/matches_narrow") is None
         # Making sure documented endpoints are matched correctly.
-        assert (
-            find_openapi_endpoint("/users/23/subscriptions/21")
-            == "/users/{user_id}/subscriptions/{stream_id}"
-        )
         assert (
             find_openapi_endpoint("/users/iago@zulip.com/presence")
             == "/users/{user_id_or_email}/presence"

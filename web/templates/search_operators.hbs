@@ -71,6 +71,18 @@
                         </td>
                     </tr>
                     <tr>
+                        <td class="operator">channels:web-public</td>
+                        <td class="definition">
+                            {{t 'Search all web-public channels.'}}
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="operator">channels:archived</td>
+                        <td class="definition">
+                            {{t 'Search your archived channels.'}}
+                        </td>
+                    </tr>
+                    <tr>
                         <td class="operator">sender:<span class="operator_value">user</span></td>
                         <td class="definition">
                             {{#tr}}
@@ -122,6 +134,15 @@
                         </td>
                     </tr>
                     <tr>
+                        <td class="operator">mentions:<span class="operator_value">user</span></td>
+                        <td class="definition">
+                            {{#tr}}
+                                Narrow to messages that mention <z-value></z-value>.
+                                {{#*inline "z-value"}}<span class="operator_value">user</span>{{/inline}}
+                            {{/tr}}
+                        </td>
+                    </tr>
+                    <tr>
                         <td class="operator">is:starred</td>
                         <td class="definition">
                             {{t 'Narrow to starred messages.'}}
@@ -134,6 +155,12 @@
                         </td>
                     </tr>
                     <tr>
+                        <td class="operator">-is:resolved</td>
+                        <td class="definition">
+                            {{t 'Narrow to messages in unresolved topics.'}}
+                        </td>
+                    </tr>
+                    <tr>
                         <td class="operator">is:followed</td>
                         <td class="definition">
                             {{t 'Narrow to messages in followed topics.'}}
@@ -143,6 +170,12 @@
                         <td class="operator">is:unread</td>
                         <td class="definition">
                             {{t 'Narrow to unread messages.'}}
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="operator">is:muted</td>
+                        <td class="definition">
+                            {{t 'Narrow to muted messages.'}}
                         </td>
                     </tr>
                     <tr>

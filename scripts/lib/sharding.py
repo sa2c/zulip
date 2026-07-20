@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 import argparse
 import filecmp
+import grp
 import json
 import os
+import pwd
 import subprocess
 import sys
 
@@ -54,7 +56,7 @@ def write_updated_configs() -> None:
         ).strip()
         for key, shards in config_file["tornado_sharding"].items():
             if key.endswith("_regex"):
-                ports = [int(port) for port in key[: -len("_regex")].split("_")]
+                ports = [int(port) for port in key.removesuffix("_regex").split("_")]
                 shard_regexes.append((shards, ports[0] if len(ports) == 1 else ports))
                 nginx_sharding_conf_f.write(
                     f"    {nginx_quote('~*' + shards)} http://tornado{'_'.join(map(str, ports))};\n"
@@ -76,6 +78,14 @@ def write_updated_configs() -> None:
 
         data = {"shard_map": shard_map, "shard_regexes": shard_regexes}
         sharding_json_f.write(json.dumps(data) + "\n")
+
+        for fh in (nginx_sharding_conf_f, sharding_json_f):
+            os.fchown(
+                fh.fileno(),
+                pwd.getpwnam("zulip").pw_uid,
+                grp.getgrnam("zulip").gr_gid,
+            )
+            os.fchmod(fh.fileno(), 0o644)
 
 
 parser = argparse.ArgumentParser(

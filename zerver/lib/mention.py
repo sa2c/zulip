@@ -1,16 +1,33 @@
 import functools
 import re
+from collections import defaultdict
 from dataclasses import dataclass
 from re import Match
+from typing import Literal
 
 from django.conf import settings
 from django.db.models import Q
+from django_stubs_ext import StrPromise
 
+from zerver.lib.streams import get_content_access_streams
+from zerver.lib.topic import get_latest_message_for_user_in_topic
+from zerver.lib.types import UserDisplayRecipient
+from zerver.lib.user_groups import (
+    UserGroupMembershipDetails,
+    get_root_id_annotated_recursive_subgroups_for_groups,
+    user_has_permission_for_group_setting,
+)
 from zerver.lib.users import get_inaccessible_user_ids
 from zerver.models import NamedUserGroup, UserProfile
-from zerver.models.streams import get_linkable_streams
+from zerver.models.groups import SystemGroups
+from zerver.models.streams import Stream
+from zerver.models.users import is_cross_realm_bot_email
 
 BEFORE_MENTION_ALLOWED_REGEX = r"(?<![^\s\'\"\(\{\[\/<])"
+
+# For mentions that generate a link of their own, don't match syntax
+# that is formatted with another link. e.g., "[#**channel**]({link})"
+BEFORE_LINK_PRODUCING_MENTION_ALLOWED_REGEX = r"(?<![^\s\'\"\(\{\/<])"
 
 # Match multi-word string between @** ** or match any one-word
 # sequences after @
@@ -62,6 +79,23 @@ class PossibleMentions:
     message_has_stream_wildcards: bool
 
 
+@dataclass(frozen=True)
+class ChannelTopicInfo:
+    channel_name: str
+    topic_name: str
+
+
+@dataclass
+class ChannelInfo:
+    channel_id: int
+    recipient_id: int
+    history_public_to_subscribers: bool
+    # TODO: Track whether the current user has only metadata access or
+    # content access, so that we can allow mentioning channels with
+    # only metadata access, while still enforcing content access to
+    # mention topics or messages within channels.
+
+
 class MentionBackend:
     # Be careful about reuse: MentionBackend contains caches which are
     # designed to only have the lifespan of a sender user (typically a
@@ -73,7 +107,8 @@ class MentionBackend:
     def __init__(self, realm_id: int) -> None:
         self.realm_id = realm_id
         self.user_cache: dict[tuple[int, str], FullNameInfo] = {}
-        self.stream_cache: dict[str, int] = {}
+        self.stream_cache: dict[str, ChannelInfo] = {}
+        self.topic_cache: dict[ChannelTopicInfo, int | None] = {}
 
     def get_full_name_info_list(
         self, user_filters: list[UserFilter], message_sender: UserProfile | None
@@ -136,7 +171,9 @@ class MentionBackend:
 
         return result
 
-    def get_stream_name_map(self, stream_names: set[str]) -> dict[str, int]:
+    def get_stream_name_map(
+        self, stream_names: set[str], acting_user: UserProfile | None
+    ) -> dict[str, int]:
         if not stream_names:
             return {}
 
@@ -145,15 +182,17 @@ class MentionBackend:
 
         for stream_name in stream_names:
             if stream_name in self.stream_cache:
-                result[stream_name] = self.stream_cache[stream_name]
+                result[stream_name] = self.stream_cache[stream_name].channel_id
             else:
                 unseen_stream_names.append(stream_name)
 
-        if unseen_stream_names:
-            q_list = {Q(name=name) for name in unseen_stream_names}
+        if not unseen_stream_names:
+            return result
 
+        q_list = {Q(name=name) for name in unseen_stream_names}
+        if acting_user is None:
             rows = (
-                get_linkable_streams(
+                Stream.objects.filter(
                     realm_id=self.realm_id,
                 )
                 .filter(
@@ -162,12 +201,89 @@ class MentionBackend:
                 .values(
                     "id",
                     "name",
+                    "recipient_id",
+                    "history_public_to_subscribers",
                 )
             )
-
             for row in rows:
-                self.stream_cache[row["name"]] = row["id"]
+                self.stream_cache[row["name"]] = ChannelInfo(
+                    row["id"], row["recipient_id"], row["history_public_to_subscribers"]
+                )
                 result[row["name"]] = row["id"]
+        else:
+            content_access_streams = get_content_access_streams(
+                acting_user,
+                list(
+                    Stream.objects.filter(
+                        realm_id=self.realm_id,
+                    ).filter(
+                        functools.reduce(lambda a, b: a | b, q_list),
+                    )
+                ),
+                user_group_membership_details=UserGroupMembershipDetails(
+                    user_recursive_group_ids=None
+                ),
+            )
+            for stream in content_access_streams:
+                assert stream.recipient_id is not None
+                self.stream_cache[stream.name] = ChannelInfo(
+                    stream.id, stream.recipient_id, stream.history_public_to_subscribers
+                )
+                result[stream.name] = stream.id
+
+        return result
+
+    def get_topic_info_map(
+        self, channel_topics: set[ChannelTopicInfo], acting_user: UserProfile | None
+    ) -> dict[ChannelTopicInfo, int | None]:
+        if not channel_topics:
+            return {}
+
+        result: dict[ChannelTopicInfo, int | None] = {}
+        unseen_channel_topic: list[ChannelTopicInfo] = []
+
+        for channel_topic in channel_topics:
+            if channel_topic in self.topic_cache:
+                result[channel_topic] = self.topic_cache[channel_topic]
+            else:
+                unseen_channel_topic.append(channel_topic)
+
+        for channel_topic in unseen_channel_topic:
+            channel_info = self.stream_cache.get(channel_topic.channel_name)
+
+            if channel_info is None:
+                # The acting user does not have access to content in this channel.
+                continue
+
+            recipient_id = channel_info.recipient_id
+            topic_name = channel_topic.topic_name
+            history_public_to_subscribers = channel_info.history_public_to_subscribers
+
+            # Any message in the topic is a valid choice for the
+            # /with/ anchor. There are two risks to manage here:
+            # - The target message could be deleted or be a mispost that
+            #   is off-topic and moved shortly.
+            # - The topic could be split into two topics.
+            #
+            # Originally, we picked the oldest message because that
+            # message is least likely to be deleted/moved for being a
+            # mispost/error -- i.e., trying to do a bit better in rare
+            # corner cases. We switched to preferring the latest
+            # message in API feature level 400. The "latest" algorithm
+            # is better when linking to an active conversation in a
+            # long topic that's a follow-up/tangent and ends up being
+            # moved/split, which users do constantly.
+            topic_latest_message = get_latest_message_for_user_in_topic(
+                self.realm_id,
+                acting_user,
+                recipient_id,
+                topic_name,
+                history_public_to_subscribers,
+                acting_user_has_channel_content_access=True,
+            )
+
+            self.topic_cache[channel_topic] = topic_latest_message
+            result[channel_topic] = topic_latest_message
 
         return result
 
@@ -210,8 +326,22 @@ def possible_mentions(content: str) -> PossibleMentions:
     )
 
 
-def possible_user_group_mentions(content: str) -> set[str]:
-    return {m.group("match") for m in USER_GROUP_MENTIONS_RE.finditer(content)}
+def possible_user_group_mentions(content: str) -> dict[str, Literal["silent", "non-silent"]]:
+    # maps each group name to its mention type, silent or non-silent.
+    mentions: dict[str, Literal["silent", "non-silent"]] = {}
+
+    for mention in USER_GROUP_MENTIONS_RE.finditer(content):
+        group_mention = mention.group("match")
+
+        # non-silent mention can override silent.
+        if not mention.group("silent"):
+            mentions[group_mention] = "non-silent"
+
+        # silent mention should NOT override non-silent.
+        if mention.group("silent") and group_mention not in mentions:
+            mentions[group_mention] = "silent"
+
+    return mentions
 
 
 def get_possible_mentions_info(
@@ -248,6 +378,7 @@ class MentionData:
     ) -> None:
         self.mention_backend = mention_backend
         realm_id = mention_backend.realm_id
+        self.message_sender = message_sender
         mentions = possible_mentions(content)
         possible_mentions_info = get_possible_mentions_info(
             mention_backend, mentions.mention_texts, message_sender
@@ -266,14 +397,41 @@ class MentionData:
 
     def init_user_group_data(self, realm_id: int, content: str) -> None:
         self.user_group_name_info: dict[str, NamedUserGroup] = {}
-        self.user_group_members: dict[int, list[int]] = {}
-        user_group_names = possible_user_group_mentions(content)
-        if user_group_names:
-            for group in NamedUserGroup.objects.filter(
-                realm_id=realm_id, name__in=user_group_names, is_system_group=False
-            ).prefetch_related("direct_members"):
-                self.user_group_name_info[group.name.lower()] = group
-                self.user_group_members[group.id] = [m.id for m in group.direct_members.all()]
+        self.user_group_members: dict[int, set[int]] = defaultdict(set)
+        user_group_names_mentions = possible_user_group_mentions(content)
+        if user_group_names_mentions:
+            named_user_groups = NamedUserGroup.objects.filter(
+                realm_for_sharding_id=realm_id, name__in=user_group_names_mentions
+            )
+
+            # No filter here as we need user_group_name_info for all groups mentions.
+            self.user_group_name_info = {group.name.lower(): group for group in named_user_groups}
+
+            # We only fetch group membership mentions that can
+            # possibly trigger notifications.
+            filtered_group_ids = [
+                group.id
+                for group in named_user_groups
+                if not group.deactivated
+                and user_group_names_mentions.get(group.name) == "non-silent"
+            ]
+
+            # Avoid doing a database query if there's nothing to fetch.
+            #
+            # This isn't quite optimal -- we've not checked our user
+            # has permission to mention the group yet.
+            if len(filtered_group_ids) == 0:
+                return
+
+            # Fetch membership for the groups filtered above in a
+            # single, efficient bulk query, mapping each group to its
+            # direct and indirect members.
+            for group_root_id, member_id in (
+                get_root_id_annotated_recursive_subgroups_for_groups(filtered_group_ids, realm_id)
+                .filter(direct_members__is_active=True)
+                .values_list("root_id", "direct_members")  # type: ignore[misc]  # root_id is an annotated field.
+            ):
+                self.user_group_members[group_root_id].add(member_id)
 
     def get_user_by_name(self, name: str) -> FullNameInfo | None:
         # warning: get_user_by_name is not dependable if two
@@ -296,12 +454,55 @@ class MentionData:
     def get_user_group(self, name: str) -> NamedUserGroup | None:
         return self.user_group_name_info.get(name.lower(), None)
 
-    def get_group_members(self, user_group_id: int) -> list[int]:
-        return self.user_group_members.get(user_group_id, [])
+    def get_group_members(self, user_group_id: int) -> set[int]:
+        return self.user_group_members.get(user_group_id, set())
 
-    def get_stream_name_map(self, stream_names: set[str]) -> dict[str, int]:
-        return self.mention_backend.get_stream_name_map(stream_names)
+    def get_stream_name_map(
+        self, stream_names: set[str], acting_user: UserProfile | None
+    ) -> dict[str, int]:
+        return self.mention_backend.get_stream_name_map(stream_names, acting_user=acting_user)
+
+    def get_topic_info_map(
+        self, channel_topics: set[ChannelTopicInfo], acting_user: UserProfile | None
+    ) -> dict[ChannelTopicInfo, int | None]:
+        return self.mention_backend.get_topic_info_map(channel_topics, acting_user=acting_user)
 
 
-def silent_mention_syntax_for_user(user_profile: UserProfile) -> str:
-    return f"@_**{user_profile.full_name}|{user_profile.id}**"
+def silent_mention_syntax_for_user(user_profile: UserProfile | UserDisplayRecipient) -> str:
+    if isinstance(user_profile, UserProfile):
+        return f"@_**{user_profile.full_name}|{user_profile.id}**"
+    else:
+        return f"@_**{user_profile['full_name']}|{user_profile['id']}**"
+
+
+def silent_mention_syntax_for_user_group(user_group: NamedUserGroup) -> str:
+    return f"@_*{user_group.name}*"
+
+
+def get_user_group_mention_display_name(user_group: NamedUserGroup) -> StrPromise | str:
+    if user_group.is_system_group:
+        return SystemGroups.GROUP_DISPLAY_NAME_MAP[user_group.name]
+
+    return user_group.name
+
+
+def sender_can_mention_group(sender: UserProfile | None, named_group: NamedUserGroup) -> bool:
+    can_mention_group = named_group.can_mention_group
+
+    if (
+        hasattr(can_mention_group, "named_user_group")
+        and can_mention_group.named_user_group.name == SystemGroups.EVERYONE
+    ):
+        return True
+
+    assert sender is not None
+
+    if is_cross_realm_bot_email(sender.delivery_email):
+        return False
+
+    return user_has_permission_for_group_setting(
+        can_mention_group.id,
+        sender,
+        NamedUserGroup.GROUP_PERMISSION_SETTINGS["can_mention_group"],
+        direct_member_only=False,
+    )

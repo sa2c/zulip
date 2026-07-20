@@ -6,9 +6,12 @@ from django.utils.timezone import now as timezone_now
 
 from corporate.lib.activity import get_remote_server_audit_logs
 from corporate.lib.stripe import add_months
-from corporate.models import Customer, CustomerPlan, LicenseLedger
+from corporate.models.customers import Customer
+from corporate.models.licenses import LicenseLedger
+from corporate.models.plans import CustomerPlan
 from zerver.lib.test_classes import ZulipTestCase
 from zerver.models import Client, UserActivity, UserProfile
+from zerver.models.realm_audit_logs import AuditLogEventType
 from zilencer.models import (
     RemoteRealm,
     RemoteRealmAuditLog,
@@ -23,7 +26,7 @@ data_list = [
     {
         "server_id": 1,
         "realm_id": 1,
-        "event_type": RemoteRealmAuditLog.USER_CREATED,
+        "event_type": AuditLogEventType.USER_CREATED,
         "event_time": event_time,
         "extra_data": {
             RemoteRealmAuditLog.ROLE_COUNT: {
@@ -40,7 +43,7 @@ data_list = [
     {
         "server_id": 1,
         "realm_id": 1,
-        "event_type": RemoteRealmAuditLog.USER_ROLE_CHANGED,
+        "event_type": AuditLogEventType.USER_ROLE_CHANGED,
         "event_time": event_time,
         "extra_data": {
             RemoteRealmAuditLog.ROLE_COUNT: {
@@ -57,7 +60,7 @@ data_list = [
     {
         "server_id": 1,
         "realm_id": 2,
-        "event_type": RemoteRealmAuditLog.USER_CREATED,
+        "event_type": AuditLogEventType.USER_CREATED,
         "event_time": event_time,
         "extra_data": {
             RemoteRealmAuditLog.ROLE_COUNT: {
@@ -74,14 +77,14 @@ data_list = [
     {
         "server_id": 1,
         "realm_id": 2,
-        "event_type": RemoteRealmAuditLog.USER_CREATED,
+        "event_type": AuditLogEventType.USER_CREATED,
         "event_time": event_time,
         "extra_data": {},
     },
     {
         "server_id": 1,
         "realm_id": 3,
-        "event_type": RemoteRealmAuditLog.USER_CREATED,
+        "event_type": AuditLogEventType.USER_CREATED,
         "event_time": event_time,
         "extra_data": {
             RemoteRealmAuditLog.ROLE_COUNT: {
@@ -98,7 +101,7 @@ data_list = [
     {
         "server_id": 1,
         "realm_id": 3,
-        "event_type": RemoteRealmAuditLog.USER_DEACTIVATED,
+        "event_type": AuditLogEventType.USER_DEACTIVATED,
         "event_time": event_time + timedelta(seconds=1),
         "extra_data": {
             RemoteRealmAuditLog.ROLE_COUNT: {
@@ -123,7 +126,7 @@ class ActivityTest(ZulipTestCase):
         query = "/json/messages/flags"
         last_visit = timezone_now()
         count = 150
-        for activity_user_profile in UserProfile.objects.all():
+        for activity_user_profile in UserProfile.objects.all().iterator():
             UserActivity.objects.get_or_create(
                 user_profile=activity_user_profile,
                 client=client,
@@ -169,7 +172,7 @@ class ActivityTest(ZulipTestCase):
             contact_email="email@example.com",
         )
         RemoteZulipServerAuditLog.objects.create(
-            event_type=RemoteZulipServerAuditLog.REMOTE_SERVER_CREATED,
+            event_type=AuditLogEventType.REMOTE_SERVER_CREATED,
             server=server,
             event_time=server.last_updated,
         )
@@ -187,7 +190,7 @@ class ActivityTest(ZulipTestCase):
         RemoteRealmAuditLog.objects.create(
             server=server,
             realm_id=10,
-            event_type=RemoteRealmAuditLog.USER_CREATED,
+            event_type=AuditLogEventType.USER_CREATED,
             event_time=timezone_now() - timedelta(days=1),
             extra_data=extra_data,
         )
@@ -199,13 +202,26 @@ class ActivityTest(ZulipTestCase):
             result = self.client_get("/activity/integrations")
             self.assertEqual(result.status_code, 200)
 
-        with self.assert_database_query_count(7):
+        with self.assert_database_query_count(13):
             result = self.client_get("/realm_activity/zulip/")
             self.assertEqual(result.status_code, 200)
 
         iago = self.example_user("iago")
         with self.assert_database_query_count(6):
             result = self.client_get(f"/user_activity/{iago.id}/")
+            self.assertEqual(result.status_code, 200)
+
+        webhook_bot = self.example_user("webhook_bot")
+        with self.assert_database_query_count(6):
+            result = self.client_get(f"/user_activity/{webhook_bot.id}/")
+            self.assertEqual(result.status_code, 200)
+
+        with self.assert_database_query_count(8):
+            result = self.client_get(f"/activity/plan_ledger/{plan.id}/")
+            self.assertEqual(result.status_code, 200)
+
+        with self.assert_database_query_count(7):
+            result = self.client_get(f"/activity/remote/logs/server/{server.uuid}/")
             self.assertEqual(result.status_code, 200)
 
     def test_get_remote_server_guest_and_non_guest_count(self) -> None:
@@ -279,7 +295,7 @@ class ActivityTest(ZulipTestCase):
                 RemoteRealmAuditLog.objects.create(
                     server=server,
                     remote_realm=remote_realm,
-                    event_type=RemoteRealmAuditLog.USER_CREATED,
+                    event_type=AuditLogEventType.USER_CREATED,
                     event_time=timezone_now() - timedelta(days=1),
                     extra_data=extra_data,
                 )
@@ -287,7 +303,7 @@ class ActivityTest(ZulipTestCase):
                 RemoteRealmAuditLog.objects.create(
                     server=server,
                     realm_id=realm_id,
-                    event_type=RemoteRealmAuditLog.USER_CREATED,
+                    event_type=AuditLogEventType.USER_CREATED,
                     event_time=timezone_now() - timedelta(days=1),
                     extra_data=extra_data,
                 )
@@ -298,7 +314,7 @@ class ActivityTest(ZulipTestCase):
                 hostname=hostname, contact_email=f"admin@{hostname}", uuid=uuid.uuid4()
             )
             RemoteZulipServerAuditLog.objects.create(
-                event_type=RemoteZulipServerAuditLog.REMOTE_SERVER_CREATED,
+                event_type=AuditLogEventType.REMOTE_SERVER_CREATED,
                 server=remote_server,
                 event_time=remote_server.last_updated,
             )
@@ -316,7 +332,7 @@ class ActivityTest(ZulipTestCase):
                     realm_date_created=datetime(2023, 12, 1, tzinfo=timezone.utc),
                 )
 
-        # Remote server on legacy plan
+        # Remote server on complimentary access plan
         server = RemoteZulipServer.objects.get(hostname="zulip-1.example.com")
         customer = Customer.objects.create(remote_server=server)
         add_plan(customer, tier=CustomerPlan.TIER_SELF_HOSTED_LEGACY)
@@ -368,4 +384,8 @@ class ActivityTest(ZulipTestCase):
         self.login("iago")
         with self.assert_database_query_count(11):
             result = self.client_get("/activity/remote")
+            self.assertEqual(result.status_code, 200)
+
+        with self.assert_database_query_count(7):
+            result = self.client_get(f"/activity/remote/logs/server/{remote_server.uuid}/")
             self.assertEqual(result.status_code, 200)

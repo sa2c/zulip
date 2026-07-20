@@ -1,7 +1,11 @@
+from datetime import datetime, timezone
+
 from django.http import HttpRequest, HttpResponse
+from pydantic.alias_generators import to_snake
 
 from zerver.decorator import webhook_view
 from zerver.lib.response import json_success
+from zerver.lib.timestamp import datetime_to_global_time
 from zerver.lib.typed_endpoint import JsonBodyPayload, typed_endpoint
 from zerver.lib.validator import WildValue, check_string
 from zerver.lib.webhooks.common import check_send_webhook_message
@@ -16,6 +20,12 @@ APPVEYOR_MESSAGE_TEMPLATE = """
 """.strip()
 
 
+def get_global_time(dt_str: str) -> str:
+    return datetime_to_global_time(
+        datetime.strptime(dt_str, "%m/%d/%Y %I:%M %p").replace(tzinfo=timezone.utc)
+    )
+
+
 @webhook_view("Appveyor")
 @typed_endpoint
 def api_appveyor_webhook(
@@ -24,32 +34,36 @@ def api_appveyor_webhook(
     *,
     payload: JsonBodyPayload[WildValue],
 ) -> HttpResponse:
-    body = get_body_for_http_request(payload)
-    topic_name = get_topic_for_http_request(payload)
+    body = get_body(payload)
+    topic_name = get_topic_name(payload)
 
     check_send_webhook_message(request, user_profile, topic_name, body)
     return json_success(request)
 
 
-def get_topic_for_http_request(payload: WildValue) -> str:
+def get_topic_name(payload: WildValue) -> str:
     event_data = payload["eventData"]
     return APPVEYOR_TOPIC_TEMPLATE.format(project_name=event_data["projectName"].tame(check_string))
 
 
-def get_body_for_http_request(payload: WildValue) -> str:
+def get_body(payload: WildValue) -> str:
     event_data = payload["eventData"]
-
+    fields = [
+        "projectName",
+        "buildVersion",
+        "status",
+        "buildUrl",
+        "commitUrl",
+        "committerName",
+        "commitDate",
+        "commitMessage",
+        "commitId",
+        "started",
+        "finished",
+    ]
     data = {
-        "project_name": event_data["projectName"].tame(check_string),
-        "build_version": event_data["buildVersion"].tame(check_string),
-        "status": event_data["status"].tame(check_string),
-        "build_url": event_data["buildUrl"].tame(check_string),
-        "commit_url": event_data["commitUrl"].tame(check_string),
-        "committer_name": event_data["committerName"].tame(check_string),
-        "commit_date": event_data["commitDate"].tame(check_string),
-        "commit_message": event_data["commitMessage"].tame(check_string),
-        "commit_id": event_data["commitId"].tame(check_string),
-        "started": event_data["started"].tame(check_string),
-        "finished": event_data["finished"].tame(check_string),
+        to_snake(field): get_global_time(value) if field in ["started", "finished"] else value
+        for field, value in ((field, event_data[field].tame(check_string)) for field in fields)
     }
+
     return APPVEYOR_MESSAGE_TEMPLATE.format(**data)

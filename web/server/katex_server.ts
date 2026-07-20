@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-import bodyParser from "@koa/bodyparser";
+import {bodyParser} from "@koa/bodyparser";
 import katex from "katex";
 import Koa from "koa";
 import Prometheus from "prom-client";
@@ -11,7 +11,7 @@ if (!Number.isInteger(port)) {
     throw new TypeError("Invalid port");
 }
 
-const shared_secret = process.env.SHARED_SECRET;
+const shared_secret = process.env["SHARED_SECRET"];
 if (typeof shared_secret !== "string") {
     console.error("No SHARED_SECRET set!");
     process.exit(1);

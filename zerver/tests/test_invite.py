@@ -3,7 +3,7 @@ from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 from unittest.mock import patch
-from urllib.parse import quote, urlencode
+from urllib.parse import quote
 
 import orjson
 import time_machine
@@ -20,6 +20,7 @@ from confirmation import settings as confirmation_settings
 from confirmation.models import (
     Confirmation,
     ConfirmationKeyError,
+    confirmation_url_for,
     create_confirmation_link,
     get_object_from_key,
 )
@@ -28,7 +29,7 @@ from zerver.actions.create_realm import do_change_realm_subdomain, do_create_rea
 from zerver.actions.create_user import (
     do_create_user,
     process_new_human_user,
-    set_up_streams_for_new_human_user,
+    set_up_streams_and_groups_for_new_human_user,
 )
 from zerver.actions.default_streams import do_add_default_stream, do_remove_default_stream
 from zerver.actions.invites import (
@@ -36,6 +37,7 @@ from zerver.actions.invites import (
     do_get_invites_controlled_by_user,
     do_invite_users,
     do_revoke_multi_use_invite,
+    do_revoke_user_invite,
     too_many_recent_realm_invites,
 )
 from zerver.actions.realm_settings import (
@@ -43,18 +45,18 @@ from zerver.actions.realm_settings import (
     do_change_realm_plan_type,
     do_set_realm_property,
 )
+from zerver.actions.streams import do_change_stream_group_based_setting
+from zerver.actions.user_groups import check_add_user_group, do_change_user_group_permission_setting
 from zerver.actions.user_settings import do_change_full_name
 from zerver.actions.users import change_user_is_active
-from zerver.context_processors import common_context
 from zerver.lib.create_user import create_user
-from zerver.lib.default_streams import (
-    get_default_streams_for_realm_as_dicts,
-    get_slim_realm_default_streams,
-)
-from zerver.lib.send_email import FromAddress, deliver_scheduled_emails, send_future_email
+from zerver.lib.default_streams import get_slim_realm_default_streams
+from zerver.lib.send_email import queue_scheduled_emails
 from zerver.lib.streams import ensure_stream
 from zerver.lib.test_classes import ZulipTestCase
 from zerver.lib.test_helpers import find_key_by_email
+from zerver.lib.types import Invitee
+from zerver.lib.user_groups import get_direct_user_groups, is_user_in_group
 from zerver.models import (
     DefaultStream,
     Message,
@@ -62,16 +64,18 @@ from zerver.models import (
     NamedUserGroup,
     PreregistrationUser,
     Realm,
+    RealmAuditLog,
     ScheduledEmail,
     Stream,
     UserMessage,
     UserProfile,
 )
 from zerver.models.groups import SystemGroups
-from zerver.models.realms import CommonPolicyEnum, InviteToRealmPolicyEnum, get_realm
+from zerver.models.realm_audit_logs import AuditLogEventType
+from zerver.models.realms import get_realm
 from zerver.models.streams import get_stream
 from zerver.models.users import get_user_by_delivery_email
-from zerver.views.invite import INVITATION_LINK_VALIDITY_MINUTES, get_invitee_emails_set
+from zerver.views.invite import INVITATION_LINK_VALIDITY_MINUTES, get_invitees_set
 from zerver.views.registration import accounts_home
 
 if TYPE_CHECKING:
@@ -111,7 +115,7 @@ class StreamSetupTest(ZulipTestCase):
         new_user = self.create_simple_new_user(realm, "alice@zulip.com")
 
         with self.assert_database_query_count(14):
-            set_up_streams_for_new_human_user(
+            set_up_streams_and_groups_for_new_human_user(
                 user_profile=new_user,
                 prereg_user=None,
                 default_stream_groups=[],
@@ -136,7 +140,7 @@ class StreamSetupTest(ZulipTestCase):
 
         do_invite_users(
             admin,
-            [new_user_email],
+            [Invitee(email=new_user_email)],
             streams,
             include_realm_default_subscriptions=False,
             invite_expires_in_minutes=1000,
@@ -146,8 +150,42 @@ class StreamSetupTest(ZulipTestCase):
 
         new_user = self.create_simple_new_user(realm, new_user_email)
 
-        with self.assert_database_query_count(14):
-            set_up_streams_for_new_human_user(
+        with self.assert_database_query_count(17):
+            set_up_streams_and_groups_for_new_human_user(
+                user_profile=new_user,
+                prereg_user=prereg_user,
+                default_stream_groups=[],
+            )
+
+    def test_query_count_when_admin_assigns_groups(self) -> None:
+        admin = self.example_user("iago")
+        realm = admin.realm
+
+        hamletcharacters_group = NamedUserGroup.objects.get(
+            name="hamletcharacters", realm_for_sharding=realm
+        )
+        test_group = check_add_user_group(realm, "test", [admin], acting_user=admin)
+        user_groups = [hamletcharacters_group, test_group]
+
+        self.add_messages_to_stream("Rome")
+
+        new_user_email = "bob@zulip.com"
+
+        do_invite_users(
+            admin,
+            [Invitee(email=new_user_email)],
+            streams=[],
+            user_groups=user_groups,
+            include_realm_default_subscriptions=False,
+            invite_expires_in_minutes=1000,
+        )
+
+        prereg_user = PreregistrationUser.objects.get(email=new_user_email)
+
+        new_user = self.create_simple_new_user(realm, new_user_email)
+
+        with self.assert_database_query_count(13):
+            set_up_streams_and_groups_for_new_human_user(
                 user_profile=new_user,
                 prereg_user=prereg_user,
                 default_stream_groups=[],
@@ -178,10 +216,12 @@ class InviteUserBase(ZulipTestCase):
         stream_names: Sequence[str],
         notify_referrer_on_join: bool = True,
         invite_expires_in_minutes: int | None = INVITATION_LINK_VALIDITY_MINUTES,
+        group_ids: list[int] | None = None,
         body: str = "",
         invite_as: int = PreregistrationUser.INVITE_AS["MEMBER"],
         include_realm_default_subscriptions: bool = False,
         realm: Realm | None = None,
+        welcome_message_custom_text: str | None = None,
     ) -> "TestHttpResponse":
         """
         Invites the specified users to Zulip with the specified streams.
@@ -190,6 +230,10 @@ class InviteUserBase(ZulipTestCase):
             newline separated.
 
         streams should be a list of strings.
+
+        group_ids should be a list of int.
+
+        welcome_message_custom_text should be a string.
         """
         stream_ids = [self.get_stream_id(stream_name, realm=realm) for stream_name in stream_names]
 
@@ -197,19 +241,25 @@ class InviteUserBase(ZulipTestCase):
         if invite_expires_in is None:
             invite_expires_in = orjson.dumps(None).decode()
 
+        payload = {
+            "invitee_emails": invitee_emails,
+            "invite_expires_in_minutes": invite_expires_in,
+            "stream_ids": orjson.dumps(stream_ids).decode(),
+            "group_ids": orjson.dumps(group_ids).decode() if group_ids else [],
+            "invite_as": invite_as,
+            "include_realm_default_subscriptions": orjson.dumps(
+                include_realm_default_subscriptions
+            ).decode(),
+            "notify_referrer_on_join": orjson.dumps(notify_referrer_on_join).decode(),
+        }
+
+        if welcome_message_custom_text is not None:
+            payload["welcome_message_custom_text"] = welcome_message_custom_text
+
         with self.captureOnCommitCallbacks(execute=True):
             return self.client_post(
                 "/json/invites",
-                {
-                    "invitee_emails": invitee_emails,
-                    "invite_expires_in_minutes": invite_expires_in,
-                    "stream_ids": orjson.dumps(stream_ids).decode(),
-                    "invite_as": invite_as,
-                    "include_realm_default_subscriptions": orjson.dumps(
-                        include_realm_default_subscriptions
-                    ).decode(),
-                    "notify_referrer_on_join": orjson.dumps(notify_referrer_on_join).decode(),
-                },
+                payload,
                 subdomain=realm.string_id if realm else "zulip",
             )
 
@@ -453,9 +503,9 @@ class InviteUserTest(InviteUserBase):
 
         # Remove some more warning flags
         do_change_realm_subdomain(realm, "reasonable", acting_user=None)
-        realm.description = "A real place"
+        do_set_realm_property(realm, "description", "A real place", acting_user=None)
         realm.date_created = timezone_now() - timedelta(hours=2)
-        realm.save()
+        realm.save(update_fields=["date_created"])
 
         # This is now more allowable (5x current 2 users)
         with self.assertLogs(level="INFO") as m:
@@ -535,19 +585,24 @@ class InviteUserTest(InviteUserBase):
             result = self.invite(self.nonreg_email("alice"), ["Denmark"])
         self.assert_json_success(result)
 
-        ledger.licenses_at_next_renewal = 5
+        ledger.licenses_at_next_renewal = get_latest_seat_count(user.realm)
         ledger.save(update_fields=["licenses_at_next_renewal"])
         with self.settings(BILLING_ENABLED=True):
             result = self.invite(self.nonreg_email("bob"), ["Denmark"])
-        self.assert_json_success(result)
+        self.assert_json_error_contains(
+            result,
+            "Your organization does not have enough Zulip licenses. Invitations were not sent.",
+        )
 
+        ledger.licenses_at_next_renewal = 50
         ledger.licenses = get_latest_seat_count(user.realm) + 1
-        ledger.save(update_fields=["licenses"])
+        ledger.save(update_fields=["licenses", "licenses_at_next_renewal"])
         with self.settings(BILLING_ENABLED=True):
             invitee_emails = self.nonreg_email("bob") + "," + self.nonreg_email("alice")
             result = self.invite(invitee_emails, ["Denmark"])
         self.assert_json_error_contains(
-            result, "Your organization does not have enough unused Zulip licenses to invite 2 users"
+            result,
+            "Your organization does not have enough Zulip licenses. Invitations were not sent.",
         )
 
         ledger.licenses = get_latest_seat_count(user.realm)
@@ -555,7 +610,8 @@ class InviteUserTest(InviteUserBase):
         with self.settings(BILLING_ENABLED=True):
             result = self.invite(self.nonreg_email("bob"), ["Denmark"])
         self.assert_json_error_contains(
-            result, "All Zulip licenses for this organization are currently in use"
+            result,
+            "Your organization does not have enough Zulip licenses. Invitations were not sent.",
         )
 
         with self.settings(BILLING_ENABLED=True):
@@ -587,7 +643,7 @@ class InviteUserTest(InviteUserBase):
         """
         A mirror dummy account is a temporary account
         that we keep in our system if we are mirroring
-        data from something like Zephyr or IRC.
+        data from something like IRC.
 
         We want users to eventually just sign up or
         register for Zulip, in which case we will just
@@ -735,6 +791,130 @@ class InviteUserTest(InviteUserBase):
             response, "Invalid invite_as: Value error, Not in the list of possible values"
         )
 
+    def test_invite_user_with_specified_user_groups_when_cannot_add_members(self) -> None:
+        hamlet = self.example_user("hamlet")
+        realm = hamlet.realm
+        # All users except guests have permission to send invites.
+        self.assertEqual(realm.can_invite_users_group.named_user_group.name, SystemGroups.MEMBERS)
+
+        nobody_group = NamedUserGroup.objects.get(
+            name=SystemGroups.NOBODY, realm_for_sharding=realm, is_system_group=True
+        )
+        test_group = check_add_user_group(
+            realm,
+            "test",
+            [hamlet],
+            acting_user=hamlet,
+            group_settings_map={
+                "can_manage_group": nobody_group,
+                "can_add_members_group": nobody_group,
+            },
+        )
+        hamletcharacters_group = NamedUserGroup.objects.get(
+            name="hamletcharacters", realm_for_sharding=realm
+        )
+
+        # Initialize settings with nobody allowed to add members or manage
+        # the group.
+        do_change_realm_permission_group_setting(
+            realm,
+            "can_manage_all_groups",
+            nobody_group,
+            acting_user=None,
+        )
+
+        do_change_user_group_permission_setting(
+            hamletcharacters_group,
+            "can_manage_group",
+            nobody_group,
+            acting_user=None,
+        )
+        do_change_user_group_permission_setting(
+            hamletcharacters_group,
+            "can_add_members_group",
+            nobody_group,
+            acting_user=None,
+        )
+
+        self.login("desdemona")
+        invitee = self.nonreg_email("test")
+        result = self.invite(invitee, [], group_ids=[test_group.id, hamletcharacters_group.id])
+        self.assert_json_error(result, "Insufficient permission")
+
+        # Test that user having permission to manage all groups can
+        # add user to groups through invitation.
+        owners_group = NamedUserGroup.objects.get(
+            name=SystemGroups.OWNERS, realm_for_sharding=realm, is_system_group=True
+        )
+        do_change_realm_permission_group_setting(
+            realm,
+            "can_manage_all_groups",
+            owners_group,
+            acting_user=None,
+        )
+
+        self.login("iago")
+        result = self.invite(invitee, [], group_ids=[test_group.id, hamletcharacters_group.id])
+        self.assert_json_error(result, "Insufficient permission")
+
+        self.login("shiva")
+        result = self.invite(invitee, [], group_ids=[test_group.id, hamletcharacters_group.id])
+        self.assert_json_error(result, "Insufficient permission")
+
+        self.login("desdemona")
+
+        # Check that user does not have permission to add user to system groups
+        # even when having permission to manage all groups.
+        moderators_group = NamedUserGroup.objects.get(
+            name=SystemGroups.MODERATORS, realm_for_sharding=realm, is_system_group=True
+        )
+        result = self.invite(invitee, [], group_ids=[moderators_group.id])
+        self.assert_json_error(result, "Insufficient permission")
+
+        result = self.invite(invitee, [], group_ids=[test_group.id, hamletcharacters_group.id])
+        self.assert_json_success(result)
+        self.assertTrue(find_key_by_email(invitee))
+
+        # Test that user having permission to add members to a group can
+        # add user to that group through invitation.
+        do_change_user_group_permission_setting(
+            test_group,
+            "can_add_members_group",
+            moderators_group,
+            acting_user=None,
+        )
+        self.login("hamlet")
+        invitee = self.nonreg_email("bob")
+        result = self.invite(invitee, [], group_ids=[test_group.id, hamletcharacters_group.id])
+        self.assert_json_error(result, "Insufficient permission")
+
+        self.login("shiva")
+        result = self.invite(invitee, [], group_ids=[test_group.id, hamletcharacters_group.id])
+        self.assert_json_error(result, "Insufficient permission")
+
+        result = self.invite(invitee, [], group_ids=[test_group.id])
+        self.assert_json_success(result)
+        self.assertTrue(find_key_by_email(invitee))
+
+        # Test that user having permission to manage a group can
+        # add user to that group through invitation.
+        do_change_user_group_permission_setting(
+            hamletcharacters_group,
+            "can_manage_group",
+            moderators_group,
+            acting_user=None,
+        )
+        invitee = self.nonreg_email("alice")
+
+        self.login("hamlet")
+        result = self.invite(invitee, [], group_ids=[test_group.id, hamletcharacters_group.id])
+        self.assert_json_error(result, "Insufficient permission")
+
+        self.login("shiva")
+        result = self.invite(invitee, [], group_ids=[hamletcharacters_group.id, test_group.id])
+        self.assert_json_success(result)
+        self.assertTrue(find_key_by_email(invitee))
+
     def test_successful_invite_user_as_guest_from_normal_account(self) -> None:
         self.login("hamlet")
         invitee = self.nonreg_email("alice")
@@ -792,10 +972,11 @@ class InviteUserTest(InviteUserBase):
     def test_successful_invite_users_with_specified_streams(self) -> None:
         invitee = self.nonreg_email("alice")
         realm = get_realm("zulip")
-        self.login("hamlet")
+        current_user = self.example_user("hamlet")
+        self.login_user(current_user)
 
         stream_names = ["Rome", "Scotland", "Venice"]
-        streams = [get_stream(stream_name, realm) for stream_name in stream_names]
+        streams = {get_stream(stream_name, realm) for stream_name in stream_names}
         self.assert_json_success(self.invite(invitee, stream_names))
         self.assertTrue(find_key_by_email(invitee))
         self.submit_reg_form_for_user(invitee, "password")
@@ -811,14 +992,13 @@ class InviteUserTest(InviteUserBase):
         self.submit_reg_form_for_user(invitee, "password")
         # If no streams are provided, user is not subscribed to default
         # streams as well if include_realm_default_subscriptions is False.
-        self.check_user_subscribed_only_to_streams("bob", [])
+        self.check_user_subscribed_only_to_streams("bob", set())
 
         verona = get_stream("Verona", realm)
         sandbox = get_stream("sandbox", realm)
         zulip = get_stream("Zulip", realm)
         default_streams = get_slim_realm_default_streams(realm.id)
-        self.assert_length(default_streams, 3)
-        self.assertCountEqual(default_streams, [verona, sandbox, zulip])
+        self.assertEqual(default_streams, {verona, sandbox, zulip})
 
         # Check that user is subscribed to the streams that were set as default
         # at the time of account creation and not at the time of inviting them.
@@ -830,10 +1010,10 @@ class InviteUserTest(InviteUserBase):
         do_add_default_stream(denmark)
         do_remove_default_stream(verona)
         self.submit_reg_form_for_user(invitee, "password")
-        self.check_user_subscribed_only_to_streams("test", [denmark, sandbox, zulip])
+        self.check_user_subscribed_only_to_streams("test", {denmark, sandbox, zulip})
 
         default_streams = get_slim_realm_default_streams(realm.id)
-        self.assertCountEqual(default_streams, [denmark, sandbox, zulip])
+        self.assertEqual(default_streams, {denmark, sandbox, zulip})
         invitee = self.nonreg_email("test1")
         self.assert_json_success(
             self.invite(invitee, [verona.name], include_realm_default_subscriptions=True)
@@ -842,28 +1022,111 @@ class InviteUserTest(InviteUserBase):
         # Check that the user is subscribed to both default streams and stream
         # passed in streams list.
         self.submit_reg_form_for_user(invitee, "password")
-        self.check_user_subscribed_only_to_streams("test1", [denmark, sandbox, verona, zulip])
+        self.check_user_subscribed_only_to_streams("test1", {denmark, sandbox, verona, zulip})
 
-    def test_can_invite_others_to_realm(self) -> None:
-        def validation_func(user_profile: UserProfile) -> bool:
-            return user_profile.can_invite_users_by_email()
-
-        realm = get_realm("zulip")
-        do_set_realm_property(
-            realm, "invite_to_realm_policy", InviteToRealmPolicyEnum.NOBODY, acting_user=None
+        admins_group = NamedUserGroup.objects.get(
+            name=SystemGroups.ADMINISTRATORS, realm_for_sharding=realm, is_system_group=True
         )
-        desdemona = self.example_user("desdemona")
-        self.assertFalse(validation_func(desdemona))
+        nobody_group = NamedUserGroup.objects.get(
+            name=SystemGroups.NOBODY, realm_for_sharding=realm, is_system_group=True
+        )
+        members_group = NamedUserGroup.objects.get(
+            name=SystemGroups.MEMBERS, realm_for_sharding=realm, is_system_group=True
+        )
 
-        self.check_has_permission_policies("invite_to_realm_policy", validation_func)
+        do_change_stream_group_based_setting(
+            denmark, "can_add_subscribers_group", admins_group, acting_user=current_user
+        )
+        do_change_realm_permission_group_setting(
+            realm, "can_add_subscribers_group", nobody_group, acting_user=None
+        )
+        # This is not a default stream, so we are making sure that the
+        # user has the permission to add subscribers to this channel.
+        do_change_stream_group_based_setting(
+            verona, "can_add_subscribers_group", members_group, acting_user=current_user
+        )
+        invitee = self.nonreg_email("newguy")
+        self.assertEqual(is_user_in_group(admins_group.id, current_user), False)
+        self.assert_json_success(
+            self.invite(
+                invitee,
+                [denmark.name, sandbox.name, verona.name],
+                include_realm_default_subscriptions=False,
+            )
+        )
+        self.assertTrue(find_key_by_email(invitee))
+        # Check that the user is subscribed to default streams
+        # regardless of whether they have permission to add subscribers
+        # to them when inviting them.
+        self.submit_reg_form_for_user(invitee, "password")
+        self.check_user_subscribed_only_to_streams("newguy", {denmark, sandbox, verona})
+
+        invitee = self.nonreg_email("newuser")
+        self.assertEqual(get_slim_realm_default_streams(realm.id), {denmark, sandbox, zulip})
+        self.assert_json_success(
+            self.invite(
+                invitee, [sandbox.name, verona.name], include_realm_default_subscriptions=False
+            )
+        )
+        self.assertTrue(find_key_by_email(invitee))
+        # Sandbox is no longer a default stream, but since it was a
+        # default stream when creating the invite, invitee should be
+        # subscribed to that stream
+        do_remove_default_stream(sandbox)
+        self.assertEqual(get_slim_realm_default_streams(realm.id), {denmark, zulip})
+        self.submit_reg_form_for_user(invitee, "password")
+        self.check_user_subscribed_only_to_streams("newuser", {sandbox, verona})
+
+    def test_successful_invite_users_with_specified_user_groups(self) -> None:
+        invitee = self.nonreg_email("bob")
+        iago = self.example_user("iago")
+        self.login("iago")
+
+        user_group1 = check_add_user_group(iago.realm, "test1", [], acting_user=iago)
+        user_group2 = check_add_user_group(iago.realm, "test2", [], acting_user=iago)
+
+        group_ids = [user_group1.id, user_group2.id]
+
+        self.assert_json_success(self.invite(invitee, [], group_ids=group_ids))
+        self.assertTrue(find_key_by_email(invitee))
+        self.submit_reg_form_for_user(invitee, "password")
+
+        # bob is a direct member of two role-based system groups also.
+        user_groups_subscriptions = get_direct_user_groups(self.nonreg_user("bob"))
+        user_group_names = [group.named_user_group.name for group in user_groups_subscriptions]
+
+        self.assertEqual(
+            set(user_group_names),
+            {"test1", "test2", SystemGroups.MEMBERS, SystemGroups.FULL_MEMBERS},
+        )
 
     def test_invite_others_to_realm_setting(self) -> None:
         """
-        The invite_to_realm_policy realm setting works properly.
+        The `can_invite_users_group` realm setting works properly.
         """
         realm = get_realm("zulip")
-        do_set_realm_property(
-            realm, "invite_to_realm_policy", InviteToRealmPolicyEnum.NOBODY, acting_user=None
+
+        administrators_system_group = NamedUserGroup.objects.get(
+            name=SystemGroups.ADMINISTRATORS, realm_for_sharding=realm, is_system_group=True
+        )
+        moderators_system_group = NamedUserGroup.objects.get(
+            name=SystemGroups.MODERATORS, realm_for_sharding=realm, is_system_group=True
+        )
+        full_members_system_group = NamedUserGroup.objects.get(
+            name=SystemGroups.FULL_MEMBERS, realm_for_sharding=realm, is_system_group=True
+        )
+        members_system_group = NamedUserGroup.objects.get(
+            name=SystemGroups.MEMBERS, realm_for_sharding=realm, is_system_group=True
+        )
+        nobody_system_group = NamedUserGroup.objects.get(
+            name=SystemGroups.NOBODY, realm_for_sharding=realm, is_system_group=True
+        )
+
+        do_change_realm_permission_group_setting(
+            realm,
+            "can_invite_users_group",
+            nobody_system_group,
+            acting_user=None,
         )
         self.login("desdemona")
         email = "alice-test@zulip.com"
@@ -874,8 +1137,11 @@ class InviteUserTest(InviteUserBase):
             "Insufficient permission",
         )
 
-        do_set_realm_property(
-            realm, "invite_to_realm_policy", InviteToRealmPolicyEnum.ADMINS_ONLY, acting_user=None
+        do_change_realm_permission_group_setting(
+            realm,
+            "can_invite_users_group",
+            administrators_system_group,
+            acting_user=None,
         )
 
         self.login("shiva")
@@ -894,10 +1160,10 @@ class InviteUserTest(InviteUserBase):
 
         mail.outbox = []
 
-        do_set_realm_property(
+        do_change_realm_permission_group_setting(
             realm,
-            "invite_to_realm_policy",
-            InviteToRealmPolicyEnum.MODERATORS_ONLY,
+            "can_invite_users_group",
+            moderators_system_group,
             acting_user=None,
         )
         self.login("hamlet")
@@ -917,8 +1183,11 @@ class InviteUserTest(InviteUserBase):
 
         mail.outbox = []
 
-        do_set_realm_property(
-            realm, "invite_to_realm_policy", InviteToRealmPolicyEnum.MEMBERS_ONLY, acting_user=None
+        do_change_realm_permission_group_setting(
+            realm,
+            "can_invite_users_group",
+            members_system_group,
+            acting_user=None,
         )
 
         self.login("polonius")
@@ -935,17 +1204,16 @@ class InviteUserTest(InviteUserBase):
 
         mail.outbox = []
 
-        do_set_realm_property(
+        do_change_realm_permission_group_setting(
             realm,
-            "invite_to_realm_policy",
-            InviteToRealmPolicyEnum.FULL_MEMBERS_ONLY,
+            "can_invite_users_group",
+            full_members_system_group,
             acting_user=None,
         )
-        do_set_realm_property(realm, "waiting_period_threshold", 1000, acting_user=None)
 
         hamlet = self.example_user("hamlet")
-        hamlet.date_joined = timezone_now() - timedelta(days=realm.waiting_period_threshold - 1)
 
+        do_set_realm_property(realm, "waiting_period_threshold", 100000, acting_user=None)
         email = "issac-test@zulip.com"
         email2 = "steven-test@zulip.com"
         invitee = f"Issac Test <{email}>, {email2}"
@@ -960,6 +1228,60 @@ class InviteUserTest(InviteUserBase):
         self.assertTrue(find_key_by_email(email))
         self.assertTrue(find_key_by_email(email2))
         self.check_sent_emails([email, email2])
+
+        cordelia = self.example_user("cordelia")
+
+        # Test for checking setting for non-system user group.
+        user_group = check_add_user_group(
+            realm, "new_group", [hamlet, cordelia], acting_user=hamlet
+        )
+        do_change_realm_permission_group_setting(
+            realm, "can_invite_users_group", user_group, acting_user=None
+        )
+
+        # Hamlet and Cordelia are in the allowed user group, so can send email
+        # invitations.
+        self.login("hamlet")
+        self.assert_json_success(self.invite(invitee, ["Denmark"]))
+        self.login("cordelia")
+        self.assert_json_success(self.invite(invitee, ["Denmark"]))
+
+        # Iago is not in the allowed user group, so cannot send email
+        # invitations.
+        self.login("iago")
+        self.assert_json_error(
+            self.invite(invitee, ["Denmark"]),
+            "Insufficient permission",
+        )
+
+        # Test for checking the setting for anonymous user group.
+        anonymous_user_group = self.create_or_update_anonymous_group_for_setting(
+            [hamlet],
+            [administrators_system_group],
+        )
+        do_change_realm_permission_group_setting(
+            realm,
+            "can_invite_users_group",
+            anonymous_user_group,
+            acting_user=None,
+        )
+
+        # Hamlet is the direct member of the anonymous user group, so can send
+        # email invitations.
+        self.login("hamlet")
+        self.assert_json_success(self.invite(invitee, ["Denmark"]))
+        # Iago is in the `administrators_system_group` subgroup, so can send email
+        # invitations.
+        self.login("iago")
+        self.assert_json_success(self.invite(invitee, ["Denmark"]))
+
+        # Shiva is not in the anonymous user group, so cannot send email
+        # invitations.
+        self.login("shiva")
+        self.assert_json_error(
+            self.invite(invitee, ["Denmark"]),
+            "Insufficient permission",
+        )
 
     def test_invite_user_signup_initial_history(self) -> None:
         """
@@ -1064,10 +1386,13 @@ earl-test@zulip.com""",
         self.assert_json_success(self.invite(invitee, ["Denmark"], False))
         self.assertTrue(find_key_by_email(invitee))
         self.submit_reg_form_for_user(invitee, "password")
+        notification_bot = self.notification_bot(realm)
+        hamlet_and_notification_bot_recipient = self.get_dm_group_recipient(
+            notification_bot, user_profile
+        )
 
-        assert user_profile.recipient_id is not None
         invite_acceptance_notification_message = Message.objects.filter(
-            recipient_id=user_profile.recipient_id, realm=realm
+            recipient=hamlet_and_notification_bot_recipient, realm=realm
         ).last()
 
         self.assertIsNone(
@@ -1083,7 +1408,7 @@ earl-test@zulip.com""",
 
         new_invitee_profile = self.nonreg_user("bob")
         new_invite_acceptance_notification_message = Message.objects.filter(
-            recipient_id=user_profile.recipient_id, realm=realm
+            recipient=hamlet_and_notification_bot_recipient, realm=realm
         ).last()
 
         assert new_invite_acceptance_notification_message is not None
@@ -1147,6 +1472,17 @@ earl-test@zulip.com""",
         )
         self.check_sent_emails([])
 
+    def test_invalid_user_group(self) -> None:
+        """
+        Tests inviting to a non-existent user group.
+        """
+        self.login("hamlet")
+        self.assert_json_error(
+            self.invite("iago-test@zulip.com", ["Denmark"], group_ids=[5678]),
+            "Invalid user group",
+        )
+        self.check_sent_emails([])
+
     def test_invite_existing_user(self) -> None:
         """
         If you invite an address already using Zulip, no invitation is sent.
@@ -1173,7 +1509,7 @@ earl-test@zulip.com""",
         hamlet = self.example_user("hamlet")
         self.login_user(hamlet)
         # Test we properly handle links in user full names
-        do_change_full_name(hamlet, "</a> https://www.google.com", hamlet)
+        do_change_full_name(hamlet, "</a> https://www.google.com", hamlet, notify=False)
 
         result = self.invite("newuser@zulip.com", ["Denmark"])
         self.assert_json_success(result)
@@ -1381,17 +1717,51 @@ so we didn't send them an invitation. We did send invitations to everyone else!"
 
     def test_invite_without_permission_to_subscribe_others(self) -> None:
         realm = get_realm("zulip")
-        do_set_realm_property(
-            realm, "invite_to_stream_policy", CommonPolicyEnum.ADMINS_ONLY, acting_user=None
+        members_group = NamedUserGroup.objects.get(
+            name=SystemGroups.MEMBERS, realm_for_sharding=realm, is_system_group=True
+        )
+        admins_group = NamedUserGroup.objects.get(
+            name=SystemGroups.ADMINISTRATORS, realm_for_sharding=realm, is_system_group=True
+        )
+        do_change_realm_permission_group_setting(
+            realm, "can_add_subscribers_group", admins_group, acting_user=None
         )
 
         invitee = self.nonreg_email("alice")
+        stream_names = ["Denmark", "Scotland"]
 
         self.login("hamlet")
-        result = self.invite(invitee, ["Denmark", "Scotland"])
+        hamlet = self.example_user("hamlet")
+        result = self.invite(invitee, stream_names)
         self.assert_json_error(
             result, "You do not have permission to subscribe other users to channels."
         )
+
+        # Changing permission of just one of the channel out of two
+        # should still give an error.
+        do_change_stream_group_based_setting(
+            get_stream("Denmark", realm),
+            "can_add_subscribers_group",
+            members_group,
+            acting_user=hamlet,
+        )
+        result = self.invite(invitee, stream_names)
+        self.assert_json_error(
+            result, "You do not have permission to subscribe other users to channels."
+        )
+
+        # Changing permission of both the channels out of two should
+        # result in success.
+        do_change_stream_group_based_setting(
+            get_stream("Scotland", realm),
+            "can_add_subscribers_group",
+            members_group,
+            acting_user=hamlet,
+        )
+        result = self.invite(invitee, stream_names)
+        self.assert_json_success(result)
+        self.check_sent_emails([invitee])
+        mail.outbox.pop()
 
         # User will be subscribed to default streams even when the
         # referrer does not have permission to subscribe others.
@@ -1416,22 +1786,22 @@ so we didn't send them an invitation. We did send invitations to everyone else!"
         default_streams = get_slim_realm_default_streams(realm.id)
         self.assert_length(default_streams, 3)
 
-        self.check_user_subscribed_only_to_streams("newguy", [])
+        self.check_user_subscribed_only_to_streams("newguy", set())
         mail.outbox.pop()
 
         self.login("iago")
         invitee = self.nonreg_email("bob")
-        result = self.invite(invitee, ["Denmark", "Scotland"])
+        result = self.invite(invitee, stream_names)
         self.assert_json_success(result)
         self.check_sent_emails([invitee])
         mail.outbox.pop()
 
-        do_set_realm_property(
-            realm, "invite_to_stream_policy", CommonPolicyEnum.MEMBERS_ONLY, acting_user=None
+        do_change_realm_permission_group_setting(
+            realm, "can_add_subscribers_group", members_group, acting_user=None
         )
         self.login("hamlet")
         invitee = self.nonreg_email("test")
-        result = self.invite(invitee, ["Denmark", "Scotland"])
+        result = self.invite(invitee, stream_names)
         self.assert_json_success(result)
         self.check_sent_emails([invitee])
         mail.outbox.pop()
@@ -1456,59 +1826,31 @@ so we didn't send them an invitation. We did send invitations to everyone else!"
         self.assertTrue(find_key_by_email(invitee_email))
         self.check_sent_emails([invitee_email])
 
-        data = {"email": invitee_email, "referrer_email": current_user.email}
-        invitee = PreregistrationUser.objects.get(email=data["email"])
-        referrer = self.example_user(referrer_name)
-        validity_in_minutes = 2 * 24 * 60
-        link = create_confirmation_link(
-            invitee, Confirmation.INVITATION, validity_in_minutes=validity_in_minutes
-        )
-        context = common_context(referrer)
-        context.update(
-            activate_url=link,
-            referrer_name=referrer.full_name,
-            referrer_email=referrer.email,
-            referrer_realm_name=referrer.realm.name,
-        )
-        with self.settings(EMAIL_BACKEND="django.core.mail.backends.console.EmailBackend"):
-            email = data["email"]
-            send_future_email(
-                "zerver/emails/invitation_reminder",
-                referrer.realm,
-                to_emails=[email],
-                from_address=FromAddress.no_reply_placeholder,
-                context=context,
-            )
-        email_jobs_to_deliver = ScheduledEmail.objects.filter(
-            scheduled_timestamp__lte=timezone_now()
-        )
+        email_jobs_to_deliver = ScheduledEmail.objects.all()
         self.assert_length(email_jobs_to_deliver, 1)
-        email_count = len(mail.outbox)
+
+        mail.outbox = []
         for job in email_jobs_to_deliver:
-            deliver_scheduled_emails(job)
-        self.assert_length(mail.outbox, email_count + 1)
-        self.assertEqual(self.email_envelope_from(mail.outbox[-1]), settings.NOREPLY_EMAIL_ADDRESS)
-        self.assertIn(FromAddress.NOREPLY, self.email_display_from(mail.outbox[-1]))
+            with self.captureOnCommitCallbacks(execute=True):
+                queue_scheduled_emails(job)
+        self.assert_length(mail.outbox, 1)
+        self.assertEqual(self.email_envelope_from(mail.outbox[0]), settings.NOREPLY_EMAIL_ADDRESS)
 
         # Now verify that signing up clears invite_reminder emails
-        with self.settings(EMAIL_BACKEND="django.core.mail.backends.console.EmailBackend"):
-            email = data["email"]
-            send_future_email(
-                "zerver/emails/invitation_reminder",
-                referrer.realm,
-                to_emails=[email],
-                from_address=FromAddress.no_reply_placeholder,
-                context=context,
-            )
+        mail.outbox = []
+        invitee_email = self.nonreg_email("bob")
+        self.assert_json_success(self.invite(invitee_email, ["Denmark"]))
+        self.assertTrue(find_key_by_email(invitee_email))
+        self.check_sent_emails([invitee_email])
 
         email_jobs_to_deliver = ScheduledEmail.objects.filter(
-            scheduled_timestamp__lte=timezone_now(), type=ScheduledEmail.INVITATION_REMINDER
+            type=ScheduledEmail.INVITATION_REMINDER
         )
         self.assert_length(email_jobs_to_deliver, 1)
 
         self.register(invitee_email, "test")
         email_jobs_to_deliver = ScheduledEmail.objects.filter(
-            scheduled_timestamp__lte=timezone_now(), type=ScheduledEmail.INVITATION_REMINDER
+            type=ScheduledEmail.INVITATION_REMINDER
         )
         self.assert_length(email_jobs_to_deliver, 0)
 
@@ -1615,7 +1957,7 @@ so we didn't send them an invitation. We did send invitations to everyone else!"
         with self.captureOnCommitCallbacks(execute=True):
             do_invite_users(
                 self.user_profile,
-                ["foo@zulip.com"],
+                [Invitee(email="foo@zulip.com")],
                 streams,
                 include_realm_default_subscriptions=False,
                 invite_expires_in_minutes=invite_expires_in_minutes,
@@ -1624,14 +1966,14 @@ so we didn't send them an invitation. We did send invitations to everyone else!"
         with self.captureOnCommitCallbacks(execute=True):
             do_invite_users(
                 self.user_profile,
-                ["foo@zulip.com"],
+                [Invitee(email="foo@zulip.com")],
                 streams,
                 include_realm_default_subscriptions=False,
                 invite_expires_in_minutes=invite_expires_in_minutes,
             )
             do_invite_users(
                 self.user_profile,
-                ["foo@zulip.com"],
+                [Invitee(email="foo@zulip.com")],
                 streams,
                 include_realm_default_subscriptions=False,
                 invite_expires_in_minutes=invite_expires_in_minutes,
@@ -1643,7 +1985,7 @@ so we didn't send them an invitation. We did send invitations to everyone else!"
         with self.captureOnCommitCallbacks(execute=True):
             do_invite_users(
                 lear_user,
-                ["foo@zulip.com"],
+                [Invitee(email="foo@zulip.com")],
                 [],
                 include_realm_default_subscriptions=True,
                 invite_expires_in_minutes=invite_expires_in_minutes,
@@ -1750,7 +2092,7 @@ so we didn't send them an invitation. We did send invitations to everyone else!"
         self.assertEqual(response.status_code, 302)
         self.assertEqual(
             response["Location"],
-            reverse("login") + "?" + urlencode({"email": email, "already_registered": 1}),
+            reverse("login", query={"email": email, "already_registered": 1}),
         )
 
     def test_confirmation_key_cant_be_reused(self) -> None:
@@ -1840,6 +2182,165 @@ so we didn't send them an invitation. We did send invitations to everyone else!"
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response["Location"], "http://zulip.testserver/")
 
+    def test_invite_welcome_bot_custom_message_from_admin(self) -> None:
+        self.login("iago")
+        realm = get_realm("zulip")
+        welcome_message_custom_text = "Welcome Bot custom message."
+        realm_welcome_message_custom_text = "Realm's Welcome Bot message."
+        do_set_realm_property(
+            realm,
+            "welcome_message_custom_text",
+            realm_welcome_message_custom_text,
+            acting_user=None,
+        )
+
+        # Invites when `welcome_message_custom_text` is provided.
+        invitee = self.nonreg_email("alice")
+        result = self.invite(invitee, [], welcome_message_custom_text=welcome_message_custom_text)
+        self.assert_json_success(result)
+        self.assertTrue(find_key_by_email(invitee))
+
+        self.submit_reg_form_for_user(invitee, "password")
+
+        received_initial_direct_message = self.get_second_to_last_message()
+        received_welcome_bot_custom_message = self.get_last_message()
+        self.assertEqual(received_initial_direct_message.sender.email, "welcome-bot@zulip.com")
+        self.assertTrue(
+            received_initial_direct_message.content.startswith("Hello, and welcome to Zulip!")
+        )
+        self.assertEqual(received_welcome_bot_custom_message.sender.email, "welcome-bot@zulip.com")
+        self.assertIn(welcome_message_custom_text, received_welcome_bot_custom_message.content)
+
+        # Invites when `welcome_message_custom_text` is not provided.
+        invitee = self.nonreg_email("bob")
+        result = self.invite(invitee, [])
+        self.assert_json_success(result)
+        self.assertTrue(find_key_by_email(invitee))
+
+        self.submit_reg_form_for_user(invitee, "password")
+
+        received_initial_direct_message = self.get_second_to_last_message()
+        received_welcome_bot_custom_message = self.get_last_message()
+        self.assertEqual(received_initial_direct_message.sender.email, "welcome-bot@zulip.com")
+        self.assertTrue(
+            received_initial_direct_message.content.startswith("Hello, and welcome to Zulip!")
+        )
+        self.assertEqual(received_welcome_bot_custom_message.sender.email, "welcome-bot@zulip.com")
+        self.assertIn(
+            realm_welcome_message_custom_text, received_welcome_bot_custom_message.content
+        )
+
+        # Invites when `welcome_message_custom_text` is an empty string.
+        self.login("iago")
+        invitee = self.nonreg_email("newguy")
+        result = self.invite(invitee, [], welcome_message_custom_text="")
+        self.assert_json_success(result)
+        self.assertTrue(find_key_by_email(invitee))
+
+        self.submit_reg_form_for_user(invitee, "password")
+
+        second_to_last_message = self.get_second_to_last_message()
+        received_initial_direct_message = self.get_last_message()
+        self.assertNotEqual(second_to_last_message.sender.email, "welcome-bot@zulip.com")
+        self.assertEqual(received_initial_direct_message.sender.email, "welcome-bot@zulip.com")
+        self.assertTrue(
+            received_initial_direct_message.content.startswith("Hello, and welcome to Zulip!")
+        )
+
+    def test_invite_welcome_bot_custom_message_from_member(self) -> None:
+        # If a non-admin member is creating an invitation the Welcome Bot
+        # custom message is sent if it is configured in the realm.
+
+        # If the `welcome_message_custom_text` is configured for the realm.
+        self.login("hamlet")
+        realm = get_realm("zulip")
+        welcome_message_custom_text = "Welcome Bot custom message."
+        realm_welcome_message_custom_text = "Realm's Welcome Bot message."
+        invitee = self.nonreg_email("alice")
+        do_set_realm_property(
+            realm,
+            "welcome_message_custom_text",
+            realm_welcome_message_custom_text,
+            acting_user=None,
+        )
+
+        result = self.invite(invitee, [])
+        self.assert_json_success(result)
+        self.assertTrue(find_key_by_email(invitee))
+
+        self.submit_reg_form_for_user(invitee, "password")
+
+        received_initial_direct_message = self.get_second_to_last_message()
+        received_welcome_bot_custom_message = self.get_last_message()
+        self.assertEqual(received_initial_direct_message.sender.email, "welcome-bot@zulip.com")
+        self.assertTrue(
+            received_initial_direct_message.content.startswith("Hello, and welcome to Zulip!")
+        )
+        self.assertEqual(received_welcome_bot_custom_message.sender.email, "welcome-bot@zulip.com")
+        self.assertIn(
+            realm_welcome_message_custom_text, received_welcome_bot_custom_message.content
+        )
+
+        # Non-admin users are not allowed to send customized welcome messages.
+        invitee = self.nonreg_email("bob")
+        result = self.invite(invitee, [], welcome_message_custom_text=welcome_message_custom_text)
+        self.assert_json_error(result, "Must be an organization administrator")
+
+        # If the `welcome_message_custom_text` is not configured for the realm.
+        invitee = self.nonreg_email("newguy")
+        do_set_realm_property(
+            realm,
+            "welcome_message_custom_text",
+            "",
+            acting_user=None,
+        )
+        result = self.invite(invitee, [])
+        self.assert_json_success(result)
+        self.assertTrue(find_key_by_email(invitee))
+
+        self.submit_reg_form_for_user(invitee, "password")
+
+        second_to_last_message = self.get_second_to_last_message()
+        received_initial_direct_message = self.get_last_message()
+        self.assertNotEqual(second_to_last_message.sender.email, "welcome-bot@zulip.com")
+        self.assertEqual(received_initial_direct_message.sender.email, "welcome-bot@zulip.com")
+        self.assertTrue(
+            received_initial_direct_message.content.startswith("Hello, and welcome to Zulip!")
+        )
+
+    def test_invite_welcome_bot_custom_message_changed_after_invite(self) -> None:
+        self.login("iago")
+        realm = get_realm("zulip")
+        realm_welcome_message_custom_text = "Realm's Welcome Bot message."
+
+        # If `welcome_message_custom_text` is `None`, we use the realm's
+        # configured message at the time the user accepts the invite. So if the realm's
+        # configured message is updated later, the user will receive the updated version.
+        self.assertNotEqual(realm.welcome_message_custom_text, realm_welcome_message_custom_text)
+        invitee = self.nonreg_email("alice")
+        result = self.invite(invitee, [])
+        self.assert_json_success(result)
+        self.assertTrue(find_key_by_email(invitee))
+        do_set_realm_property(
+            realm,
+            "welcome_message_custom_text",
+            realm_welcome_message_custom_text,
+            acting_user=None,
+        )
+
+        self.submit_reg_form_for_user(invitee, "password")
+
+        received_initial_direct_message = self.get_second_to_last_message()
+        received_welcome_bot_custom_message = self.get_last_message()
+        self.assertEqual(received_initial_direct_message.sender.email, "welcome-bot@zulip.com")
+        self.assertTrue(
+            received_initial_direct_message.content.startswith("Hello, and welcome to Zulip!")
+        )
+        self.assertEqual(received_welcome_bot_custom_message.sender.email, "welcome-bot@zulip.com")
+        self.assertIn(
+            realm_welcome_message_custom_text, received_welcome_bot_custom_message.content
+        )
+
 
 class InvitationsTestCase(InviteUserBase):
     def test_do_get_invites_controlled_by_user(self) -> None:
@@ -1855,35 +2356,35 @@ class InvitationsTestCase(InviteUserBase):
         with self.captureOnCommitCallbacks(execute=True):
             do_invite_users(
                 user_profile,
-                ["TestOne@zulip.com"],
+                [Invitee(email="TestOne@zulip.com")],
                 streams,
                 include_realm_default_subscriptions=False,
                 invite_expires_in_minutes=invite_expires_in_minutes,
             )
             do_invite_users(
                 user_profile,
-                ["TestTwo@zulip.com"],
+                [Invitee(email="TestTwo@zulip.com")],
                 streams,
                 include_realm_default_subscriptions=False,
                 invite_expires_in_minutes=invite_expires_in_minutes,
             )
             do_invite_users(
                 hamlet,
-                ["TestThree@zulip.com"],
+                [Invitee(email="TestThree@zulip.com")],
                 streams,
                 include_realm_default_subscriptions=False,
                 invite_expires_in_minutes=invite_expires_in_minutes,
             )
             do_invite_users(
                 othello,
-                ["TestFour@zulip.com"],
+                [Invitee(email="TestFour@zulip.com")],
                 streams,
                 include_realm_default_subscriptions=False,
                 invite_expires_in_minutes=invite_expires_in_minutes,
             )
             do_invite_users(
                 self.mit_user("sipbtest"),
-                ["TestOne@mit.edu"],
+                [Invitee(email="TestOne@mit.edu")],
                 [],
                 include_realm_default_subscriptions=False,
                 invite_expires_in_minutes=invite_expires_in_minutes,
@@ -1927,7 +2428,7 @@ class InvitationsTestCase(InviteUserBase):
         with self.captureOnCommitCallbacks(execute=True):
             do_invite_users(
                 user_profile,
-                ["TestOne@zulip.com"],
+                [Invitee(email="TestOne@zulip.com")],
                 streams,
                 include_realm_default_subscriptions=False,
                 invite_expires_in_minutes=invite_expires_in_minutes,
@@ -1939,7 +2440,7 @@ class InvitationsTestCase(InviteUserBase):
         ):
             do_invite_users(
                 user_profile,
-                ["TestTwo@zulip.com"],
+                [Invitee(email="TestTwo@zulip.com")],
                 streams,
                 include_realm_default_subscriptions=False,
                 invite_expires_in_minutes=invite_expires_in_minutes,
@@ -1994,14 +2495,14 @@ class InvitationsTestCase(InviteUserBase):
             # after a large amount of days.
             do_invite_users(
                 user_profile,
-                ["TestOne@zulip.com"],
+                [Invitee(email="TestOne@zulip.com")],
                 streams,
                 include_realm_default_subscriptions=False,
                 invite_expires_in_minutes=None,
             )
             do_invite_users(
                 user_profile,
-                ["TestTwo@zulip.com"],
+                [Invitee(email="TestTwo@zulip.com")],
                 streams,
                 include_realm_default_subscriptions=False,
                 invite_expires_in_minutes=100 * 24 * 60,
@@ -2038,19 +2539,38 @@ class InvitationsTestCase(InviteUserBase):
         A DELETE call to /json/invites/<ID> should delete the invite and
         any scheduled invitation reminder emails.
         """
+        iago = self.example_user("iago")
         self.login("iago")
 
         invitee = "DeleteMe@zulip.com"
         self.assert_json_success(self.invite(invitee, ["Denmark"]))
         prereg_user = PreregistrationUser.objects.get(email=invitee)
+        confirmation = Confirmation.objects.get(
+            type=Confirmation.INVITATION, object_id=prereg_user.id
+        )
+        self.assertEqual(confirmation.content_object, prereg_user)
 
         # Verify that the scheduled email exists.
         ScheduledEmail.objects.get(address__iexact=invitee, type=ScheduledEmail.INVITATION_REMINDER)
 
         result = self.client_delete("/json/invites/" + str(prereg_user.id))
         self.assertEqual(result.status_code, 200)
+
+        audit_log = RealmAuditLog.objects.latest("id")
+        self.assertEqual(audit_log.event_type, AuditLogEventType.INVITATION_REVOKED)
+        self.assertEqual(audit_log.acting_user, iago)
+        extra_data = audit_log.extra_data
+        self.assertDictEqual(
+            extra_data,
+            {
+                "confirmation_id": confirmation.id,
+                "invitation_type": Confirmation.INVITATION,
+                "invitation_object_id": prereg_user.id,
+            },
+        )
+
         error_result = self.client_delete("/json/invites/" + str(prereg_user.id))
-        self.assert_json_error(error_result, "No such invitation")
+        self.assert_json_error(error_result, "Invitation already used or deactivated.")
 
         self.assertRaises(
             ScheduledEmail.DoesNotExist,
@@ -2088,7 +2608,7 @@ class InvitationsTestCase(InviteUserBase):
         self.assertEqual(result.status_code, 200)
 
         result = self.api_delete(user_profile, "/api/v1/invites/" + str(prereg_user.id))
-        self.assert_json_error(result, "No such invitation")
+        self.assert_json_error(result, "Invitation already used or deactivated.")
 
         self.assertRaises(
             ScheduledEmail.DoesNotExist,
@@ -2116,7 +2636,7 @@ class InvitationsTestCase(InviteUserBase):
         result = self.api_delete(owner, "/api/v1/invites/" + str(prereg_user.id))
         self.assert_json_success(result)
         result = self.api_delete(owner, "/api/v1/invites/" + str(prereg_user.id))
-        self.assert_json_error(result, "No such invitation")
+        self.assert_json_error(result, "Invitation already used or deactivated.")
         self.assertRaises(
             ScheduledEmail.DoesNotExist,
             lambda: ScheduledEmail.objects.get(
@@ -2124,11 +2644,37 @@ class InvitationsTestCase(InviteUserBase):
             ),
         )
 
+    def test_revoked_invitation_link(self) -> None:
+        self.login("desdemona")
+
+        invitee = "DeleteMe@zulip.com"
+        self.assert_json_success(self.invite(invitee, ["Denmark"]))
+
+        prereg_user = PreregistrationUser.objects.get(email=invitee)
+
+        confirmation = Confirmation.objects.get(
+            type=Confirmation.INVITATION, object_id=prereg_user.id
+        )
+        self.assertEqual(confirmation.content_object, prereg_user)
+
+        invite_link = confirmation_url_for(confirmation)
+        do_revoke_user_invite(prereg_user)
+
+        result = self.client_get(invite_link)
+
+        self.assertEqual(result.status_code, 404)
+        self.assert_in_response("The confirmation link has expired or been deactivated.", result)
+
+        prereg_user.refresh_from_db()
+        self.assertEqual(prereg_user.status, confirmation_settings.STATUS_REVOKED)
+        self.assertTrue(Confirmation.objects.filter(id=confirmation.id).exists())
+
     def test_delete_multiuse_invite(self) -> None:
         """
         A DELETE call to /json/invites/multiuse<ID> should delete the
         multiuse_invite.
         """
+        iago = self.example_user("iago")
         self.login("iago")
 
         zulip_realm = get_realm("zulip")
@@ -2136,10 +2682,26 @@ class InvitationsTestCase(InviteUserBase):
             referred_by=self.example_user("hamlet"), realm=zulip_realm
         )
         validity_in_minutes = 2 * 24 * 60
-        create_confirmation_link(
+        confirmation_link = create_confirmation_link(
             multiuse_invite, Confirmation.MULTIUSE_INVITE, validity_in_minutes=validity_in_minutes
         )
+        confirmation_key = confirmation_link.split("/")[-2]
+        confirmation = Confirmation.objects.get(confirmation_key=confirmation_key)
         result = self.client_delete("/json/invites/multiuse/" + str(multiuse_invite.id))
+
+        audit_log = RealmAuditLog.objects.latest("id")
+        self.assertEqual(audit_log.event_type, AuditLogEventType.INVITATION_REVOKED)
+        self.assertEqual(audit_log.acting_user, iago)
+        extra_data = audit_log.extra_data
+        self.assertDictEqual(
+            extra_data,
+            {
+                "confirmation_id": confirmation.id,
+                "invitation_type": Confirmation.MULTIUSE_INVITE,
+                "invitation_object_id": multiuse_invite.id,
+            },
+        )
+
         self.assertEqual(result.status_code, 200)
         self.assertEqual(
             MultiuseInvite.objects.get(id=multiuse_invite.id).status,
@@ -2409,6 +2971,25 @@ class InvitationsTestCase(InviteUserBase):
         self.assertIsNotNone(user)
         self.assertEqual(user.delivery_email, email)
 
+    def test_prereg_user_object_has_full_name_set(self) -> None:
+        emails = 'TestOne <test1@zulip.com>, test2@zulip.com, "Test, Three" <test3@zulip.com>, Test Four <test4@zulip.com>'
+        self.login("iago")
+        result = self.client_post(
+            "/json/invites", {"invitee_emails": emails, "stream_ids": orjson.dumps([]).decode()}
+        )
+        self.assert_json_success(result)
+
+        expected_users = {
+            "test1@zulip.com": "TestOne",
+            "test2@zulip.com": "",
+            "test3@zulip.com": "Test, Three",
+            "test4@zulip.com": "Test Four",
+        }
+
+        for email, expected_name in expected_users.items():
+            prereg_user = PreregistrationUser.objects.get(email=email)
+            self.assertEqual(prereg_user.full_name, expected_name)
+
 
 class InviteeEmailsParserTests(ZulipTestCase):
     @override
@@ -2420,25 +3001,41 @@ class InviteeEmailsParserTests(ZulipTestCase):
 
     def test_if_emails_separated_by_commas_are_parsed_and_striped_correctly(self) -> None:
         emails_raw = f"{self.email1} ,{self.email2}, {self.email3}"
-        expected_set = {self.email1, self.email2, self.email3}
-        self.assertEqual(get_invitee_emails_set(emails_raw), expected_set)
+        expected_set = {
+            Invitee(full_name="", email=self.email1),
+            Invitee(full_name="", email=self.email2),
+            Invitee(full_name="", email=self.email3),
+        }
+        self.assertEqual(get_invitees_set(emails_raw), expected_set)
 
     def test_if_emails_separated_by_newlines_are_parsed_and_striped_correctly(self) -> None:
         emails_raw = f"{self.email1}\n {self.email2}\n {self.email3} "
-        expected_set = {self.email1, self.email2, self.email3}
-        self.assertEqual(get_invitee_emails_set(emails_raw), expected_set)
+        expected_set = {
+            Invitee(full_name="", email=self.email1),
+            Invitee(full_name="", email=self.email2),
+            Invitee(full_name="", email=self.email3),
+        }
+        self.assertEqual(get_invitees_set(emails_raw), expected_set)
 
     def test_if_emails_from_email_client_separated_by_newlines_are_parsed_correctly(self) -> None:
         emails_raw = (
             f"Email One <{self.email1}>\nEmailTwo<{self.email2}>\nEmail Three<{self.email3}>"
         )
-        expected_set = {self.email1, self.email2, self.email3}
-        self.assertEqual(get_invitee_emails_set(emails_raw), expected_set)
+        expected_set = {
+            Invitee(full_name="Email One", email=self.email1),
+            Invitee(full_name="EmailTwo", email=self.email2),
+            Invitee(full_name="Email Three", email=self.email3),
+        }
+        self.assertEqual(get_invitees_set(emails_raw), expected_set)
 
     def test_if_emails_in_mixed_style_are_parsed_correctly(self) -> None:
         emails_raw = f"Email One <{self.email1}>,EmailTwo<{self.email2}>\n{self.email3}"
-        expected_set = {self.email1, self.email2, self.email3}
-        self.assertEqual(get_invitee_emails_set(emails_raw), expected_set)
+        expected_set = {
+            Invitee(full_name="Email One", email=self.email1),
+            Invitee(full_name="EmailTwo", email=self.email2),
+            Invitee(full_name="", email=self.email3),
+        }
+        self.assertEqual(get_invitees_set(emails_raw), expected_set)
 
 
 class MultiuseInviteTest(ZulipTestCase):
@@ -2453,6 +3050,7 @@ class MultiuseInviteTest(ZulipTestCase):
         self,
         streams: list[Stream] | None = None,
         date_sent: datetime | None = None,
+        user_groups: list[NamedUserGroup] | None = None,
         include_realm_default_subscriptions: bool = False,
     ) -> str:
         invite = MultiuseInvite(
@@ -2464,6 +3062,9 @@ class MultiuseInviteTest(ZulipTestCase):
 
         if streams is not None:
             invite.streams.set(streams)
+
+        if user_groups is not None:
+            invite.groups.set(user_groups)
 
         if date_sent is None:
             date_sent = timezone_now()
@@ -2501,6 +3102,165 @@ class MultiuseInviteTest(ZulipTestCase):
 
         mail.outbox.pop()
 
+    def test_multiuse_invite_welcome_bot_custom_message_from_admin(self) -> None:
+        self.login("iago")
+        realm = get_realm("zulip")
+        welcome_message_custom_text = "Welcome Bot custom message."
+        realm_welcome_message_custom_text = "Realm's Welcome Bot message."
+        do_set_realm_property(
+            realm,
+            "welcome_message_custom_text",
+            realm_welcome_message_custom_text,
+            acting_user=None,
+        )
+
+        # Multiuse invites when `welcome_message_custom_text` is provided.
+        result = self.client_post(
+            "/json/invites/multiuse",
+            {
+                "welcome_message_custom_text": welcome_message_custom_text,
+            },
+        )
+        invite_link = self.assert_json_success(result)["invite_link"]
+        self.check_user_able_to_register(self.nonreg_email("alice"), invite_link)
+
+        received_initial_direct_message = self.get_second_to_last_message()
+        received_welcome_bot_custom_message = self.get_last_message()
+        self.assertEqual(received_initial_direct_message.sender.email, "welcome-bot@zulip.com")
+        self.assertTrue(
+            received_initial_direct_message.content.startswith("Hello, and welcome to Zulip!")
+        )
+        self.assertEqual(received_welcome_bot_custom_message.sender.email, "welcome-bot@zulip.com")
+        self.assertIn(welcome_message_custom_text, received_welcome_bot_custom_message.content)
+
+        # Multiuse invites when `welcome_message_custom_text` is not provided.
+        self.login("iago")
+        result = self.client_post("/json/invites/multiuse")
+        invite_link = self.assert_json_success(result)["invite_link"]
+        self.check_user_able_to_register(self.nonreg_email("bob"), invite_link)
+
+        received_initial_direct_message = self.get_second_to_last_message()
+        received_welcome_bot_custom_message = self.get_last_message()
+        self.assertEqual(received_initial_direct_message.sender.email, "welcome-bot@zulip.com")
+        self.assertTrue(
+            received_initial_direct_message.content.startswith("Hello, and welcome to Zulip!")
+        )
+        self.assertEqual(received_welcome_bot_custom_message.sender.email, "welcome-bot@zulip.com")
+        self.assertIn(
+            realm_welcome_message_custom_text, received_welcome_bot_custom_message.content
+        )
+
+        # Multiuse invites when `welcome_message_custom_text` is an empty string.
+        self.login("iago")
+        result = self.client_post(
+            "/json/invites/multiuse",
+            {
+                "welcome_message_custom_text": "",
+            },
+        )
+        invite_link = self.assert_json_success(result)["invite_link"]
+        self.check_user_able_to_register(self.nonreg_email("newguy"), invite_link)
+
+        second_to_last_message = self.get_second_to_last_message()
+        received_initial_direct_message = self.get_last_message()
+        self.assertFalse(second_to_last_message.content.startswith("Hello, and welcome to Zulip!"))
+        self.assertEqual(received_initial_direct_message.sender.email, "welcome-bot@zulip.com")
+        self.assertTrue(
+            received_initial_direct_message.content.startswith("Hello, and welcome to Zulip!")
+        )
+
+    def test_multiuse_invite_welcome_bot_custom_message_from_member(self) -> None:
+        # If a non-admin member is creating an invitation the Welcome Bot
+        # custom message is sent if it is configured in the realm.
+
+        # If the `welcome_message_custom_text` is configured for the realm.
+        self.login("hamlet")
+        realm = get_realm("zulip")
+        members_group = NamedUserGroup.objects.get(
+            name=SystemGroups.MEMBERS, realm_for_sharding=realm, is_system_group=True
+        )
+        welcome_message_custom_text = "Welcome Bot custom message."
+        realm_welcome_message_custom_text = "Realm's Welcome Bot message."
+        do_change_realm_permission_group_setting(
+            realm, "create_multiuse_invite_group", members_group, acting_user=None
+        )
+        do_set_realm_property(
+            realm,
+            "welcome_message_custom_text",
+            realm_welcome_message_custom_text,
+            acting_user=None,
+        )
+
+        result = self.client_post("/json/invites/multiuse")
+        invite_link = self.assert_json_success(result)["invite_link"]
+        self.check_user_able_to_register(self.nonreg_email("alice"), invite_link)
+
+        received_initial_direct_message = self.get_second_to_last_message()
+        received_welcome_bot_custom_message = self.get_last_message()
+        self.assertEqual(received_initial_direct_message.sender.email, "welcome-bot@zulip.com")
+        self.assertTrue(
+            received_initial_direct_message.content.startswith("Hello, and welcome to Zulip!")
+        )
+        self.assertEqual(received_welcome_bot_custom_message.sender.email, "welcome-bot@zulip.com")
+        self.assertIn(
+            realm_welcome_message_custom_text, received_welcome_bot_custom_message.content
+        )
+
+        # Non-admin users are not allowed to send customized welcome messages.
+        result = self.client_post(
+            "/json/invites/multiuse", {"welcome_message_custom_text": welcome_message_custom_text}
+        )
+        self.assert_json_error(result, "Must be an organization administrator")
+
+        # If the `welcome_message_custom_text` is not configured for the realm.
+        do_set_realm_property(
+            realm,
+            "welcome_message_custom_text",
+            "",
+            acting_user=None,
+        )
+        result = self.client_post("/json/invites/multiuse")
+        invite_link = self.assert_json_success(result)["invite_link"]
+        self.check_user_able_to_register(self.nonreg_email("newguy"), invite_link)
+
+        second_to_last_message = self.get_second_to_last_message()
+        received_initial_direct_message = self.get_last_message()
+        self.assertFalse(second_to_last_message.content.startswith("Hello, and welcome to Zulip!"))
+        self.assertEqual(received_initial_direct_message.sender.email, "welcome-bot@zulip.com")
+        self.assertTrue(
+            received_initial_direct_message.content.startswith("Hello, and welcome to Zulip!")
+        )
+
+    def test_multiuse_invite_welcome_bot_custom_message_changed_after_invite(self) -> None:
+        self.login("iago")
+        realm = get_realm("zulip")
+        realm_welcome_message_custom_text = "Realm's Welcome Bot message."
+
+        # If `welcome_message_custom_text` is `None`, we use the realm's
+        # configured message at the time the user accepts the invite. So if the realm's
+        # configured message is updated later, the user will receive the updated version.
+        self.assertNotEqual(realm.welcome_message_custom_text, realm_welcome_message_custom_text)
+        result = self.client_post("/json/invites/multiuse")
+        invite_link = self.assert_json_success(result)["invite_link"]
+        do_set_realm_property(
+            realm,
+            "welcome_message_custom_text",
+            realm_welcome_message_custom_text,
+            acting_user=None,
+        )
+        self.check_user_able_to_register(self.nonreg_email("alice"), invite_link)
+
+        received_initial_direct_message = self.get_second_to_last_message()
+        received_welcome_bot_custom_message = self.get_last_message()
+        self.assertEqual(received_initial_direct_message.sender.email, "welcome-bot@zulip.com")
+        self.assertTrue(
+            received_initial_direct_message.content.startswith("Hello, and welcome to Zulip!")
+        )
+        self.assertEqual(received_welcome_bot_custom_message.sender.email, "welcome-bot@zulip.com")
+        self.assertIn(
+            realm_welcome_message_custom_text, received_welcome_bot_custom_message.content
+        )
+
     def test_valid_multiuse_link(self) -> None:
         email1 = self.nonreg_email("test")
         email2 = self.nonreg_email("test1")
@@ -2525,14 +3285,22 @@ class MultiuseInviteTest(ZulipTestCase):
     def test_revoked_multiuse_link(self) -> None:
         email = self.nonreg_email("newuser")
         invite_link = self.generate_multiuse_invite_link()
-        multiuse_invite = MultiuseInvite.objects.last()
-        assert multiuse_invite is not None
+        key = invite_link.split("/")[-2]
+
+        multiuse_invite = MultiuseInvite.objects.latest("id")
+        confirmation = Confirmation.objects.get(confirmation_key=key)
+        self.assertEqual(confirmation.content_object, multiuse_invite)
+
         do_revoke_multi_use_invite(multiuse_invite)
 
         result = self.client_post(invite_link, {"email": email})
 
         self.assertEqual(result.status_code, 404)
-        self.assert_in_response("We couldn't find your confirmation link in the system.", result)
+        self.assert_in_response("The confirmation link has expired or been deactivated.", result)
+
+        multiuse_invite.refresh_from_db()
+        self.assertEqual(multiuse_invite.status, confirmation_settings.STATUS_REVOKED)
+        self.assertTrue(Confirmation.objects.filter(id=confirmation.id).exists())
 
     def test_invalid_multiuse_link(self) -> None:
         email = self.nonreg_email("newuser")
@@ -2571,13 +3339,13 @@ class MultiuseInviteTest(ZulipTestCase):
         streams = [get_stream(stream_name, self.realm) for stream_name in stream_names]
         invite_link = self.generate_multiuse_invite_link(streams=streams)
         self.check_user_able_to_register(email1, invite_link)
-        self.check_user_subscribed_only_to_streams(name1, streams)
+        self.check_user_subscribed_only_to_streams(name1, set(streams))
 
         stream_names = ["Rome", "Verona"]
         streams = [get_stream(stream_name, self.realm) for stream_name in stream_names]
         invite_link = self.generate_multiuse_invite_link(streams=streams)
         self.check_user_able_to_register(email2, invite_link)
-        self.check_user_subscribed_only_to_streams(name2, streams)
+        self.check_user_subscribed_only_to_streams(name2, set(streams))
 
         streams = []
         invite_link = self.generate_multiuse_invite_link(
@@ -2593,7 +3361,7 @@ class MultiuseInviteTest(ZulipTestCase):
             streams=streams, include_realm_default_subscriptions=False
         )
         self.check_user_able_to_register(email4, invite_link)
-        self.check_user_subscribed_only_to_streams(name4, [])
+        self.check_user_subscribed_only_to_streams(name4, set())
 
         default_streams = get_slim_realm_default_streams(self.realm.id)
         self.assert_length(default_streams, 3)
@@ -2604,7 +3372,29 @@ class MultiuseInviteTest(ZulipTestCase):
         self.check_user_able_to_register(email5, invite_link)
         rome = get_stream("Rome", self.realm)
         self.check_user_subscribed_only_to_streams(
-            name5, [rome, default_streams[0], default_streams[1], default_streams[2]]
+            name5,
+            {rome} | default_streams,
+        )
+
+    def test_multiuse_link_with_specified_user_groups(self) -> None:
+        iago = self.example_user("iago")
+        self.login("iago")
+
+        user_group1 = check_add_user_group(iago.realm, "test1", [], acting_user=iago)
+        user_group2 = check_add_user_group(iago.realm, "test2", [], acting_user=iago)
+
+        user_groups = [user_group1, user_group2]
+
+        invite_link = self.generate_multiuse_invite_link(user_groups=user_groups)
+        self.check_user_able_to_register(self.nonreg_email("bob"), invite_link)
+
+        # bob is a direct member of two role-based system groups also.
+        user_groups_subscriptions = get_direct_user_groups(self.nonreg_user("bob"))
+        user_group_names = [group.named_user_group.name for group in user_groups_subscriptions]
+
+        self.assertEqual(
+            set(user_group_names),
+            {"test1", "test2", SystemGroups.MEMBERS, SystemGroups.FULL_MEMBERS},
         )
 
     def test_multiuse_link_different_realms(self) -> None:
@@ -2660,7 +3450,7 @@ class MultiuseInviteTest(ZulipTestCase):
         )
         invite_link = self.assert_json_success(result)["invite_link"]
         self.check_user_able_to_register(self.nonreg_email("test"), invite_link)
-        self.check_user_subscribed_only_to_streams("test", streams)
+        self.check_user_subscribed_only_to_streams("test", set(streams))
 
         self.login("iago")
         stream_ids = []
@@ -2668,7 +3458,7 @@ class MultiuseInviteTest(ZulipTestCase):
         verona = get_stream("Verona", self.realm)
         sandbox = get_stream("sandbox", self.realm)
         zulip = get_stream("Zulip", self.realm)
-        self.assertCountEqual(default_streams, [verona, sandbox, zulip])
+        self.assertEqual(default_streams, {verona, sandbox, zulip})
 
         # Check that user is subscribed to the streams that were set as default
         # at the time of account creation and not at the time of inviting them.
@@ -2686,7 +3476,7 @@ class MultiuseInviteTest(ZulipTestCase):
         do_add_default_stream(denmark)
         do_remove_default_stream(verona)
         self.check_user_able_to_register(self.nonreg_email("test1"), invite_link)
-        self.check_user_subscribed_only_to_streams("test1", [denmark, sandbox, zulip])
+        self.check_user_subscribed_only_to_streams("test1", {denmark, sandbox, zulip})
 
         stream_ids = [verona.id]
         self.login("iago")
@@ -2701,8 +3491,8 @@ class MultiuseInviteTest(ZulipTestCase):
         invite_link = self.assert_json_success(result)["invite_link"]
         self.check_user_able_to_register(self.nonreg_email("newguy"), invite_link)
         default_streams = get_slim_realm_default_streams(self.realm.id)
-        self.assertCountEqual(default_streams, [denmark, sandbox, zulip])
-        self.check_user_subscribed_only_to_streams("newguy", [denmark, sandbox, verona, zulip])
+        self.assertEqual(default_streams, {denmark, sandbox, zulip})
+        self.check_user_subscribed_only_to_streams("newguy", {denmark, sandbox, verona, zulip})
 
         self.login("iago")
         stream_ids = []
@@ -2717,19 +3507,70 @@ class MultiuseInviteTest(ZulipTestCase):
         invite_link = self.assert_json_success(result)["invite_link"]
         self.check_user_able_to_register(self.nonreg_email("alice"), invite_link)
         # User is not subscribed to default streams as well.
-        self.assert_length(get_default_streams_for_realm_as_dicts(self.realm.id), 3)
-        self.check_user_subscribed_only_to_streams("alice", [])
+        self.assert_length(get_slim_realm_default_streams(self.realm.id), 3)
+        self.check_user_subscribed_only_to_streams("alice", set())
+
+    def test_create_multiuse_link_with_specified_user_groups_api_call(self) -> None:
+        iago = self.example_user("iago")
+        self.login("iago")
+
+        user_group1 = check_add_user_group(iago.realm, "test1", [], acting_user=iago)
+        user_group2 = check_add_user_group(iago.realm, "test2", [], acting_user=iago)
+
+        group_ids = [user_group1.id, user_group2.id]
+        result = self.client_post(
+            "/json/invites/multiuse",
+            {
+                "group_ids": orjson.dumps(group_ids).decode(),
+                "invite_expires_in_minutes": 2 * 24 * 60,
+            },
+        )
+        invite_link = self.assert_json_success(result)["invite_link"]
+        self.check_user_able_to_register(self.nonreg_email("bob"), invite_link)
+
+        # bob is a direct member of two role-based system groups also.
+        user_groups_subscriptions = get_direct_user_groups(self.nonreg_user("bob"))
+        user_group_names = [group.named_user_group.name for group in user_groups_subscriptions]
+
+        self.assertEqual(
+            set(user_group_names),
+            {"test1", "test2", SystemGroups.MEMBERS, SystemGroups.FULL_MEMBERS},
+        )
+
+        self.login("iago")
+        group_ids = []
+        result = self.client_post(
+            "/json/invites/multiuse",
+            {
+                "group_ids": orjson.dumps(group_ids).decode(),
+                "invite_expires_in_minutes": 2 * 24 * 60,
+            },
+        )
+        invite_link = self.assert_json_success(result)["invite_link"]
+        self.check_user_able_to_register(self.nonreg_email("newuser"), invite_link)
+
+        # bob is a direct member of two role-based system groups also.
+        user_groups_subscriptions = get_direct_user_groups(self.nonreg_user("newuser"))
+        user_group_names = [group.named_user_group.name for group in user_groups_subscriptions]
+
+        self.assertEqual(
+            set(user_group_names),
+            {SystemGroups.MEMBERS, SystemGroups.FULL_MEMBERS},
+        )
 
     def test_multiuse_invite_without_permission_to_subscribe_others(self) -> None:
         realm = get_realm("zulip")
         members_group = NamedUserGroup.objects.get(
-            name=SystemGroups.MEMBERS, realm=realm, is_system_group=True
+            name=SystemGroups.MEMBERS, realm_for_sharding=realm, is_system_group=True
         )
         do_change_realm_permission_group_setting(
             realm, "create_multiuse_invite_group", members_group, acting_user=None
         )
-        do_set_realm_property(
-            realm, "invite_to_stream_policy", CommonPolicyEnum.ADMINS_ONLY, acting_user=None
+        admins_group = NamedUserGroup.objects.get(
+            name=SystemGroups.ADMINISTRATORS, realm_for_sharding=realm, is_system_group=True
+        )
+        do_change_realm_permission_group_setting(
+            realm, "can_add_subscribers_group", admins_group, acting_user=None
         )
 
         self.login("hamlet")
@@ -2771,8 +3612,8 @@ class MultiuseInviteTest(ZulipTestCase):
         )
         self.assert_json_success(result)
 
-        do_set_realm_property(
-            realm, "invite_to_stream_policy", CommonPolicyEnum.MEMBERS_ONLY, acting_user=None
+        do_change_realm_permission_group_setting(
+            realm, "can_add_subscribers_group", members_group, acting_user=None
         )
         self.login("hamlet")
         result = self.client_post(
@@ -2784,13 +3625,140 @@ class MultiuseInviteTest(ZulipTestCase):
         )
         self.assert_json_success(result)
 
+    def test_multiuser_link_with_specified_user_groups_when_cannot_add_members(self) -> None:
+        hamlet = self.example_user("hamlet")
+        realm = hamlet.realm
+        # All users except guests have permission to create multiuse invite.
+        members_group = NamedUserGroup.objects.get(
+            name=SystemGroups.MEMBERS, realm_for_sharding=realm, is_system_group=True
+        )
+        do_change_realm_permission_group_setting(
+            realm, "create_multiuse_invite_group", members_group, acting_user=None
+        )
+
+        nobody_group = NamedUserGroup.objects.get(
+            name=SystemGroups.NOBODY, realm_for_sharding=realm, is_system_group=True
+        )
+        test_group = check_add_user_group(
+            realm,
+            "test",
+            [hamlet],
+            acting_user=hamlet,
+            group_settings_map={
+                "can_manage_group": nobody_group,
+                "can_add_members_group": nobody_group,
+            },
+        )
+        hamletcharacters_group = NamedUserGroup.objects.get(
+            name="hamletcharacters", realm_for_sharding=realm
+        )
+
+        def check_create_multiuse_invite(
+            user: str, group_ids: list[int], error_msg: str | None = None
+        ) -> None:
+            self.login(user)
+            result = self.client_post(
+                "/json/invites/multiuse",
+                {
+                    "group_ids": orjson.dumps(group_ids).decode(),
+                    "invite_expires_in_minutes": 2 * 24 * 60,
+                },
+            )
+            if error_msg is not None:
+                self.assert_json_error(result, error_msg)
+            else:
+                self.assert_json_success(result)
+
+        # Initialize settings with nobody allowed to add members or manage
+        # the group.
+        do_change_realm_permission_group_setting(
+            realm,
+            "can_manage_all_groups",
+            nobody_group,
+            acting_user=None,
+        )
+        do_change_user_group_permission_setting(
+            hamletcharacters_group,
+            "can_manage_group",
+            nobody_group,
+            acting_user=None,
+        )
+        do_change_user_group_permission_setting(
+            hamletcharacters_group,
+            "can_add_members_group",
+            nobody_group,
+            acting_user=None,
+        )
+
+        check_create_multiuse_invite(
+            "desdemona", [test_group.id, hamletcharacters_group.id], "Insufficient permission"
+        )
+
+        # Test that user having permission to manage all groups can
+        # add users to groups through invitation.
+        owners_group = NamedUserGroup.objects.get(
+            name=SystemGroups.OWNERS, realm_for_sharding=realm, is_system_group=True
+        )
+        do_change_realm_permission_group_setting(
+            realm,
+            "can_manage_all_groups",
+            owners_group,
+            acting_user=None,
+        )
+
+        check_create_multiuse_invite(
+            "iago", [test_group.id, hamletcharacters_group.id], "Insufficient permission"
+        )
+        check_create_multiuse_invite(
+            "shiva", [test_group.id, hamletcharacters_group.id], "Insufficient permission"
+        )
+
+        # Check that user does not have permission to add user to system groups
+        # even when having permission to manage all groups.
+        moderators_group = NamedUserGroup.objects.get(
+            name=SystemGroups.MODERATORS, realm_for_sharding=realm, is_system_group=True
+        )
+        check_create_multiuse_invite("desdemona", [moderators_group.id], "Insufficient permission")
+        check_create_multiuse_invite("desdemona", [test_group.id, hamletcharacters_group.id])
+
+        # Test that user having permission to add members to a group can
+        # add user to that group through invitation.
+        do_change_user_group_permission_setting(
+            test_group,
+            "can_add_members_group",
+            moderators_group,
+            acting_user=None,
+        )
+        check_create_multiuse_invite(
+            "hamlet", [test_group.id, hamletcharacters_group.id], "Insufficient permission"
+        )
+
+        check_create_multiuse_invite(
+            "shiva", [test_group.id, hamletcharacters_group.id], "Insufficient permission"
+        )
+        check_create_multiuse_invite("shiva", [test_group.id])
+
+        # Test that user having permission to manage a group can
+        # add user to that group through invitation.
+        do_change_user_group_permission_setting(
+            hamletcharacters_group,
+            "can_manage_group",
+            moderators_group,
+            acting_user=None,
+        )
+
+        check_create_multiuse_invite(
+            "hamlet", [test_group.id, hamletcharacters_group.id], "Insufficient permission"
+        )
+        check_create_multiuse_invite("shiva", [test_group.id, hamletcharacters_group.id])
+
     def test_create_multiuse_invite_group_setting(self) -> None:
         realm = get_realm("zulip")
         full_members_system_group = NamedUserGroup.objects.get(
-            name=SystemGroups.FULL_MEMBERS, realm=realm, is_system_group=True
+            name=SystemGroups.FULL_MEMBERS, realm_for_sharding=realm, is_system_group=True
         )
         nobody_system_group = NamedUserGroup.objects.get(
-            name=SystemGroups.NOBODY, realm=realm, is_system_group=True
+            name=SystemGroups.NOBODY, realm_for_sharding=realm, is_system_group=True
         )
 
         # Default value of create_multiuse_invite_group is administrators
@@ -2822,24 +3790,51 @@ class MultiuseInviteTest(ZulipTestCase):
     def test_only_owner_can_change_create_multiuse_invite_group(self) -> None:
         realm = get_realm("zulip")
         full_members_system_group = NamedUserGroup.objects.get(
-            name=SystemGroups.FULL_MEMBERS, realm=realm, is_system_group=True
+            name=SystemGroups.FULL_MEMBERS, realm_for_sharding=realm, is_system_group=True
         )
 
         self.login("iago")
         result = self.client_patch(
             "/json/realm",
-            {"create_multiuse_invite_group": orjson.dumps(full_members_system_group.id).decode()},
+            {
+                "create_multiuse_invite_group": orjson.dumps(
+                    {"new": full_members_system_group.id}
+                ).decode()
+            },
         )
         self.assert_json_error(result, "Must be an organization owner")
 
         self.login("desdemona")
         result = self.client_patch(
             "/json/realm",
-            {"create_multiuse_invite_group": orjson.dumps(full_members_system_group.id).decode()},
+            {
+                "create_multiuse_invite_group": orjson.dumps(
+                    {"new": full_members_system_group.id}
+                ).decode()
+            },
         )
         self.assert_json_success(result)
         realm = get_realm("zulip")
         self.assertEqual(realm.create_multiuse_invite_group_id, full_members_system_group.id)
+
+        # Test setting the value to an anonymous group.
+        iago = self.example_user("iago")
+        result = self.client_patch(
+            "/json/realm",
+            {
+                "create_multiuse_invite_group": orjson.dumps(
+                    {
+                        "new": {
+                            "direct_members": [iago.id],
+                            "direct_subgroups": [],
+                        }
+                    }
+                ).decode()
+            },
+        )
+        self.assert_json_success(result)
+        realm = get_realm("zulip")
+        self.assertCountEqual(realm.create_multiuse_invite_group.direct_members.all(), [iago])
 
     def test_multiuse_link_for_inviting_as_owner(self) -> None:
         self.login("iago")
@@ -2866,7 +3861,7 @@ class MultiuseInviteTest(ZulipTestCase):
     def test_multiuse_link_for_inviting_as_admin(self) -> None:
         realm = get_realm("zulip")
         full_members_system_group = NamedUserGroup.objects.get(
-            name=SystemGroups.FULL_MEMBERS, realm=realm, is_system_group=True
+            name=SystemGroups.FULL_MEMBERS, realm_for_sharding=realm, is_system_group=True
         )
 
         do_change_realm_permission_group_setting(
@@ -2897,7 +3892,7 @@ class MultiuseInviteTest(ZulipTestCase):
     def test_multiuse_link_for_inviting_as_moderator(self) -> None:
         realm = get_realm("zulip")
         full_members_system_group = NamedUserGroup.objects.get(
-            name=SystemGroups.FULL_MEMBERS, realm=realm, is_system_group=True
+            name=SystemGroups.FULL_MEMBERS, realm_for_sharding=realm, is_system_group=True
         )
 
         do_change_realm_permission_group_setting(
@@ -2945,6 +3940,17 @@ class MultiuseInviteTest(ZulipTestCase):
             },
         )
         self.assert_json_error(result, "Invalid channel ID 54321. No invites were sent.")
+
+    def test_create_multiuse_link_invalid_user_group_api_call(self) -> None:
+        self.login("iago")
+        result = self.client_post(
+            "/json/invites/multiuse",
+            {
+                "group_ids": orjson.dumps([5438]).decode(),
+                "invite_expires_in_minutes": 2 * 24 * 60,
+            },
+        )
+        self.assert_json_error(result, "Invalid user group")
 
     def test_create_multiuse_link_invalid_invite_as_api_call(self) -> None:
         self.login("iago")

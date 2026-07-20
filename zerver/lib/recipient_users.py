@@ -34,25 +34,10 @@ def get_recipient_from_user_profiles(
         if forwarder_user_profile.id not in recipient_profiles_map:
             raise ValidationError(_("User not authorized for this query"))
 
-    # If the direct message is just between the sender and
-    # another person, force it to be a personal internally
-    if len(recipient_profiles_map) == 2 and sender.id in recipient_profiles_map:
-        del recipient_profiles_map[sender.id]
-
-    assert recipient_profiles_map
-    if len(recipient_profiles_map) == 1:
-        [user_profile] = recipient_profiles_map.values()
-        return Recipient(
-            id=user_profile.recipient_id,
-            type=Recipient.PERSONAL,
-            type_id=user_profile.id,
-        )
-
-    # Otherwise, we need a direct message group. Make sure the sender
-    # is included in the group direct messages
+    # Make sure the sender is included in the group direct messages.
     recipient_profiles_map[sender.id] = sender
-
     user_ids = list(recipient_profiles_map)
+
     if create:
         direct_message_group = get_or_create_direct_message_group(user_ids)
     else:

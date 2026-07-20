@@ -1,5 +1,4 @@
 import copy
-import zlib
 from collections.abc import Iterable
 from datetime import datetime
 from email.headerregistry import Address
@@ -25,8 +24,6 @@ class RawReactionRow(TypedDict):
     emoji_name: str
     message_id: int
     reaction_type: str
-    user_profile__email: str
-    user_profile__full_name: str
     user_profile_id: int
 
 
@@ -66,14 +63,14 @@ def sew_messages_and_submessages(
 
 
 def extract_message_dict(message_bytes: bytes) -> dict[str, Any]:
-    return orjson.loads(zlib.decompress(message_bytes))
+    return orjson.loads(message_bytes)
 
 
 def stringify_message_dict(message_dict: dict[str, Any]) -> bytes:
-    return zlib.compress(orjson.dumps(message_dict))
+    return orjson.dumps(message_dict)
 
 
-@cache_with_key(to_dict_cache_key, timeout=3600 * 24)
+@cache_with_key(to_dict_cache_key, timeout=3600 * 24, pickled_tupled=False)
 def message_to_encoded_cache(message: Message, realm_id: int | None = None) -> bytes:
     return MessageDict.messages_to_encoded_cache([message], realm_id)[message.id]
 
@@ -84,15 +81,12 @@ def update_message_cache(
     """Updates the message as stored in the to_dict cache (for serving
     messages)."""
     items_for_remote_cache = {}
-    message_ids = []
     changed_messages_to_dict = MessageDict.messages_to_encoded_cache(changed_messages, realm_id)
     for msg_id, msg in changed_messages_to_dict.items():
-        message_ids.append(msg_id)
-        key = to_dict_cache_key_id(msg_id)
-        items_for_remote_cache[key] = (msg,)
+        items_for_remote_cache[to_dict_cache_key_id(msg_id)] = msg
 
     cache_set_many(items_for_remote_cache)
-    return message_ids
+    return list(changed_messages_to_dict.keys())
 
 
 def save_message_rendered_content(message: Message, content: str) -> str:
@@ -113,18 +107,6 @@ class ReactionDict:
             "emoji_name": row["emoji_name"],
             "emoji_code": row["emoji_code"],
             "reaction_type": row["reaction_type"],
-            # TODO: We plan to remove this redundant user dictionary once
-            # clients are updated to support accessing use user_id.  See
-            # https://github.com/zulip/zulip/pull/14711 for details.
-            #
-            # When we do that, we can likely update the `.values()` query to
-            # not fetch the extra user_profile__* fields from the database
-            # as a small performance optimization.
-            "user": {
-                "email": row["user_profile__email"],
-                "id": row["user_profile_id"],
-                "full_name": row["user_profile__full_name"],
-            },
             "user_id": row["user_profile_id"],
         }
 
@@ -175,8 +157,10 @@ class MessageDict:
     @staticmethod
     def post_process_dicts(
         objs: list[dict[str, Any]],
+        *,
         apply_markdown: bool,
         client_gravatar: bool,
+        allow_empty_topic_name: bool,
         realm: Realm,
     ) -> None:
         """
@@ -194,8 +178,9 @@ class MessageDict:
             can_access_sender = obj.get("can_access_sender", True)
             MessageDict.finalize_payload(
                 obj,
-                apply_markdown,
-                client_gravatar,
+                apply_markdown=apply_markdown,
+                client_gravatar=client_gravatar,
+                allow_empty_topic_name=allow_empty_topic_name,
                 skip_copy=True,
                 can_access_sender=can_access_sender,
                 realm_host=realm.host,
@@ -204,12 +189,14 @@ class MessageDict:
     @staticmethod
     def finalize_payload(
         obj: dict[str, Any],
+        *,
         apply_markdown: bool,
         client_gravatar: bool,
+        allow_empty_topic_name: bool,
         keep_rendered_content: bool = False,
         skip_copy: bool = False,
-        can_access_sender: bool = True,
-        realm_host: str = "",
+        can_access_sender: bool,
+        realm_host: str,
     ) -> dict[str, Any]:
         """
         By default, we make a shallow copy of the incoming dict to avoid
@@ -218,6 +205,15 @@ class MessageDict:
         """
         if not skip_copy:
             obj = copy.copy(obj)
+
+        # Compatibility code to change topic="" to topic=Message.EMPTY_TOPIC_FALLBACK_NAME
+        # for older clients with no support for empty topic name.
+        if (
+            obj["recipient_type"] == Recipient.STREAM
+            and obj["subject"] == ""
+            and not allow_empty_topic_name
+        ):
+            obj["subject"] = Message.EMPTY_TOPIC_FALLBACK_NAME
 
         if obj["sender_email_address_visibility"] != UserProfile.EMAIL_ADDRESS_VISIBILITY_EVERYONE:
             # If email address of the sender is only available to administrators,
@@ -245,6 +241,15 @@ class MessageDict:
             obj["content"] = obj["rendered_content"]
         else:
             obj["content_type"] = "text/x-markdown"
+
+        for item in obj.get("edit_history", []):
+            if "prev_rendered_content_version" in item:
+                del item["prev_rendered_content_version"]
+            if not allow_empty_topic_name:
+                if "prev_topic" in item and item["prev_topic"] == "":
+                    item["prev_topic"] = Message.EMPTY_TOPIC_FALLBACK_NAME
+                if "topic" in item and item["topic"] == "":
+                    item["topic"] = Message.EMPTY_TOPIC_FALLBACK_NAME
 
         if not keep_rendered_content:
             del obj["rendered_content"]
@@ -352,12 +357,18 @@ class MessageDict:
         row is a row from a .values() call, and it needs to have
         all the relevant fields populated
         """
+
+        def get_message_topic(row: dict[str, Any]) -> str:
+            if row["recipient__type"] == Recipient.STREAM:
+                return row[DB_TOPIC_NAME]
+            return ""
+
         return MessageDict.build_message_dict(
             message_id=row["id"],
             last_edit_time=row["last_edit_time"],
             edit_history_json=row["edit_history"],
             content=row["content"],
-            topic_name=row[DB_TOPIC_NAME],
+            topic_name=get_message_topic(row),
             date_sent=row["date_sent"],
             rendered_content=row["rendered_content"],
             rendered_content_version=row["rendered_content_version"],
@@ -508,7 +519,7 @@ class MessageDict:
 
         if recipient_type == Recipient.STREAM:
             display_type = "stream"
-        elif recipient_type in (Recipient.DIRECT_MESSAGE_GROUP, Recipient.PERSONAL):
+        elif recipient_type == Recipient.DIRECT_MESSAGE_GROUP:
             assert not isinstance(display_recipient, str)
             display_type = "private"
             if len(display_recipient) == 1:

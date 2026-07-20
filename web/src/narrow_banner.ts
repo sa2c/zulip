@@ -2,17 +2,18 @@ import $ from "jquery";
 import _ from "lodash";
 import assert from "minimalistic-assert";
 
-import * as compose_validate from "./compose_validate";
-import {$t, $t_html} from "./i18n";
-import type {NarrowBannerData, SearchData} from "./narrow_error";
-import {narrow_error} from "./narrow_error";
-import * as narrow_state from "./narrow_state";
-import {page_params} from "./page_params";
-import * as people from "./people";
-import * as spectators from "./spectators";
-import {realm} from "./state_data";
-import * as stream_data from "./stream_data";
-import * as util from "./util";
+import * as compose_validate from "./compose_validate.ts";
+import type {Filter} from "./filter.ts";
+import {$t, $t_html} from "./i18n.ts";
+import * as message_lists from "./message_lists.ts";
+import type {NarrowBannerData, SearchData} from "./narrow_error.ts";
+import {narrow_error} from "./narrow_error.ts";
+import {page_params} from "./page_params.ts";
+import * as people from "./people.ts";
+import * as spectators from "./spectators.ts";
+import {realm} from "./state_data.ts";
+import * as stream_data from "./stream_data.ts";
+import * as util from "./util.ts";
 
 const SPECTATOR_STREAM_NARROW_BANNER = {
     title: "",
@@ -62,29 +63,32 @@ const STARRED_MESSAGES_VIEW_EMPTY_BANNER = {
     ),
 };
 
-function retrieve_search_query_data(): SearchData {
-    // when search bar contains multiple filters, only retrieve search queries
-    const current_filter = narrow_state.filter();
-    assert(current_filter !== undefined);
-    const search_query = current_filter.operands("search")[0];
-    const query_words = search_query!.split(" ");
+const MUTED_TOPICS_IN_CHANNEL_EMPTY_BANNER = {
+    title: $t({
+        defaultMessage: "You have muted all the topics in this channel.",
+    }),
+    html: $t_html(
+        {
+            defaultMessage:
+                "To view a muted topic, click <b>show all topics</b> in the left sidebar, and select one from the list. <z-link>Learn more</z-link>",
+        },
+        {
+            "z-link": (content_html) =>
+                `<a target="_blank" rel="noopener noreferrer" href="/help/mute-a-topic">${content_html.join("")}</a>`,
+        },
+    ),
+};
+
+const NO_SEARCH_RESULTS_TITLE = $t({defaultMessage: "No search results."});
+
+function empty_search_query_banner(current_filter: Filter): NarrowBannerData {
+    const search_query = current_filter.terms_with_operator("search")[0]!.operand;
+    const query_words = search_query.split(" ");
 
     const search_string_result: SearchData = {
         query_words: [],
         has_stop_word: false,
     };
-
-    // Add in stream:foo and topic:bar if present
-    if (current_filter.has_operator("channel") || current_filter.has_operator("topic")) {
-        const stream = current_filter.operands("channel")[0];
-        const topic = current_filter.operands("topic")[0];
-        if (stream) {
-            search_string_result.stream_query = stream;
-        }
-        if (topic) {
-            search_string_result.topic_query = topic;
-        }
-    }
 
     // Gather information about each query word
     for (const query_word of query_words) {
@@ -102,10 +106,18 @@ function retrieve_search_query_data(): SearchData {
         }
     }
 
-    return search_string_result;
+    // We only show description of search query
+    // when there are excluded stop words.
+    if (search_string_result.has_stop_word) {
+        return {
+            title: NO_SEARCH_RESULTS_TITLE,
+            search_data: search_string_result,
+        };
+    }
+    return {title: NO_SEARCH_RESULTS_TITLE};
 }
 
-export function pick_empty_narrow_banner(): NarrowBannerData {
+export function pick_empty_narrow_banner(current_filter: Filter): NarrowBannerData {
     const default_banner = {
         title: $t({defaultMessage: "There are no messages here."}),
         // Spectators cannot start a conversation.
@@ -123,29 +135,39 @@ export function pick_empty_narrow_banner(): NarrowBannerData {
                   },
               ),
     };
-    const default_banner_for_multiple_filters = $t({defaultMessage: "No search results."});
 
-    const current_filter = narrow_state.filter();
-
-    if (current_filter === undefined || current_filter.is_in_home()) {
-        return default_banner;
+    if (current_filter.is_in_home()) {
+        // We're in the combined feed view.
+        return {
+            title: $t({defaultMessage: "There are no messages in your combined feed."}),
+            html: page_params.is_spectator
+                ? ""
+                : $t_html(
+                      {
+                          defaultMessage:
+                              "Would you like to <z-link>view messages in all public channels</z-link>?",
+                      },
+                      {
+                          "z-link": (content_html) =>
+                              `<a href="#narrow/channels/public">${content_html.join("")}</a>`,
+                      },
+                  ),
+        };
     }
 
     const first_term = current_filter.terms()[0]!;
     const current_terms_types = current_filter.sorted_term_types();
-    const first_operator = first_term.operator;
-    const first_operand = first_term.operand;
     const num_terms = current_filter.terms().length;
 
     if (num_terms !== 1) {
         // For invalid-multi-operator narrows, we display an invalid narrow message
-        const streams = current_filter.operands("channel");
-        const topics = current_filter.operands("topic");
+        const streams = current_filter.terms_with_operator("channel");
+        const topics = current_filter.terms_with_operator("topic");
 
         // No message can have multiple streams
         if (streams.length > 1) {
             return {
-                title: default_banner_for_multiple_filters,
+                title: NO_SEARCH_RESULTS_TITLE,
                 html: $t_html({
                     defaultMessage:
                         "<p>You are searching for messages that belong to more than one channel, which is not possible.</p>",
@@ -155,7 +177,7 @@ export function pick_empty_narrow_banner(): NarrowBannerData {
         // No message can have multiple topics
         if (topics.length > 1) {
             return {
-                title: default_banner_for_multiple_filters,
+                title: NO_SEARCH_RESULTS_TITLE,
                 html: $t_html({
                     defaultMessage:
                         "<p>You are searching for messages that belong to more than one topic, which is not possible.</p>",
@@ -163,9 +185,9 @@ export function pick_empty_narrow_banner(): NarrowBannerData {
             };
         }
         // No message can have multiple senders
-        if (current_filter.operands("sender").length > 1) {
+        if (current_filter.terms_with_operator("sender").length > 1) {
             return {
-                title: default_banner_for_multiple_filters,
+                title: NO_SEARCH_RESULTS_TITLE,
                 html: $t_html({
                     defaultMessage:
                         "<p>You are searching for messages that are sent by more than one person, which is not possible.</p>",
@@ -173,32 +195,43 @@ export function pick_empty_narrow_banner(): NarrowBannerData {
             };
         }
 
-        // For empty stream searches within other narrows, we display the stop words
-        if (current_filter.operands("search").length > 0) {
-            return {
-                title: default_banner_for_multiple_filters,
-                search_data: retrieve_search_query_data(),
-            };
+        // For empty search queries, we display excluded stop words
+        if (current_filter.terms_with_operator("search").length > 0) {
+            return empty_search_query_banner(current_filter);
         }
 
         if (
             page_params.is_spectator &&
-            first_operator === "channel" &&
-            !stream_data.is_web_public_by_stream_name(first_operand)
+            first_term.operator === "channel" &&
+            !stream_data.is_web_public_by_stream_id(Number.parseInt(first_term.operand, 10))
         ) {
             // For non web-public streams, show `login_to_access` modal.
             spectators.login_to_access(true);
             return SPECTATOR_STREAM_NARROW_BANNER;
         }
 
-        // A stream > topic that doesn't exist yet.
+        if (streams.length === 1) {
+            const stream_sub = stream_data.get_sub_by_id_string(
+                util.the(current_filter.terms_with_operator("channel")).operand,
+            );
+            if (!stream_sub) {
+                return {
+                    title: $t({
+                        defaultMessage:
+                            "This channel doesn't exist, or you are not allowed to view it.",
+                    }),
+                };
+            }
+        }
+
+        // A valid stream, but a topic that doesn't exist yet.
         if (num_terms === 2 && streams.length === 1 && topics.length === 1) {
             return default_banner;
         }
 
         if (
             _.isEqual(current_terms_types, ["sender", "has-reaction"]) &&
-            current_filter.operands("sender")[0] === people.my_current_email()
+            current_filter.terms_with_operator("sender")[0]!.operand === people.my_current_user_id()
         ) {
             return {
                 title: $t({defaultMessage: "None of your messages have emoji reactions yet."}),
@@ -218,13 +251,13 @@ export function pick_empty_narrow_banner(): NarrowBannerData {
 
         // For other multi-operator narrows, we just use the default banner
         return {
-            title: default_banner_for_multiple_filters,
+            title: NO_SEARCH_RESULTS_TITLE,
         };
     }
 
-    switch (first_operator) {
+    switch (first_term.operator) {
         case "is":
-            switch (first_operand) {
+            switch (first_term.operand) {
                 case "starred":
                     return STARRED_MESSAGES_VIEW_EMPTY_BANNER;
                 case "mentioned":
@@ -260,50 +293,70 @@ export function pick_empty_narrow_banner(): NarrowBannerData {
                     return {
                         title: $t({defaultMessage: "You aren't following any topics."}),
                     };
+
+                case "muted":
+                    return {
+                        title: $t({
+                            defaultMessage: "You have no messages in muted topics and channels.",
+                        }),
+                    };
             }
             // fallthrough to default case if no match is found
             break;
-        case "channel":
-            if (!stream_data.is_subscribed_by_name(first_operand)) {
-                // You are narrowed to a stream which does not exist or is a private stream
-                // in which you were never subscribed.
-
+        case "channel": {
+            const stream_sub = stream_data.get_sub_by_id_string(first_term.operand);
+            if (!stream_sub?.subscribed) {
+                // You are narrowed to a channel that either does not exist,
+                // is private, or a channel you're not currently subscribed to.
                 if (page_params.is_spectator) {
                     spectators.login_to_access(true);
                     return SPECTATOR_STREAM_NARROW_BANNER;
                 }
-
-                function can_toggle_narrowed_stream(): boolean | undefined {
-                    const stream_name = narrow_state.stream_name();
-
-                    if (!stream_name) {
-                        return false;
+                if (stream_sub) {
+                    if (stream_data.can_toggle_subscription(stream_sub)) {
+                        // You have content access to the channel, and therefore
+                        // can subscribe to the channel.
+                        return default_banner;
                     }
-
-                    const stream_sub = stream_data.get_sub(first_operand);
-                    return stream_sub && stream_data.can_toggle_subscription(stream_sub);
+                    if (stream_sub.invite_only) {
+                        // You don't have content access to this private channel.
+                        return {
+                            title: $t({
+                                defaultMessage:
+                                    "You are not allowed to view messages in this private channel.",
+                            }),
+                        };
+                    }
                 }
-
-                if (can_toggle_narrowed_stream()) {
-                    return default_banner;
-                }
-
                 return {
-                    title: $t({defaultMessage: "This channel does not exist or is private."}),
+                    title: $t({
+                        defaultMessage:
+                            "This channel doesn't exist, or you are not allowed to view it.",
+                    }),
                 };
+            }
+            assert(message_lists.current !== undefined);
+            if (message_lists.current.visibly_empty() && !message_lists.current.empty()) {
+                // The current message list appears empty, but there are
+                // messages in muted topics.
+                return MUTED_TOPICS_IN_CHANNEL_EMPTY_BANNER;
             }
             // else fallthrough to default case
             break;
-        case "search": {
-            // You are narrowed to empty search results.
+        }
+        case "channels": {
             return {
-                title: $t({defaultMessage: "No search results."}),
-                search_data: retrieve_search_query_data(),
+                title: $t({defaultMessage: "There are no messages here."}),
+                html: "",
             };
         }
+        case "search": {
+            // You are narrowed to empty search results.
+            return empty_search_query_banner(current_filter);
+        }
         case "dm": {
-            if (!people.is_valid_bulk_emails_for_compose(first_operand.split(","))) {
-                if (!first_operand.includes(",")) {
+            if (!people.is_valid_bulk_user_ids_for_compose(first_term.operand, true)) {
+                if (first_term.operand.length === 1) {
                     return {
                         title: $t({defaultMessage: "This user does not exist!"}),
                     };
@@ -312,7 +365,7 @@ export function pick_empty_narrow_banner(): NarrowBannerData {
                     title: $t({defaultMessage: "One or more of these users do not exist!"}),
                 };
             }
-            const user_ids = people.emails_strings_to_user_ids_array(first_operand);
+            const user_ids = first_term.operand;
             assert(user_ids?.[0] !== undefined);
             const user_ids_string = util.sorted_ids(user_ids).join(",");
             const direct_message_error_string =
@@ -331,13 +384,13 @@ export function pick_empty_narrow_banner(): NarrowBannerData {
                     ),
                 };
             }
-            if (!first_operand.includes(",")) {
+            if (user_ids.length === 1) {
+                const user_id = user_ids[0];
                 // You have no direct messages with this person
-                if (people.is_current_user(first_operand)) {
+                if (people.is_my_user_id(user_id)) {
                     return {
                         title: $t({
-                            defaultMessage:
-                                "You have not sent any direct messages to yourself yet!",
+                            defaultMessage: "You haven't sent yourself any notes yet!",
                         }),
                         html: $t_html({
                             defaultMessage:
@@ -345,12 +398,23 @@ export function pick_empty_narrow_banner(): NarrowBannerData {
                         }),
                     };
                 }
+                // If the recipient is deactivated, we cannot start the conversation.
+                if (!people.is_person_active(user_id)) {
+                    return {
+                        title: $t(
+                            {
+                                defaultMessage: "You have no direct messages with {person}.",
+                            },
+                            {person: people.get_full_name(user_id)},
+                        ),
+                    };
+                }
                 return {
                     title: $t(
                         {
                             defaultMessage: "You have no direct messages with {person} yet.",
                         },
-                        {person: people.get_by_user_id(user_ids[0]).full_name},
+                        {person: people.get_full_name(user_id)},
                     ),
                     html: $t_html(
                         {
@@ -363,6 +427,11 @@ export function pick_empty_narrow_banner(): NarrowBannerData {
                                 )}</a>`,
                         },
                     ),
+                };
+            }
+            if (people.get_non_active_user_ids_count(user_ids) !== 0) {
+                return {
+                    title: $t({defaultMessage: "You have no direct messages with these users."}),
                 };
             }
             return {
@@ -381,7 +450,7 @@ export function pick_empty_narrow_banner(): NarrowBannerData {
             };
         }
         case "sender": {
-            const sender = people.get_by_email(first_operand);
+            const sender = people.maybe_get_user_by_id(first_term.operand, true);
             if (sender) {
                 return {
                     title: $t(
@@ -394,17 +463,37 @@ export function pick_empty_narrow_banner(): NarrowBannerData {
                 };
             }
             return {
-                title: $t({defaultMessage: "This user does not exist!"}),
+                title: $t({
+                    defaultMessage:
+                        "This user doesn't exist, or you are not allowed to view any of their messages.",
+                }),
             };
         }
         case "dm-including": {
-            const person_in_dms = people.get_by_email(first_operand);
-            if (!person_in_dms) {
+            const people_in_dms = first_term.operand.map((user_id) =>
+                people.maybe_get_user_by_id(user_id, true),
+            );
+            if (people_in_dms.length === 1 && !people_in_dms[0]) {
                 return {
                     title: $t({defaultMessage: "This user does not exist!"}),
                 };
             }
-            const person_id_string = person_in_dms.user_id.toString();
+            const valid_people_in_dms: people.User[] = [];
+            for (const user of people_in_dms.values()) {
+                if (user === undefined) {
+                    return {
+                        // We intentionally give the same non-specific
+                        // error message as the single user case,
+                        // since we don't display API email addresses
+                        // or user IDs typically in UI errors, and we
+                        // don't have any other handle as to which
+                        // user this was supposed to be.
+                        title: $t({defaultMessage: "This user does not exist!"}),
+                    };
+                }
+                valid_people_in_dms.push(user);
+            }
+            const person_id_string = valid_people_in_dms.map((user) => user.user_id).join(",");
             const direct_message_error_string =
                 compose_validate.check_dm_permissions_and_get_error_string(person_id_string);
             if (direct_message_error_string) {
@@ -421,7 +510,10 @@ export function pick_empty_narrow_banner(): NarrowBannerData {
                     ),
                 };
             }
-            if (people.is_current_user(first_operand)) {
+            if (
+                valid_people_in_dms.length === 1 &&
+                people.is_my_user_id(valid_people_in_dms[0]!.user_id)
+            ) {
                 return {
                     title: $t({
                         defaultMessage: "You don't have any direct message conversations yet.",
@@ -431,9 +523,41 @@ export function pick_empty_narrow_banner(): NarrowBannerData {
             return {
                 title: $t(
                     {
-                        defaultMessage: "You have no direct messages including {person} yet.",
+                        defaultMessage: "You have no direct messages including {people} yet.",
                     },
-                    {person: person_in_dms.full_name},
+                    {people: valid_people_in_dms.map((user) => user.full_name).join(", ")},
+                ),
+            };
+        }
+
+        case "mentions": {
+            const mentioned_user = people.maybe_get_user_by_id(first_term.operand, true);
+
+            if (!mentioned_user) {
+                return {
+                    title: $t({defaultMessage: "This user does not exist!"}),
+                };
+            }
+
+            // mentions:me is redirected to is:mentioned in Filter.parse(),
+            // so mentioned_user will never be the current user here.
+            return {
+                title: $t(
+                    {
+                        defaultMessage: "No messages in your message history mention {person} yet.",
+                    },
+                    {person: mentioned_user.full_name},
+                ),
+                title_html: $t_html(
+                    {
+                        defaultMessage:
+                            "No messages in <z-link>your message history</z-link> mention {person} yet.",
+                    },
+                    {
+                        "z-link": (content_html) =>
+                            `<a href="/help/search-for-messages#search-shared-history" target="_blank" rel="noopener noreferrer">${content_html.join("")}</a>`,
+                        person: mentioned_user.full_name,
+                    },
                 ),
             };
         }
@@ -441,9 +565,9 @@ export function pick_empty_narrow_banner(): NarrowBannerData {
     return default_banner;
 }
 
-export function show_empty_narrow_message(): void {
+export function show_empty_narrow_message(current_filter: Filter): void {
     $(".empty_feed_notice_main").empty();
-    const rendered_narrow_banner = narrow_error(pick_empty_narrow_banner());
+    const rendered_narrow_banner = narrow_error(pick_empty_narrow_banner(current_filter));
     $(".empty_feed_notice_main").html(rendered_narrow_banner);
 }
 

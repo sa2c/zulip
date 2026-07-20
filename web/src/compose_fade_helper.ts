@@ -1,7 +1,10 @@
-import type {Message} from "./message_store";
-import * as sub_store from "./sub_store";
-import type {Recipient} from "./util";
-import * as util from "./util";
+import $ from "jquery";
+
+import type {Message} from "./message_store.ts";
+import * as stream_data from "./stream_data.ts";
+import * as sub_store from "./sub_store.ts";
+import type {Recipient} from "./util.ts";
+import * as util from "./util.ts";
 
 let focused_recipient: Recipient | undefined;
 
@@ -31,14 +34,18 @@ export function want_normal_display(): boolean {
             return true;
         }
 
-        // This is kind of debatable.  If the topic is empty, it could be that
-        // the user simply hasn't started typing it yet, but disabling fading here
-        // means the feature doesn't help realms where topics aren't mandatory
-        // (which is most realms as of this writing).
-        if (focused_recipient.topic === "") {
+        // If the topic is empty, we want a normal display in the following cases:
+        // * realm requires topic
+        // * realm allows empty topic but the focus is in topic input box,
+        //   means user is still configuring topic.
+        if (
+            focused_recipient.topic === "" &&
+            (!stream_data.can_use_empty_topic(focused_recipient.stream_id) ||
+                $("input#stream_message_recipient_topic").is(":focus"))
+        ) {
             return true;
         }
     }
 
-    return focused_recipient.type === "private" && focused_recipient.reply_to === "";
+    return focused_recipient.type === "private" && !focused_recipient.to_user_ids;
 }

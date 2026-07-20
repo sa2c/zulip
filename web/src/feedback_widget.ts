@@ -2,7 +2,7 @@ import $ from "jquery";
 
 import render_feedback_container from "../templates/feedback_container.hbs";
 
-import * as blueslip from "./blueslip";
+import * as blueslip from "./blueslip.ts";
 
 /*
 
@@ -28,14 +28,15 @@ type FeedbackWidgetMeta = {
     $container: JQuery | null;
     opened: boolean;
     handlers_set?: boolean;
-    undo?: () => void;
+    undo: (() => void) | undefined;
 };
 
 type FeedbackWidgetOptions = {
     populate: (element: JQuery) => void;
     title_text: string;
-    undo_button_text: string;
-    on_undo: () => void;
+    undo_button_text?: string;
+    on_undo?: () => void;
+    hide_delay?: number;
 };
 
 const meta: FeedbackWidgetMeta = {
@@ -43,6 +44,7 @@ const meta: FeedbackWidgetMeta = {
     alert_hover_state: false,
     $container: null,
     opened: false,
+    undo: undefined,
 };
 
 const animate = {
@@ -168,10 +170,10 @@ export function show(opts: FeedbackWidgetOptions): void {
     meta.undo = opts.on_undo;
 
     // add a four second delay before closing up.
-    meta.hide_me_time = Date.now() + 4000;
+    meta.hide_me_time = Date.now() + (opts.hide_delay ?? 4000);
 
     meta.$container.find(".feedback_title").text(opts.title_text);
-    meta.$container.find(".feedback_undo").text(opts.undo_button_text);
+    meta.$container.find(".feedback_undo").text(opts.undo_button_text ?? "");
     opts.populate(meta.$container.find(".feedback_content"));
 
     animate.fadeIn();

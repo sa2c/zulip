@@ -1,5 +1,6 @@
 import os
 import re
+from dataclasses import dataclass
 from html import escape
 from textwrap import dedent
 from typing import Any
@@ -19,13 +20,18 @@ from zerver.actions.alert_words import do_add_alert_words
 from zerver.actions.create_realm import do_create_realm
 from zerver.actions.realm_emoji import do_remove_realm_emoji
 from zerver.actions.realm_settings import do_set_realm_property
-from zerver.actions.user_groups import check_add_user_group
+from zerver.actions.streams import do_change_stream_group_based_setting
+from zerver.actions.user_groups import (
+    add_subgroups_to_user_group,
+    check_add_user_group,
+    do_deactivate_user_group,
+)
 from zerver.actions.user_settings import do_change_user_setting
 from zerver.actions.users import change_user_is_active
 from zerver.lib.alert_words import get_alert_word_automaton
 from zerver.lib.camo import get_camo_url
 from zerver.lib.create_user import create_user
-from zerver.lib.emoji import codepoint_to_name, get_emoji_url
+from zerver.lib.emoji import codepoint_to_name
 from zerver.lib.emoji_utils import hex_codepoint_to_emoji
 from zerver.lib.exceptions import JsonableError, MarkdownRenderingError
 from zerver.lib.markdown import (
@@ -35,11 +41,8 @@ from zerver.lib.markdown import (
     MessageRenderingResult,
     clear_web_link_regex_for_testing,
     content_has_emoji_syntax,
-    fetch_tweet_data,
-    get_tweet_id,
     image_preview_enabled,
     markdown_convert,
-    maybe_update_markdown_engines,
     possible_linked_stream_names,
     render_message_markdown,
     topic_links,
@@ -47,6 +50,7 @@ from zerver.lib.markdown import (
     url_to_a,
 )
 from zerver.lib.markdown.fenced_code import FencedBlockPreprocessor
+from zerver.lib.markdown.from_html import convert_html_to_markdown
 from zerver.lib.mdiff import diff_strings
 from zerver.lib.mention import (
     FullNameInfo,
@@ -60,14 +64,19 @@ from zerver.lib.mention import (
     topic_wildcards,
 )
 from zerver.lib.per_request_cache import flush_per_request_caches
+from zerver.lib.streams import user_has_content_access, user_has_metadata_access
 from zerver.lib.test_classes import ZulipTestCase
 from zerver.lib.tex import render_tex
+from zerver.lib.types import UserGroupMembersData
+from zerver.lib.upload import get_emoji_url, upload_message_attachment
+from zerver.lib.user_groups import UserGroupMembershipDetails
 from zerver.models import Message, NamedUserGroup, RealmEmoji, RealmFilter, UserMessage, UserProfile
 from zerver.models.clients import get_client
 from zerver.models.groups import SystemGroups
 from zerver.models.linkifiers import linkifiers_for_realm
 from zerver.models.realms import get_realm
 from zerver.models.streams import get_stream
+from zerver.models.users import get_system_bot
 
 
 class SimulatedFencedBlockPreprocessor(FencedBlockPreprocessor):
@@ -293,6 +302,100 @@ class MarkdownMiscTest(ZulipTestCase):
         mention_data = MentionData(mention_backend, content, message_sender=None)
         self.assertTrue(mention_data.message_has_topic_wildcards())
 
+        content = "@*hamletcharacters*"
+        group = NamedUserGroup.objects.get(realm_for_sharding=realm, name="hamletcharacters")
+        mention_data = MentionData(mention_backend, content, message_sender=None)
+        self.assertEqual(mention_data.get_group_members(group.id), {hamlet.id, cordelia.id})
+
+        change_user_is_active(cordelia, False)
+        mention_data = MentionData(mention_backend, content, message_sender=None)
+        self.assertEqual(mention_data.get_group_members(group.id), {hamlet.id})
+
+    def test_bulk_user_group_mentions(self) -> None:
+        realm = get_realm("zulip")
+        hamlet = self.example_user("hamlet")
+        cordelia = self.example_user("cordelia")
+        othello = self.example_user("othello")
+        mention_backend = MentionBackend(realm.id)
+
+        content = ""
+        for i in range(5):
+            group_name = f"group{i}"
+            check_add_user_group(realm, group_name, [hamlet, cordelia], acting_user=othello)
+            content += f" @*{group_name}*"
+
+        CONSTANT_QUERY_COUNT = 2  # even if it increases in future, make sure it's constant.
+        with self.assert_database_query_count(CONSTANT_QUERY_COUNT):
+            MentionData(mention_backend, content, message_sender=None)
+
+    def test_mention_user_groups_with_common_subgroup(self) -> None:
+        # Mention multiple groups (class-A and class-B) with a common sub-group (good-students)
+        # and make sure each mentioned group has the expected members
+        # (i.e. direct and via sub-groups) in mention_data.
+
+        realm = get_realm("zulip")
+        aaron = self.example_user("aaron")
+        hamlet = self.example_user("hamlet")
+        cordelia = self.example_user("cordelia")
+        iago = self.example_user("iago")
+        othello = self.example_user("othello")
+
+        good_students = check_add_user_group(
+            realm, "good-students", [aaron, hamlet], acting_user=othello
+        )
+        class_A = check_add_user_group(realm, "class-A", [iago], acting_user=othello)
+        class_B = check_add_user_group(realm, "class-B", [cordelia], acting_user=othello)
+
+        add_subgroups_to_user_group(class_A, [good_students], acting_user=othello)
+        add_subgroups_to_user_group(class_B, [good_students], acting_user=othello)
+
+        content = "@*class-A*  @*class-B*"
+        mention_backend = MentionBackend(realm.id)
+        mention_data = MentionData(mention_backend, content, message_sender=None)
+
+        # both groups should have their direct members and the sub-group's members.
+        self.assertEqual(mention_data.get_group_members(class_A.id), {iago.id, aaron.id, hamlet.id})
+        self.assertEqual(
+            mention_data.get_group_members(class_B.id), {cordelia.id, aaron.id, hamlet.id}
+        )
+
+    def test_silent_mention_user_groups(self) -> None:
+        # silent VS non-silent group mentions, in regard to fetching group membership.
+
+        realm = get_realm("zulip")
+        aaron = self.example_user("aaron")
+        hamlet = self.example_user("hamlet")
+        cordelia = self.example_user("cordelia")
+        iago = self.example_user("iago")
+        othello = self.example_user("othello")
+
+        hamlet_group = NamedUserGroup.objects.get(realm_for_sharding=realm, name="hamletcharacters")
+        zulip_group = check_add_user_group(realm, "zulip_group", [iago, aaron], acting_user=othello)
+        mention_backend = MentionBackend(realm.id)
+
+        # mention zulip_group, but silent mention hamlet_group.
+        content = "@*zulip_group*, @_*hamletcharacters*"
+        mention_data = MentionData(mention_backend, content, message_sender=None)
+
+        # non-silent mention should fetch group membership.
+        self.assertEqual(mention_data.get_group_members(zulip_group.id), {iago.id, aaron.id})
+
+        # silent mention should NOT fetch group membership.
+        self.assertEqual(mention_data.get_group_members(hamlet_group.id), set())
+
+        # We should make sure non-silent mention always results in fetching group membership,
+        # whether it precedes or follows a silent mention for the SAME group
+
+        # non-silent before silent.
+        content = "@*hamletcharacters*, @_*hamletcharacters*"
+        mention_data = MentionData(mention_backend, content, message_sender=None)
+        self.assertEqual(mention_data.get_group_members(hamlet_group.id), {hamlet.id, cordelia.id})
+
+        # non-silent after silent.
+        content = "@_*hamletcharacters*, @*hamletcharacters*"
+        mention_data = MentionData(mention_backend, content, message_sender=None)
+        self.assertEqual(mention_data.get_group_members(hamlet_group.id), {hamlet.id, cordelia.id})
+
     def test_invalid_katex_path(self) -> None:
         with self.settings(DEPLOY_ROOT="/nonexistent"):
             with self.assertLogs(level="ERROR") as m:
@@ -477,7 +580,7 @@ class MarkdownFixtureTest(ZulipTestCase):
 
     def test_markdown_no_ignores(self) -> None:
         # We do not want any ignored tests to be committed and merged.
-        format_tests, linkify_tests = self.load_markdown_tests()
+        format_tests, _linkify_tests = self.load_markdown_tests()
         for name, test in format_tests.items():
             message = f'Test "{name}" shouldn\'t be ignored.'
             is_ignored = test.get("ignore", False)
@@ -539,6 +642,8 @@ class MarkdownFixtureTest(ZulipTestCase):
         def replaced(payload: str, url: str, phrase: str = "") -> str:
             if url[:4] == "http":
                 href = url
+            elif "://" in url:
+                href = url
             elif "@" in url:
                 href = "mailto:" + url
             else:
@@ -579,10 +684,10 @@ class MarkdownLinkTest(ZulipTestCase):
         sender_user_profile = self.example_user("othello")
         message = Message(sender=sender_user_profile, sending_client=get_client("test"))
 
-        msg = "http://zulip.testserver/#narrow/stream/999-hello"
+        msg = "http://zulip.testserver/#narrow/channel/999-hello"
         self.assertEqual(
             markdown_convert(msg, message_realm=realm, message=message).rendered_content,
-            '<p><a href="#narrow/stream/999-hello">http://zulip.testserver/#narrow/stream/999-hello</a></p>',
+            '<p><a href="#narrow/channel/999-hello">http://zulip.testserver/#narrow/channel/999-hello</a></p>',
         )
 
         msg = f"http://zulip.testserver/user_uploads/{realm.id}/ff/file.txt"
@@ -613,10 +718,10 @@ class MarkdownLinkTest(ZulipTestCase):
         sender_user_profile = self.example_user("othello")
         message = Message(sender=sender_user_profile, sending_client=get_client("test"))
 
-        msg = "[hello](http://zulip.testserver/#narrow/stream/999-hello)"
+        msg = "[hello](http://zulip.testserver/#narrow/channel/999-hello)"
         self.assertEqual(
             markdown_convert(msg, message_realm=realm, message=message).rendered_content,
-            '<p><a href="#narrow/stream/999-hello">hello</a></p>',
+            '<p><a href="#narrow/channel/999-hello">hello</a></p>',
         )
 
         msg = f"[hello](http://zulip.testserver/user_uploads/{realm.id}/ff/file.txt)"
@@ -661,15 +766,80 @@ class MarkdownLinkTest(ZulipTestCase):
             '<p>To <a href="bitcoin:1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa">bitcoin:1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa</a> or not to bitcoin</p>',
         )
 
+    def test_mentions_formatted_with_link(self) -> None:
+        # Make sure the inline link processor is takes priority over the mention processors
+        # and don't double-process mentions with a link.
+        sender_user_profile = self.example_user("othello")
+        msg = Message(
+            sender=sender_user_profile,
+            sending_client=get_client("test"),
+            realm=sender_user_profile.realm,
+        )
+
+        @dataclass
+        class MentionFixture:
+            name: str
+            mention_syntax: str
+            expected_html_class: str
+
+        mention_fixtures = [
+            MentionFixture(
+                name="channel_mention",
+                mention_syntax="#**Denmark**",
+                expected_html_class="stream",
+            ),
+            MentionFixture(
+                name="channel_topic_mention",
+                mention_syntax="#**Denmark>topic**",
+                expected_html_class="stream-topic",
+            ),
+            MentionFixture(
+                name="channel_topic_message_mention",
+                mention_syntax="#**Denmark>topic>@123**",
+                expected_html_class="message-link",
+            ),
+        ]
+
+        for fixture in mention_fixtures:
+            with self.subTest(fixture.name):
+                # Make sure the mention syntax is valid first.
+                self.assertIn(
+                    fixture.expected_html_class,
+                    render_message_markdown(msg, fixture.mention_syntax).rendered_content,
+                )
+                link = "https://chat.zulip.org"
+                mention_with_link = f"[{fixture.mention_syntax}]({link})"
+                self.assertEqual(
+                    render_message_markdown(msg, mention_with_link).rendered_content,
+                    f'<p><a href="{link}">{escape(fixture.mention_syntax)}</a></p>',
+                )
+
 
 class MarkdownEmbedsTest(ZulipTestCase):
+    def assert_message_content_is(
+        self, message_id: int, rendered_content: str, user_name: str = "othello"
+    ) -> None:
+        sender_user_profile = self.example_user(user_name)
+        result = self.assert_json_success(
+            self.api_get(sender_user_profile, f"/api/v1/messages/{message_id}")
+        )
+        self.assertEqual(result["message"]["content"], rendered_content)
+
+    def send_message_content(self, content: str, user_name: str = "othello") -> int:
+        sender_user_profile = self.example_user(user_name)
+        return self.send_stream_message(
+            sender=sender_user_profile,
+            stream_name="Verona",
+            content=content,
+        )
+
     def test_inline_youtube(self) -> None:
         msg = "Check out the debate: http://www.youtube.com/watch?v=hx1mjT73xYE"
         converted = markdown_convert_wrapper(msg)
 
         self.assertEqual(
             converted,
-            f"""<p>Check out the debate: <a href="http://www.youtube.com/watch?v=hx1mjT73xYE">http://www.youtube.com/watch?v=hx1mjT73xYE</a></p>\n<div class="youtube-video message_inline_image"><a data-id="hx1mjT73xYE" href="http://www.youtube.com/watch?v=hx1mjT73xYE"><img src="{get_camo_url("https://i.ytimg.com/vi/hx1mjT73xYE/default.jpg")}"></a></div>""",
+            f"""<p>Check out the debate: <a href="http://www.youtube.com/watch?v=hx1mjT73xYE">http://www.youtube.com/watch?v=hx1mjT73xYE</a></p>\n<div class="youtube-video message_inline_image"><a data-id="hx1mjT73xYE" href="http://www.youtube.com/watch?v=hx1mjT73xYE"><img src="{get_camo_url("https://i.ytimg.com/vi/hx1mjT73xYE/mqdefault.jpg")}"></a></div>""",
         )
 
         msg = "http://www.youtube.com/watch?v=hx1mjT73xYE"
@@ -677,7 +847,7 @@ class MarkdownEmbedsTest(ZulipTestCase):
 
         self.assertEqual(
             converted,
-            f"""<p><a href="http://www.youtube.com/watch?v=hx1mjT73xYE">http://www.youtube.com/watch?v=hx1mjT73xYE</a></p>\n<div class="youtube-video message_inline_image"><a data-id="hx1mjT73xYE" href="http://www.youtube.com/watch?v=hx1mjT73xYE"><img src="{get_camo_url("https://i.ytimg.com/vi/hx1mjT73xYE/default.jpg")}"></a></div>""",
+            f"""<p><a href="http://www.youtube.com/watch?v=hx1mjT73xYE">http://www.youtube.com/watch?v=hx1mjT73xYE</a></p>\n<div class="youtube-video message_inline_image"><a data-id="hx1mjT73xYE" href="http://www.youtube.com/watch?v=hx1mjT73xYE"><img src="{get_camo_url("https://i.ytimg.com/vi/hx1mjT73xYE/mqdefault.jpg")}"></a></div>""",
         )
 
         msg = "https://youtu.be/hx1mjT73xYE"
@@ -685,7 +855,7 @@ class MarkdownEmbedsTest(ZulipTestCase):
 
         self.assertEqual(
             converted,
-            f"""<p><a href="https://youtu.be/hx1mjT73xYE">https://youtu.be/hx1mjT73xYE</a></p>\n<div class="youtube-video message_inline_image"><a data-id="hx1mjT73xYE" href="https://youtu.be/hx1mjT73xYE"><img src="{get_camo_url("https://i.ytimg.com/vi/hx1mjT73xYE/default.jpg")}"></a></div>""",
+            f"""<p><a href="https://youtu.be/hx1mjT73xYE">https://youtu.be/hx1mjT73xYE</a></p>\n<div class="youtube-video message_inline_image"><a data-id="hx1mjT73xYE" href="https://youtu.be/hx1mjT73xYE"><img src="{get_camo_url("https://i.ytimg.com/vi/hx1mjT73xYE/mqdefault.jpg")}"></a></div>""",
         )
 
         msg = "https://www.youtube.com/playlist?list=PL8dPuuaLjXtNlUrzyH5r6jN9ulIgZBpdo"
@@ -701,7 +871,7 @@ class MarkdownEmbedsTest(ZulipTestCase):
 
         self.assertEqual(
             converted,
-            f"""<p><a href="https://www.youtube.com/watch?v=O5nskjZ_GoI&amp;list=PL8dPuuaLjXtNlUrzyH5r6jN9ulIgZBpdo">https://www.youtube.com/watch?v=O5nskjZ_GoI&amp;list=PL8dPuuaLjXtNlUrzyH5r6jN9ulIgZBpdo</a></p>\n<div class="youtube-video message_inline_image"><a data-id="O5nskjZ_GoI" href="https://www.youtube.com/watch?v=O5nskjZ_GoI&amp;list=PL8dPuuaLjXtNlUrzyH5r6jN9ulIgZBpdo"><img src="{get_camo_url("https://i.ytimg.com/vi/O5nskjZ_GoI/default.jpg")}"></a></div>""",
+            f"""<p><a href="https://www.youtube.com/watch?v=O5nskjZ_GoI&amp;list=PL8dPuuaLjXtNlUrzyH5r6jN9ulIgZBpdo">https://www.youtube.com/watch?v=O5nskjZ_GoI&amp;list=PL8dPuuaLjXtNlUrzyH5r6jN9ulIgZBpdo</a></p>\n<div class="youtube-video message_inline_image"><a data-id="O5nskjZ_GoI" href="https://www.youtube.com/watch?v=O5nskjZ_GoI&amp;list=PL8dPuuaLjXtNlUrzyH5r6jN9ulIgZBpdo"><img src="{get_camo_url("https://i.ytimg.com/vi/O5nskjZ_GoI/mqdefault.jpg")}"></a></div>""",
         )
 
         msg = "http://www.youtube.com/watch_videos?video_ids=nOJgD4fcZhI,i96UO8-GFvw"
@@ -709,7 +879,7 @@ class MarkdownEmbedsTest(ZulipTestCase):
 
         self.assertEqual(
             converted,
-            f"""<p><a href="http://www.youtube.com/watch_videos?video_ids=nOJgD4fcZhI,i96UO8-GFvw">http://www.youtube.com/watch_videos?video_ids=nOJgD4fcZhI,i96UO8-GFvw</a></p>\n<div class="youtube-video message_inline_image"><a data-id="nOJgD4fcZhI" href="http://www.youtube.com/watch_videos?video_ids=nOJgD4fcZhI,i96UO8-GFvw"><img src="{get_camo_url("https://i.ytimg.com/vi/nOJgD4fcZhI/default.jpg")}"></a></div>""",
+            f"""<p><a href="http://www.youtube.com/watch_videos?video_ids=nOJgD4fcZhI,i96UO8-GFvw">http://www.youtube.com/watch_videos?video_ids=nOJgD4fcZhI,i96UO8-GFvw</a></p>\n<div class="youtube-video message_inline_image"><a data-id="nOJgD4fcZhI" href="http://www.youtube.com/watch_videos?video_ids=nOJgD4fcZhI,i96UO8-GFvw"><img src="{get_camo_url("https://i.ytimg.com/vi/nOJgD4fcZhI/mqdefault.jpg")}"></a></div>""",
         )
 
     def test_inline_image_preview(self) -> None:
@@ -744,7 +914,7 @@ class MarkdownEmbedsTest(ZulipTestCase):
 
     @override_settings(EXTERNAL_URI_SCHEME="https://")
     def test_static_image_preview_skip_camo(self) -> None:
-        content = f"{ settings.STATIC_URL }/thing.jpeg"
+        content = f"{settings.STATIC_URL}/thing.jpeg"
 
         thumbnail_img = f"""<div class="message_inline_image"><a href="{content}"><img src="{content}"></a></div>"""
         converted = markdown_convert_wrapper(content)
@@ -752,15 +922,15 @@ class MarkdownEmbedsTest(ZulipTestCase):
 
     @override_settings(EXTERNAL_URI_SCHEME="https://")
     def test_realm_image_preview_skip_camo(self) -> None:
-        content = f"https://zulip.{ settings.EXTERNAL_HOST }/thing.jpeg"
+        content = f"https://zulip.{settings.EXTERNAL_HOST}/thing.jpeg"
         converted = markdown_convert_wrapper(content)
         self.assertNotIn(converted, get_camo_url(content))
 
     @override_settings(EXTERNAL_URI_SCHEME="https://")
     def test_cross_realm_image_preview_use_camo(self) -> None:
-        content = f"https://otherrealm.{ settings.EXTERNAL_HOST }/thing.jpeg"
+        content = f"https://otherrealm.{settings.EXTERNAL_HOST}/thing.jpeg"
 
-        thumbnail_img = f"""<div class="message_inline_image"><a href="{ content }"><img src="{ get_camo_url(content) }"></a></div>"""
+        thumbnail_img = f"""<div class="message_inline_image"><a href="{content}"><img src="{get_camo_url(content)}"></a></div>"""
         converted = markdown_convert_wrapper(content)
         self.assertIn(converted, thumbnail_img)
 
@@ -861,7 +1031,7 @@ class MarkdownEmbedsTest(ZulipTestCase):
         self.assertEqual(converted.rendered_content, expected)
 
         urls.append("https://www.google.com/images/srpr/logo4w.png")
-        content = f"{urls[0]}\n\n" f">{urls[1]}\n\n" f"* {urls[2]}\n" f"* {urls[3]}"
+        content = f"{urls[0]}\n\n>{urls[1]}\n\n* {urls[2]}\n* {urls[3]}"
         expected = (
             f'<div class="message_inline_image"><a href="{urls[0]}"><img src="{get_camo_url(urls[0])}"></a></div>'
             f'<blockquote>\n<p><a href="{urls[1]}">{urls[1]}</a></p>\n</blockquote>\n'
@@ -901,6 +1071,46 @@ class MarkdownEmbedsTest(ZulipTestCase):
         expected = f'<div class="message_inline_image"><a href="https://en.wikipedia.org/static/images/icons/wikipedia.png"><img src="{camo_url}"></a></div>'
         converted = render_message_markdown(msg, content)
         self.assertEqual(converted.rendered_content, expected)
+
+    def test_inline_audio_preview(self) -> None:
+        # Test audio previews with a valid audio file upload.
+        url = upload_message_attachment(
+            "filename",
+            "audio/mpeg",
+            b"",
+            self.example_user("othello"),
+        )[0]
+        path_id = re.sub(r"/user_uploads/", "", url)
+        message_id = self.send_message_content(f"![Audio link](/user_uploads/{path_id})")
+        expected = (
+            f'<p><audio controls preload="metadata" src="{url}" title="Audio link"></audio></p>'
+        )
+        self.assert_message_content_is(message_id, expected)
+
+        # Test audio files are not previewed if the file doesn't
+        # exist.
+        url = "/user_uploads/path/to/file.mp3"
+        path_id = re.sub(r"/user_uploads/", "", url)
+
+        with self.assertLogs(level="WARNING"):
+            message_id = self.send_message_content(f"![Audio link](/user_uploads/{path_id})")
+
+        expected = f"<p>![Audio link]({url})</p>"
+        self.assert_message_content_is(message_id, expected)
+
+        # Test audio files are not previewed when the content type
+        # is not supported one, but filename contains a supported
+        # audio file extension.
+        url = upload_message_attachment(
+            "filename.mp3",
+            "",
+            b"",
+            self.example_user("othello"),
+        )[0]
+        path_id = re.sub(r"/user_uploads/", "", url)
+        message_id = self.send_message_content(f"![Audio link](/user_uploads/{path_id})")
+        expected = f"<p>![Audio link]({url})</p>"
+        self.assert_message_content_is(message_id, expected)
 
     @override_settings(INLINE_IMAGE_PREVIEW=False)
     def test_image_preview_enabled(self) -> None:
@@ -959,32 +1169,55 @@ class MarkdownEmbedsTest(ZulipTestCase):
             self.assertFalse(url_embed_preview_enabled(message, no_previews=True))
 
     def test_inline_dropbox(self) -> None:
-        msg = "Look at how hilarious our old office was: https://www.dropbox.com/s/ymdijjcg67hv2ta/IMG_0923.JPG"
+        msg = "Look at how hilarious our old office was: https://www.dropbox.com/scl/fi/cbabl5ryv1veky9ehs603/IMG_0923.JPG?rlkey=24sfgf0k0dneebzf5tfccldg0"
         image_info = {
-            "image": "https://photos-4.dropbox.com/t/2/AABIre1oReJgPYuc_53iv0IHq1vUzRaDg2rrCfTpiWMccQ/12/129/jpeg/1024x1024/2/_/0/4/IMG_0923.JPG/CIEBIAEgAiAHKAIoBw/ymdijjcg67hv2ta/AABz2uuED1ox3vpWWvMpBxu6a/IMG_0923.JPG",
-            "desc": "Shared with Dropbox",
-            "title": "IMG_0923.JPG",
+            "image": "https://www.dropbox.com/scl/fi/cbabl5ryv1veky9ehs603/IMG_0923.JPG?rlkey=24sfgf0k0dneebzf5tfccldg0&raw=1",
         }
         with mock.patch("zerver.lib.markdown.fetch_open_graph_image", return_value=image_info):
             converted = markdown_convert_wrapper(msg)
 
         self.assertEqual(
             converted,
-            f"""<p>Look at how hilarious our old office was: <a href="https://www.dropbox.com/s/ymdijjcg67hv2ta/IMG_0923.JPG">https://www.dropbox.com/s/ymdijjcg67hv2ta/IMG_0923.JPG</a></p>\n<div class="message_inline_image"><a href="https://www.dropbox.com/s/ymdijjcg67hv2ta/IMG_0923.JPG" title="IMG_0923.JPG"><img src="{get_camo_url("https://www.dropbox.com/s/ymdijjcg67hv2ta/IMG_0923.JPG?raw=1")}"></a></div>""",
+            f"""<p>Look at how hilarious our old office was: <a href="https://www.dropbox.com/scl/fi/cbabl5ryv1veky9ehs603/IMG_0923.JPG?rlkey=24sfgf0k0dneebzf5tfccldg0">https://www.dropbox.com/scl/fi/cbabl5ryv1veky9ehs603/IMG_0923.JPG?rlkey=24sfgf0k0dneebzf5tfccldg0</a></p>\n<div class="message_inline_image"><a href="https://www.dropbox.com/scl/fi/cbabl5ryv1veky9ehs603/IMG_0923.JPG?rlkey=24sfgf0k0dneebzf5tfccldg0&amp;raw=1"><img src="{get_camo_url("https://www.dropbox.com/scl/fi/cbabl5ryv1veky9ehs603/IMG_0923.JPG?rlkey=24sfgf0k0dneebzf5tfccldg0&raw=1")}"></a></div>""",
         )
 
-        msg = "Look at my hilarious drawing folder: https://www.dropbox.com/sh/cm39k9e04z7fhim/AAAII5NK-9daee3FcF41anEua?dl="
+        msg = "Look at my hilarious drawing folder: https://www.dropbox.com/scl/fo/ty22bx4thyhl9r89p839g/AAzfPX5IbiOb8wmxHvns2pM?rlkey=5pinfuoghias9cueq0zyhj2rp&st=dz5p1ytw"  # codespell:ignore fo
         image_info = {
-            "image": "https://cf.dropboxstatic.com/static/images/icons128/folder_dropbox.png",
-            "desc": "Shared with Dropbox",
-            "title": "Saves",
+            "image": "https://www.dropbox.com/static/metaserver/static/images/opengraph/opengraph-content-icon-folder-dropbox-landscape.png",
         }
         with mock.patch("zerver.lib.markdown.fetch_open_graph_image", return_value=image_info):
             converted = markdown_convert_wrapper(msg)
 
         self.assertEqual(
             converted,
-            f"""<p>Look at my hilarious drawing folder: <a href="https://www.dropbox.com/sh/cm39k9e04z7fhim/AAAII5NK-9daee3FcF41anEua?dl=">https://www.dropbox.com/sh/cm39k9e04z7fhim/AAAII5NK-9daee3FcF41anEua?dl=</a></p>\n<div class="message_inline_ref"><a href="https://www.dropbox.com/sh/cm39k9e04z7fhim/AAAII5NK-9daee3FcF41anEua?dl=" title="Saves"><img src="{get_camo_url("https://cf.dropboxstatic.com/static/images/icons128/folder_dropbox.png")}"></a><div><div class="message_inline_image_title">Saves</div><desc class="message_inline_image_desc"></desc></div></div>""",
+            """<p>Look at my hilarious drawing folder: <a href="https://www.dropbox.com/scl/fo/ty22bx4thyhl9r89p839g/AAzfPX5IbiOb8wmxHvns2pM?rlkey=5pinfuoghias9cueq0zyhj2rp&amp;st=dz5p1ytw">https://www.dropbox.com/scl/fo/ty22bx4thyhl9r89p839g/AAzfPX5IbiOb8wmxHvns2pM?rlkey=5pinfuoghias9cueq0zyhj2rp&amp;st=dz5p1ytw</a></p>\n<div class="message_embed"><a class="message_embed_image" href="https://www.dropbox.com/scl/fo/ty22bx4thyhl9r89p839g/AAzfPX5IbiOb8wmxHvns2pM?rlkey=5pinfuoghias9cueq0zyhj2rp&amp;st=dz5p1ytw" style="background-image: url(&quot;https://external-content.zulipcdn.net/external_content/a301902b9942efb85cfe2a6f4bb07d76ba7b86de/68747470733a2f2f7777772e64726f70626f782e636f6d2f7374617469632f6d6574617365727665722f7374617469632f696d616765732f6f70656e67726170682f6f70656e67726170682d636f6e74656e742d69636f6e2d666f6c6465722d64726f70626f782d6c616e6473636170652e706e67&quot;)"></a><div class="data-container"><div class="message_embed_title"><a href="https://www.dropbox.com/scl/fo/ty22bx4thyhl9r89p839g/AAzfPX5IbiOb8wmxHvns2pM?rlkey=5pinfuoghias9cueq0zyhj2rp&amp;st=dz5p1ytw" title="Dropbox folder">Dropbox folder</a></div><div class="message_embed_description">Click to open folder.</div></div></div>""",  # codespell:ignore fo
+        )
+
+    def test_inline_dropbox_video(self) -> None:
+        msg = "Look at this video: https://www.dropbox.com/scl/fi/x8z01rodq1n6pgyznt1kh/SampleVideo_1280x720_1mb.mp4?rlkey=fiibsgnu06tms041vfzfopmos&st=kjtkea8h&dl=0"
+        image_info = {
+            "image": "https://www.dropbox.com/scl/fi/x8z01rodq1n6pgyznt1kh/SampleVideo_1280x720_1mb.mp4?rlkey=fiibsgnu06tms041vfzfopmos&st=kjtkea8h&dl=0&raw=1",
+        }
+        with mock.patch("zerver.lib.markdown.fetch_open_graph_image", return_value=image_info):
+            converted = markdown_convert_wrapper(msg)
+
+        self.assertEqual(
+            converted,
+            """<p>Look at this video: <a href="https://www.dropbox.com/scl/fi/x8z01rodq1n6pgyznt1kh/SampleVideo_1280x720_1mb.mp4?rlkey=fiibsgnu06tms041vfzfopmos&amp;st=kjtkea8h&amp;dl=0">https://www.dropbox.com/scl/fi/x8z01rodq1n6pgyznt1kh/SampleVideo_1280x720_1mb.mp4?rlkey=fiibsgnu06tms041vfzfopmos&amp;st=kjtkea8h&amp;dl=0</a></p>
+<div class="message_inline_image message_inline_video"><a href="https://www.dropbox.com/scl/fi/x8z01rodq1n6pgyznt1kh/SampleVideo_1280x720_1mb.mp4?rlkey=fiibsgnu06tms041vfzfopmos&amp;st=kjtkea8h&amp;dl=0&amp;raw=1"><video preload="metadata" src="https://external-content.zulipcdn.net/external_content/eca04355025c60f40334c9a03d220c3298d4df47/68747470733a2f2f7777772e64726f70626f782e636f6d2f73636c2f66692f78387a3031726f6471316e367067797a6e74316b682f53616d706c65566964656f5f31323830783732305f316d622e6d70343f726c6b65793d6669696273676e753036746d7330343176667a666f706d6f732673743d6b6a746b6561386826646c3d30267261773d31"></video></a></div>""",
+        )
+
+    def test_inline_mov_video(self) -> None:
+        msg = "Check out: https://example.com/video.mov"
+        converted = markdown_convert_wrapper(msg)
+        self.assertEqual(
+            converted,
+            '<p>Check out: <a href="https://example.com/video.mov">https://example.com/video.mov</a></p>\n'
+            '<div class="message_inline_image message_inline_video">'
+            '<a href="https://example.com/video.mov">'
+            '<video preload="metadata" '
+            'src="https://external-content.zulipcdn.net/external_content/63ae0235541edb2aaebc4f2e6cd63c6f0c1447ed/68747470733a2f2f6578616d706c652e636f6d2f766964656f2e6d6f76">'
+            "</video></a></div>",
         )
 
     def test_inline_dropbox_preview(self) -> None:
@@ -992,15 +1225,14 @@ class MarkdownEmbedsTest(ZulipTestCase):
         msg = "https://www.dropbox.com/sc/tditp9nitko60n5/03rEiZldy5"
         image_info = {
             "image": "https://photos-6.dropbox.com/t/2/AAAlawaeD61TyNewO5vVi-DGf2ZeuayfyHFdNTNzpGq-QA/12/271544745/jpeg/1024x1024/2/_/0/5/baby-piglet.jpg/CKnjvYEBIAIgBygCKAc/tditp9nitko60n5/AADX03VAIrQlTl28CtujDcMla/0",
-            "desc": "Shared with Dropbox",
-            "title": "1 photo",
         }
         with mock.patch("zerver.lib.markdown.fetch_open_graph_image", return_value=image_info):
             converted = markdown_convert_wrapper(msg)
 
         self.assertEqual(
             converted,
-            f"""<p><a href="https://www.dropbox.com/sc/tditp9nitko60n5/03rEiZldy5">https://www.dropbox.com/sc/tditp9nitko60n5/03rEiZldy5</a></p>\n<div class="message_inline_image"><a href="https://www.dropbox.com/sc/tditp9nitko60n5/03rEiZldy5" title="1 photo"><img src="{get_camo_url("https://photos-6.dropbox.com/t/2/AAAlawaeD61TyNewO5vVi-DGf2ZeuayfyHFdNTNzpGq-QA/12/271544745/jpeg/1024x1024/2/_/0/5/baby-piglet.jpg/CKnjvYEBIAIgBygCKAc/tditp9nitko60n5/AADX03VAIrQlTl28CtujDcMla/0")}"></a></div>""",
+            """<p><a href="https://www.dropbox.com/sc/tditp9nitko60n5/03rEiZldy5">https://www.dropbox.com/sc/tditp9nitko60n5/03rEiZldy5</a></p>
+<div class="message_embed"><a class="message_embed_image" href="https://www.dropbox.com/sc/tditp9nitko60n5/03rEiZldy5" style="background-image: url(&quot;https://external-content.zulipcdn.net/external_content/e7584a56d9ba7f2a2aee96ee1427a6b746eab5ff/68747470733a2f2f70686f746f732d362e64726f70626f782e636f6d2f742f322f4141416c6177616544363154794e65774f357656692d444766325a6575617966794846644e544e7a7047712d51412f31322f3237313534343734352f6a7065672f3130323478313032342f322f5f2f302f352f626162792d7069676c65742e6a70672f434b6e6a7659454249414967427967434b41632f7464697470396e69746b6f36306e352f41414458303356414972516c546c32384374756a44634d6c612f30&quot;)"></a><div class="data-container"><div class="message_embed_title"><a href="https://www.dropbox.com/sc/tditp9nitko60n5/03rEiZldy5" title="Dropbox folder">Dropbox folder</a></div><div class="message_embed_description">Click to open folder.</div></div></div>""",
         )
 
     def test_inline_dropbox_negative(self) -> None:
@@ -1028,6 +1260,25 @@ class MarkdownEmbedsTest(ZulipTestCase):
         self.assertEqual(
             converted,
             '<p><a href="https://zulip-test.dropbox.com/photos/cl/ROmr9K1XYtmpneM">https://zulip-test.dropbox.com/photos/cl/ROmr9K1XYtmpneM</a></p>',
+        )
+
+    def test_inline_dropbox_no_previews(self) -> None:
+        # When previews are disabled (e.g., for channel descriptions),
+        # dropbox_media should not invoke fetch_open_graph_image, since
+        # network calls in that context can time out and abort rendering.
+        # Use a non-image/non-video file link so that, without the fix,
+        # dropbox_media would reach the fetch_open_graph_image call.
+        url = "https://www.dropbox.com/scl/fi/8xq0p2m4n6k8j1h3g5f7d/quarterly-report.pdf?dl=0"
+        with mock.patch(
+            "zerver.lib.markdown.fetch_open_graph_image"
+        ) as mock_fetch_open_graph_image:
+            converted = markdown_convert(
+                url, message_realm=get_realm("zulip"), no_previews=True
+            ).rendered_content
+        mock_fetch_open_graph_image.assert_not_called()
+        self.assertEqual(
+            converted,
+            f'<p><a href="{url}">{url}</a></p>',
         )
 
     def test_inline_github_preview(self) -> None:
@@ -1069,7 +1320,7 @@ class MarkdownEmbedsTest(ZulipTestCase):
 
         self.assertEqual(
             converted,
-            f"""<div class="spoiler-block"><div class="spoiler-header">\n<p>Check out this PyCon video</p>\n</div><div class="spoiler-content" aria-hidden="true">\n<p><a href="https://www.youtube.com/watch?v=0c46YHS3RY8">https://www.youtube.com/watch?v=0c46YHS3RY8</a></p>\n<div class="youtube-video message_inline_image"><a data-id="0c46YHS3RY8" href="https://www.youtube.com/watch?v=0c46YHS3RY8"><img src="{get_camo_url("https://i.ytimg.com/vi/0c46YHS3RY8/default.jpg")}"></a></div></div></div>""",
+            f"""<div class="spoiler-block"><div class="spoiler-header">\n<p>Check out this PyCon video</p>\n</div><div class="spoiler-content" aria-hidden="true">\n<p><a href="https://www.youtube.com/watch?v=0c46YHS3RY8">https://www.youtube.com/watch?v=0c46YHS3RY8</a></p>\n<div class="youtube-video message_inline_image"><a data-id="0c46YHS3RY8" href="https://www.youtube.com/watch?v=0c46YHS3RY8"><img src="{get_camo_url("https://i.ytimg.com/vi/0c46YHS3RY8/mqdefault.jpg")}"></a></div></div></div>""",
         )
 
         # Test YouTube URLs in normal messages.
@@ -1078,7 +1329,7 @@ class MarkdownEmbedsTest(ZulipTestCase):
 
         self.assertEqual(
             converted,
-            f"""<p><a href="https://www.youtube.com/watch?v=0c46YHS3RY8">YouTube link</a></p>\n<div class="youtube-video message_inline_image"><a data-id="0c46YHS3RY8" href="https://www.youtube.com/watch?v=0c46YHS3RY8"><img src="{get_camo_url("https://i.ytimg.com/vi/0c46YHS3RY8/default.jpg")}"></a></div>""",
+            f"""<p><a href="https://www.youtube.com/watch?v=0c46YHS3RY8">YouTube link</a></p>\n<div class="youtube-video message_inline_image"><a data-id="0c46YHS3RY8" href="https://www.youtube.com/watch?v=0c46YHS3RY8"><img src="{get_camo_url("https://i.ytimg.com/vi/0c46YHS3RY8/mqdefault.jpg")}"></a></div>""",
         )
 
         msg = "https://www.youtube.com/watch?v=0c46YHS3RY8\n\nSample text\n\nhttps://www.youtube.com/watch?v=lXFO2ULktEI"
@@ -1086,7 +1337,7 @@ class MarkdownEmbedsTest(ZulipTestCase):
 
         self.assertEqual(
             converted,
-            f"""<p><a href="https://www.youtube.com/watch?v=0c46YHS3RY8">https://www.youtube.com/watch?v=0c46YHS3RY8</a></p>\n<div class="youtube-video message_inline_image"><a data-id="0c46YHS3RY8" href="https://www.youtube.com/watch?v=0c46YHS3RY8"><img src="{get_camo_url("https://i.ytimg.com/vi/0c46YHS3RY8/default.jpg")}"></a></div><p>Sample text</p>\n<p><a href="https://www.youtube.com/watch?v=lXFO2ULktEI">https://www.youtube.com/watch?v=lXFO2ULktEI</a></p>\n<div class="youtube-video message_inline_image"><a data-id="lXFO2ULktEI" href="https://www.youtube.com/watch?v=lXFO2ULktEI"><img src="{get_camo_url("https://i.ytimg.com/vi/lXFO2ULktEI/default.jpg")}"></a></div>""",
+            f"""<p><a href="https://www.youtube.com/watch?v=0c46YHS3RY8">https://www.youtube.com/watch?v=0c46YHS3RY8</a></p>\n<div class="youtube-video message_inline_image"><a data-id="0c46YHS3RY8" href="https://www.youtube.com/watch?v=0c46YHS3RY8"><img src="{get_camo_url("https://i.ytimg.com/vi/0c46YHS3RY8/mqdefault.jpg")}"></a></div><p>Sample text</p>\n<p><a href="https://www.youtube.com/watch?v=lXFO2ULktEI">https://www.youtube.com/watch?v=lXFO2ULktEI</a></p>\n<div class="youtube-video message_inline_image"><a data-id="lXFO2ULktEI" href="https://www.youtube.com/watch?v=lXFO2ULktEI"><img src="{get_camo_url("https://i.ytimg.com/vi/lXFO2ULktEI/mqdefault.jpg")}"></a></div>""",
         )
 
         # Test order of YouTube inline previews in same paragraph.
@@ -1094,41 +1345,8 @@ class MarkdownEmbedsTest(ZulipTestCase):
         converted = markdown_convert_wrapper(msg)
         self.assertEqual(
             converted,
-            f"""<p><a href="https://www.youtube.com/watch?v=0c46YHS3RY8">https://www.youtube.com/watch?v=0c46YHS3RY8</a><br>\n<a href="https://www.youtube.com/watch?v=lXFO2ULktEI">https://www.youtube.com/watch?v=lXFO2ULktEI</a></p>\n<div class="youtube-video message_inline_image"><a data-id="0c46YHS3RY8" href="https://www.youtube.com/watch?v=0c46YHS3RY8"><img src="{get_camo_url("https://i.ytimg.com/vi/0c46YHS3RY8/default.jpg")}"></a></div><div class="youtube-video message_inline_image"><a data-id="lXFO2ULktEI" href="https://www.youtube.com/watch?v=lXFO2ULktEI"><img src="{get_camo_url("https://i.ytimg.com/vi/lXFO2ULktEI/default.jpg")}"></a></div>""",
+            f"""<p><a href="https://www.youtube.com/watch?v=0c46YHS3RY8">https://www.youtube.com/watch?v=0c46YHS3RY8</a><br>\n<a href="https://www.youtube.com/watch?v=lXFO2ULktEI">https://www.youtube.com/watch?v=lXFO2ULktEI</a></p>\n<div class="youtube-video message_inline_image"><a data-id="0c46YHS3RY8" href="https://www.youtube.com/watch?v=0c46YHS3RY8"><img src="{get_camo_url("https://i.ytimg.com/vi/0c46YHS3RY8/mqdefault.jpg")}"></a></div><div class="youtube-video message_inline_image"><a data-id="lXFO2ULktEI" href="https://www.youtube.com/watch?v=lXFO2ULktEI"><img src="{get_camo_url("https://i.ytimg.com/vi/lXFO2ULktEI/mqdefault.jpg")}"></a></div>""",
         )
-
-    def test_twitter_id_extraction(self) -> None:
-        self.assertEqual(
-            get_tweet_id("http://twitter.com/#!/VizzQuotes/status/409030735191097344"),
-            "409030735191097344",
-        )
-        self.assertEqual(
-            get_tweet_id("http://twitter.com/VizzQuotes/status/409030735191097344"),
-            "409030735191097344",
-        )
-        self.assertEqual(
-            get_tweet_id("http://twitter.com/VizzQuotes/statuses/409030735191097344"),
-            "409030735191097344",
-        )
-        self.assertEqual(get_tweet_id("https://twitter.com/wdaher/status/1017581858"), "1017581858")
-        self.assertEqual(
-            get_tweet_id("https://twitter.com/wdaher/status/1017581858/"), "1017581858"
-        )
-        self.assertEqual(
-            get_tweet_id("https://twitter.com/windyoona/status/410766290349879296/photo/1"),
-            "410766290349879296",
-        )
-        self.assertEqual(
-            get_tweet_id("https://twitter.com/windyoona/status/410766290349879296/"),
-            "410766290349879296",
-        )
-
-    def test_fetch_tweet_data_settings_validation(self) -> None:
-        with (
-            self.settings(TEST_SUITE=False, TWITTER_CONSUMER_KEY=None),
-            self.assertRaises(NotImplementedError),
-        ):
-            fetch_tweet_data("287977969287315459")
 
 
 class MarkdownEmojiTest(ZulipTestCase):
@@ -1145,7 +1363,9 @@ class MarkdownEmojiTest(ZulipTestCase):
     def test_realm_emoji(self) -> None:
         def emoji_img(name: str, file_name: str, realm_id: int) -> str:
             return '<img alt="{}" class="emoji" src="{}" title="{}">'.format(
-                name, get_emoji_url(file_name, realm_id), name[1:-1].replace("_", " ")
+                name,
+                get_emoji_url(file_name, realm_id),
+                name[1:-1].replace("_", " "),
             )
 
         realm = get_realm("zulip")
@@ -1612,7 +1832,7 @@ class MarkdownLinkifierTest(ZulipTestCase):
         )
 
     def test_topic_links_ordering_by_priority(self) -> None:
-        # The same test case is also implemented in web/tests/markdown_parse.test.js
+        # The same test case is also implemented in web/tests/markdown_parse.test.cjs
         realm = get_realm("zulip")
         self.check_add_linkifiers(
             [
@@ -1754,13 +1974,28 @@ class MarkdownLinkifierTest(ZulipTestCase):
         ):
             self.assertEqual(linkifiers_for_realm(realm.id), [])
 
-        linkifier = RealmFilter(realm=realm, pattern=r"whatever", url_template="whatever")
+        linkifier = RealmFilter(
+            realm=realm,
+            pattern=r"whatever",
+            url_template="whatever",
+            example_input="whatever",
+            reverse_template="whatever",
+        )
         linkifier.save()
 
         # cache gets properly invalidated by virtue of our save
         self.assertEqual(
             linkifiers_for_realm(realm.id),
-            [{"id": linkifier.id, "pattern": "whatever", "url_template": "whatever"}],
+            [
+                {
+                    "id": linkifier.id,
+                    "pattern": "whatever",
+                    "url_template": "whatever",
+                    "example_input": "whatever",
+                    "reverse_template": "whatever",
+                    "alternative_url_templates": [],
+                }
+            ],
         )
 
         # And the in-process cache works again.
@@ -1770,7 +2005,16 @@ class MarkdownLinkifierTest(ZulipTestCase):
         ):
             self.assertEqual(
                 linkifiers_for_realm(realm.id),
-                [{"id": linkifier.id, "pattern": "whatever", "url_template": "whatever"}],
+                [
+                    {
+                        "id": linkifier.id,
+                        "pattern": "whatever",
+                        "url_template": "whatever",
+                        "example_input": "whatever",
+                        "reverse_template": "whatever",
+                        "alternative_url_templates": [],
+                    }
+                ],
             )
 
 
@@ -2102,7 +2346,6 @@ class MarkdownCodeBlockTest(ZulipTestCase):
         realm = do_create_realm(
             string_id="code_block_processor_test", name="code_block_processor_test"
         )
-        maybe_update_markdown_engines(realm.id, True)
         rendering_result = markdown_convert(msg, message_realm=realm, email_gateway=True)
         expected_output = (
             "<p>Hello,</p>\n"
@@ -2140,7 +2383,7 @@ class MarkdownMentionTest(ZulipTestCase):
             rendering_result = render_message_markdown(msg, content)
             self.assertEqual(
                 rendering_result.rendered_content,
-                f'<p><span class="user-mention" data-user-id="*">@{stream_wildcard}</span> test</p>',
+                f'<p><span class="user-mention channel-wildcard-mention" data-user-id="*">@{stream_wildcard}</span> test</p>',
             )
             self.assertFalse(rendering_result.mentions_topic_wildcard)
             self.assertTrue(rendering_result.mentions_stream_wildcard)
@@ -2261,7 +2504,33 @@ class MarkdownMentionTest(ZulipTestCase):
                 f"<p>{unicode_character}@<strong>King Hamlet</strong></p>",
             )
 
-    def test_mention_silent(self) -> None:
+    def test_mention_get_user_ids(self) -> None:
+        # possible_mentions() does NOT differentiate between silent and
+        # non-silent mentions, unlike possible_user_group_mentions().
+        # So we explicitly test that behaviour of possible_mentions(),
+        # when mentioning users, ensuring their Ids are fetched.
+        # This also tests the case where different mention types were used in the same
+        # message.
+        realm = get_realm("zulip")
+        aaron = self.example_user("aaron")
+        hamlet = self.example_user("hamlet")
+        cordelia = self.example_user("cordelia")
+        othello = self.example_user("othello")
+
+        # Mix 4 different types of mentions:
+        # non-silent mention by name, silent mention by name, non-silent mention by ID, silent mention by ID.
+        content = f"@**{aaron.full_name}**, @_**{hamlet.full_name}**, @**|{cordelia.id}**, @_**|{othello.id}**"
+
+        mention_backend = MentionBackend(realm.id)
+        mention_data = MentionData(mention_backend, content, message_sender=None)
+
+        # user_ids of all the mentioned users, by different mention types,
+        # should be captured in mention_data.get_user_ids().
+        self.assertEqual(
+            mention_data.get_user_ids(), {aaron.id, hamlet.id, cordelia.id, othello.id}
+        )
+
+    def test_render_silent_mention_user(self) -> None:
         sender_user_profile = self.example_user("othello")
         user_profile = self.example_user("hamlet")
         msg = Message(
@@ -2275,9 +2544,7 @@ class MarkdownMentionTest(ZulipTestCase):
         rendering_result = render_message_markdown(msg, content)
         self.assertEqual(
             rendering_result.rendered_content,
-            '<p><span class="user-mention silent" '
-            f'data-user-id="{user_id}">'
-            "King Hamlet</span></p>",
+            f'<p><span class="user-mention silent" data-user-id="{user_id}">King Hamlet</span></p>',
         )
         self.assertEqual(rendering_result.mentions_user_ids, set())
 
@@ -2296,9 +2563,7 @@ class MarkdownMentionTest(ZulipTestCase):
         rendering_result = render_message_markdown(msg, content)
         self.assertEqual(
             rendering_result.rendered_content,
-            '<p><span class="user-mention silent" '
-            f'data-user-id="{user_id}">'
-            "King Hamlet</span></p>",
+            f'<p><span class="user-mention silent" data-user-id="{user_id}">King Hamlet</span></p>',
         )
         self.assertEqual(rendering_result.mentions_user_ids, set())
 
@@ -2317,9 +2582,7 @@ class MarkdownMentionTest(ZulipTestCase):
         rendering_result = render_message_markdown(msg, content)
         self.assertEqual(
             rendering_result.rendered_content,
-            '<p><span class="user-mention silent" '
-            f'data-user-id="{user_id}">'
-            "King Hamlet</span></p>",
+            f'<p><span class="user-mention silent" data-user-id="{user_id}">King Hamlet</span></p>',
         )
         self.assertEqual(rendering_result.mentions_user_ids, set())
 
@@ -2363,7 +2626,7 @@ class MarkdownMentionTest(ZulipTestCase):
             rendering_result = render_message_markdown(msg, content)
             self.assertEqual(
                 rendering_result.rendered_content,
-                f'<p><span class="user-mention silent" data-user-id="*">{wildcard}</span></p>',
+                f'<p><span class="user-mention channel-wildcard-mention silent" data-user-id="*">{wildcard}</span></p>',
             )
             self.assertFalse(rendering_result.mentions_stream_wildcard)
 
@@ -2481,8 +2744,14 @@ class MarkdownMentionTest(ZulipTestCase):
         assert_mentions("smush@**steve**smush", set())
 
         assert_mentions(
-            f"Hello @**King Hamlet**, @**|{aaron.id}** and @**Cordelia, Lear's daughter**\n@**Foo van Barson|1234** @**all**",
-            {"King Hamlet", f"|{aaron.id}", "Cordelia, Lear's daughter", "Foo van Barson|1234"},
+            f"Hello @**King Hamlet**, @**|{aaron.id}** and @**Cordelia, Lear's daughter**\n@**Foo van Barson|1234**, @_**othello** @**all**",
+            {
+                "King Hamlet",
+                f"|{aaron.id}",
+                "Cordelia, Lear's daughter",
+                "Foo van Barson|1234",
+                "othello",
+            },
             False,
             True,
         )
@@ -2491,22 +2760,26 @@ class MarkdownMentionTest(ZulipTestCase):
         sender_user_profile = self.example_user("othello")
         hamlet = self.example_user("hamlet")
         cordelia = self.example_user("cordelia")
+        aaron = self.example_user("aaron")
         msg = Message(
             sender=sender_user_profile,
             sending_client=get_client("test"),
             realm=sender_user_profile.realm,
         )
 
-        content = "@**King Hamlet** and @**Cordelia, Lear's daughter**, check this out"
+        content = (
+            "@**King Hamlet**, @**Cordelia, Lear's daughter**, and @_**aaron**, check this out"
+        )
 
         rendering_result = render_message_markdown(msg, content)
         self.assertEqual(
             rendering_result.rendered_content,
             "<p>"
             '<span class="user-mention" '
-            f'data-user-id="{hamlet.id}">@King Hamlet</span> and '
+            f'data-user-id="{hamlet.id}">@King Hamlet</span>, '
             '<span class="user-mention" '
-            f'data-user-id="{cordelia.id}">@Cordelia, Lear\'s daughter</span>, '
+            f'data-user-id="{cordelia.id}">@Cordelia, Lear\'s daughter</span>, and '
+            f'<span class="user-mention silent" data-user-id="{aaron.id}">aaron</span>, '
             "check this out</p>",
         )
         self.assertEqual(rendering_result.mentions_user_ids, {hamlet.id, cordelia.id})
@@ -2566,7 +2839,7 @@ class MarkdownMentionTest(ZulipTestCase):
         def assert_silent_mention(content: str, wildcard: str) -> None:
             expected = (
                 "<blockquote>\n<p>"
-                f'<span class="user-mention silent" data-user-id="*">{wildcard}</span>'
+                f'<span class="user-mention channel-wildcard-mention silent" data-user-id="*">{wildcard}</span>'
                 "</p>\n</blockquote>"
             )
             rendering_result = render_message_markdown(message, content)
@@ -2676,9 +2949,7 @@ class MarkdownMentionTest(ZulipTestCase):
         rendering_result = render_message_markdown(msg, content)
         self.assertEqual(
             rendering_result.rendered_content,
-            '<p><span class="user-mention" '
-            f'data-user-id="{test_user.id}">'
-            "@Atomic #123</span></p>",
+            f'<p><span class="user-mention" data-user-id="{test_user.id}">@Atomic #123</span></p>',
         )
         self.assertEqual(rendering_result.mentions_user_ids, {test_user.id})
         content = "@_**Atomic #123**"
@@ -2694,7 +2965,7 @@ class MarkdownMentionTest(ZulipTestCase):
     def create_user_group_for_test(self, user_group_name: str) -> NamedUserGroup:
         othello = self.example_user("othello")
         return check_add_user_group(
-            get_realm("zulip"), user_group_name, [othello], acting_user=None
+            get_realm("zulip"), user_group_name, [othello], acting_user=othello
         )
 
     def test_user_group_mention_single(self) -> None:
@@ -2782,23 +3053,49 @@ class MarkdownMentionTest(ZulipTestCase):
         self.assertEqual(rendering_result.mentions_user_group_ids, {user_group.id})
 
     def test_possible_user_group_mentions(self) -> None:
-        def assert_mentions(content: str, names: set[str]) -> None:
+        def assert_mentions(content: str, names: dict[str, str]) -> None:
             self.assertEqual(possible_user_group_mentions(content), names)
 
-        assert_mentions("", set())
-        assert_mentions("boring", set())
-        assert_mentions("@**all**", set())
-        assert_mentions("smush@*steve*smush", set())
+        assert_mentions("", dict())
+        assert_mentions("boring", dict())
+        assert_mentions("@**all**", dict())
+        assert_mentions("smush@*steve*smush", dict())
 
+        # capture only the group mention among other mentions.
         assert_mentions(
             "@*support* Hello @**King Hamlet** and @**Cordelia, Lear's daughter**\n"
             "@**Foo van Barson** @**all**",
-            {"support"},
+            {"support": "non-silent"},
         )
-
+        # non-silent mentions
         assert_mentions(
             "Attention @*support*, @*frontend* and @*backend*\ngroups.",
-            {"support", "frontend", "backend"},
+            {"support": "non-silent", "frontend": "non-silent", "backend": "non-silent"},
+        )
+        # silent mentions
+        assert_mentions(
+            "I prefer @_*backend* over @_*frontend*,",
+            {"backend": "silent", "frontend": "silent"},
+        )
+        # silent and non-silent
+        assert_mentions(
+            "Attention @*frontend* please refer to @_*support*,",
+            {"frontend": "non-silent", "support": "silent"},
+        )
+
+        # Make sure regular (non-silent) mention always takes precedence,
+        # whether it precedes or follows a silent mention for the SAME group.
+
+        # non-silent before silent.
+        assert_mentions(
+            "@*help* the building is on fire!, folks should refer to @_*help*",
+            {"help": "non-silent"},
+        )
+
+        # non-silent after silent.
+        assert_mentions(
+            "folks should refer to @_*help*, @*help* the building is on fire! ",
+            {"help": "non-silent"},
         )
 
     def test_user_group_mention_multiple(self) -> None:
@@ -2862,6 +3159,7 @@ class MarkdownMentionTest(ZulipTestCase):
         update_message_and_check_flag("edited", False)
         update_message_and_check_flag("@*support*", True)
         update_message_and_check_flag("@_*support*", False)
+        update_message_and_check_flag("@_*role:administrators*", False)
 
     def test_user_group_mention_invalid(self) -> None:
         sender_user_profile = self.example_user("othello")
@@ -2898,6 +3196,40 @@ class MarkdownMentionTest(ZulipTestCase):
 
         self.assertEqual(rendering_result.mentions_user_group_ids, set())
 
+        admins_group = NamedUserGroup.objects.get(
+            name=SystemGroups.ADMINISTRATORS,
+            realm_for_sharding=sender_user_profile.realm,
+            is_system_group=True,
+        )
+        content = "Please contact @_*role:administrators*"
+        rendering_result = render_message_markdown(msg, content)
+        self.assertEqual(
+            rendering_result.rendered_content,
+            "<p>Please contact "
+            f'<span class="user-group-mention silent" data-user-group-id="{admins_group.id}">Administrators</span></p>',
+        )
+
+    def test_deactivated_user_group_mention(self) -> None:
+        sender_user_profile = self.example_user("othello")
+        msg = Message(
+            sender=sender_user_profile,
+            sending_client=get_client("test"),
+            realm=sender_user_profile.realm,
+        )
+        support = self.create_user_group_for_test("support")
+        do_deactivate_user_group(support, acting_user=None)
+
+        content = "We'll add you to @*support* user group."
+        rendering_result = render_message_markdown(msg, content)
+        self.assertEqual(
+            rendering_result.rendered_content,
+            "<p>We'll add you to "
+            f'<span class="user-group-mention silent" data-user-group-id="{support.id}">support</span>'
+            " user group.</p>",
+        )
+
+        self.assertEqual(rendering_result.mentions_user_group_ids, set())
+
     def test_user_group_mention_in_quotes(self) -> None:
         user_profile = self.example_user("othello")
         message = Message(
@@ -2920,29 +3252,8 @@ class MarkdownMentionTest(ZulipTestCase):
         assert_silent_mention("```quote\n@*backend*\n```")
         assert_silent_mention("```quote\n@_*backend*\n```")
 
-    def test_system_user_group_mention(self) -> None:
-        desdemona = self.example_user("desdemona")
-        iago = self.example_user("iago")
-        hamlet = self.example_user("hamlet")
-        moderators_group = NamedUserGroup.objects.get(
-            realm=iago.realm, name=SystemGroups.MODERATORS, is_system_group=True
-        )
-        content = "@*role:moderators* @**King Hamlet** test message"
 
-        # Owner cannot mention a system user group.
-        msg = Message(sender=desdemona, sending_client=get_client("test"), realm=desdemona.realm)
-        rendering_result = render_message_markdown(msg, content)
-        self.assertEqual(rendering_result.mentions_user_ids, {hamlet.id})
-        self.assertNotIn(moderators_group, rendering_result.mentions_user_group_ids)
-
-        # Admin belonging to user group also cannot mention a system user group.
-        msg = Message(sender=iago, sending_client=get_client("test"), realm=iago.realm)
-        rendering_result = render_message_markdown(msg, content)
-        self.assertEqual(rendering_result.mentions_user_ids, {hamlet.id})
-        self.assertNotIn(moderators_group, rendering_result.mentions_user_group_ids)
-
-
-class MarkdownStreamMentionTests(ZulipTestCase):
+class MarkdownStreamTopicMentionTests(ZulipTestCase):
     def test_stream_single(self) -> None:
         denmark = get_stream("Denmark", get_realm("zulip"))
         sender_user_profile = self.example_user("othello")
@@ -2954,7 +3265,7 @@ class MarkdownStreamMentionTests(ZulipTestCase):
         content = "#**Denmark**"
         self.assertEqual(
             render_message_markdown(msg, content).rendered_content,
-            f'<p><a class="stream" data-stream-id="{denmark.id}" href="/#narrow/stream/{denmark.id}-Denmark">#{denmark.name}</a></p>',
+            f'<p><a class="stream" data-stream-id="{denmark.id}" href="/#narrow/channel/{denmark.id}-Denmark">#{denmark.name}</a></p>',
         )
 
     def test_invalid_stream_followed_by_valid_mention(self) -> None:
@@ -2968,7 +3279,7 @@ class MarkdownStreamMentionTests(ZulipTestCase):
         content = "#**Invalid** and #**Denmark**"
         self.assertEqual(
             render_message_markdown(msg, content).rendered_content,
-            f'<p>#<strong>Invalid</strong> and <a class="stream" data-stream-id="{denmark.id}" href="/#narrow/stream/{denmark.id}-Denmark">#{denmark.name}</a></p>',
+            f'<p>#<strong>Invalid</strong> and <a class="stream" data-stream-id="{denmark.id}" href="/#narrow/channel/{denmark.id}-Denmark">#{denmark.name}</a></p>',
         )
 
     def test_stream_multiple(self) -> None:
@@ -2987,10 +3298,10 @@ class MarkdownStreamMentionTests(ZulipTestCase):
             "<p>Look to "
             '<a class="stream" '
             f'data-stream-id="{denmark.id}" '
-            f'href="/#narrow/stream/{denmark.id}-Denmark">#{denmark.name}</a> and '
+            f'href="/#narrow/channel/{denmark.id}-Denmark">#{denmark.name}</a> and '
             '<a class="stream" '
             f'data-stream-id="{scotland.id}" '
-            f'href="/#narrow/stream/{scotland.id}-Scotland">#{scotland.name}</a>, '
+            f'href="/#narrow/channel/{scotland.id}-Scotland">#{scotland.name}</a>, '
             "there something</p>",
         )
 
@@ -3002,7 +3313,7 @@ class MarkdownStreamMentionTests(ZulipTestCase):
         content = "#**CaseSens**"
         self.assertEqual(
             render_message_markdown(msg, content).rendered_content,
-            f'<p><a class="stream" data-stream-id="{case_sens.id}" href="/#narrow/stream/{case_sens.id}-{case_sens.name}">#{case_sens.name}</a></p>',
+            f'<p><a class="stream" data-stream-id="{case_sens.id}" href="/#narrow/channel/{case_sens.id}-{case_sens.name}">#{case_sens.name}</a></p>',
         )
 
     def test_stream_case_sensitivity_nonmatching(self) -> None:
@@ -3019,7 +3330,7 @@ class MarkdownStreamMentionTests(ZulipTestCase):
             "<p>#<strong>casesens</strong></p>",
         )
 
-    def test_topic_single(self) -> None:
+    def test_topic_single_containing_no_message(self) -> None:
         denmark = get_stream("Denmark", get_realm("zulip"))
         sender_user_profile = self.example_user("othello")
         msg = Message(
@@ -3030,7 +3341,34 @@ class MarkdownStreamMentionTests(ZulipTestCase):
         content = "#**Denmark>some topic**"
         self.assertEqual(
             render_message_markdown(msg, content).rendered_content,
-            f'<p><a class="stream-topic" data-stream-id="{denmark.id}" href="/#narrow/stream/{denmark.id}-Denmark/topic/some.20topic">#{denmark.name} &gt; some topic</a></p>',
+            f'<p><a class="stream-topic" data-stream-id="{denmark.id}" href="/#narrow/channel/{denmark.id}-Denmark/topic/some.20topic">#{denmark.name} &gt; some topic</a></p>',
+        )
+        # Empty string as topic name.
+        content = "#**Denmark>**"
+        self.assertEqual(
+            render_message_markdown(msg, content).rendered_content,
+            f'<p><a class="stream-topic" data-stream-id="{denmark.id}" href="/#narrow/channel/{denmark.id}-Denmark/topic/">#{denmark.name} &gt; <em>{Message.EMPTY_TOPIC_FALLBACK_NAME}</em></a></p>',
+        )
+
+    def test_topic_single_containing_messages(self) -> None:
+        denmark = get_stream("Denmark", get_realm("zulip"))
+        sender_user_profile = self.example_user("othello")
+        self.send_stream_message(
+            sender_user_profile, "Denmark", topic_name="some topic", content="test"
+        )
+        latest_message_id = self.send_stream_message(
+            sender_user_profile, "Denmark", topic_name="some topic", content="test 2"
+        )
+
+        msg = Message(
+            sender=sender_user_profile,
+            sending_client=get_client("test"),
+            realm=sender_user_profile.realm,
+        )
+        content = "#**Denmark>some topic**"
+        self.assertEqual(
+            render_message_markdown(msg, content).rendered_content,
+            f'<p><a class="stream-topic" data-stream-id="{denmark.id}" href="/#narrow/channel/{denmark.id}-Denmark/topic/some.20topic/with/{latest_message_id}">#{denmark.name} &gt; some topic</a></p>',
         )
 
     def test_topic_atomic_string(self) -> None:
@@ -3048,17 +3386,26 @@ class MarkdownStreamMentionTests(ZulipTestCase):
         )
         # Create a topic link that potentially interferes with the pattern.
         denmark = get_stream("Denmark", realm)
+        first_message_id = self.send_stream_message(
+            sender_user_profile, "Denmark", topic_name="#1234", content="test"
+        )
         msg = Message(sender=sender_user_profile, sending_client=get_client("test"), realm=realm)
         content = "#**Denmark>#1234**"
         self.assertEqual(
             render_message_markdown(msg, content).rendered_content,
-            f'<p><a class="stream-topic" data-stream-id="{denmark.id}" href="/#narrow/stream/{denmark.id}-Denmark/topic/.231234">#{denmark.name} &gt; #1234</a></p>',
+            f'<p><a class="stream-topic" data-stream-id="{denmark.id}" href="/#narrow/channel/{denmark.id}-Denmark/topic/.231234/with/{first_message_id}">#{denmark.name} &gt; #1234</a></p>',
         )
 
     def test_topic_multiple(self) -> None:
         denmark = get_stream("Denmark", get_realm("zulip"))
         scotland = get_stream("Scotland", get_realm("zulip"))
         sender_user_profile = self.example_user("othello")
+        self.send_stream_message(
+            sender_user_profile, "Denmark", topic_name="some topic", content="test"
+        )
+        latest_message_id = self.send_stream_message(
+            sender_user_profile, "Denmark", topic_name="some topic", content="test 2"
+        )
         msg = Message(
             sender=sender_user_profile,
             sending_client=get_client("test"),
@@ -3069,13 +3416,240 @@ class MarkdownStreamMentionTests(ZulipTestCase):
             render_message_markdown(msg, content).rendered_content,
             "<p>This has two links: "
             f'<a class="stream-topic" data-stream-id="{denmark.id}" '
-            f'href="/#narrow/stream/{denmark.id}-{denmark.name}/topic/some.20topic">'
+            f'href="/#narrow/channel/{denmark.id}-{denmark.name}/topic/some.20topic/with/{latest_message_id}">'
             f"#{denmark.name} &gt; some topic</a>"
             " and "
             f'<a class="stream-topic" data-stream-id="{scotland.id}" '
-            f'href="/#narrow/stream/{scotland.id}-{scotland.name}/topic/other.20topic">'
+            f'href="/#narrow/channel/{scotland.id}-{scotland.name}/topic/other.20topic">'
             f"#{scotland.name} &gt; other topic</a>"
             ".</p>",
+        )
+
+    def test_topic_permalink(self) -> None:
+        realm = get_realm("zulip")
+        denmark = get_stream("Denmark", get_realm("zulip"))
+        sender_user_profile = self.example_user("othello")
+        self.send_stream_message(
+            sender_user_profile, "Denmark", topic_name="some topic", content="test"
+        )
+        latest_message_id = self.send_stream_message(
+            sender_user_profile, "Denmark", topic_name="some topic", content="test 2"
+        )
+
+        msg = Message(
+            sender=sender_user_profile,
+            sending_client=get_client("test"),
+            realm=sender_user_profile.realm,
+        )
+
+        # test caching of topic data for user.
+        content = "#**Denmark>some topic**"
+        mention_backend = MentionBackend(realm.id)
+        mention_data = MentionData(mention_backend, content, message_sender=None)
+        render_message_markdown(msg, content, mention_data=mention_data)
+
+        with (
+            self.assert_database_query_count(1, keep_cache_warm=True),
+            self.assert_memcached_count(0),
+        ):
+            self.assertEqual(
+                render_message_markdown(msg, content, mention_data=mention_data).rendered_content,
+                f'<p><a class="stream-topic" data-stream-id="{denmark.id}" href="/#narrow/channel/{denmark.id}-Denmark/topic/some.20topic/with/{latest_message_id}">#{denmark.name} &gt; some topic</a></p>',
+            )
+
+        # test topic linked doesn't have any message in it in case
+        # the topic mentioned doesn't have any messages.
+        content = "#**Denmark>random topic**"
+        self.assertEqual(
+            render_message_markdown(msg, content).rendered_content,
+            f'<p><a class="stream-topic" data-stream-id="{denmark.id}" href="/#narrow/channel/{denmark.id}-Denmark/topic/random.20topic">#{denmark.name} &gt; random topic</a></p>',
+        )
+
+        # Test when trying to render a topic link of a channel with shared
+        # history, if message_sender is None, topic link is permalink.
+        content = "#**Denmark>some topic**"
+        self.assertEqual(
+            markdown_convert_wrapper(content),
+            f'<p><a class="stream-topic" data-stream-id="{denmark.id}" href="/#narrow/channel/{denmark.id}-Denmark/topic/some.20topic/with/{latest_message_id}">#{denmark.name} &gt; some topic</a></p>',
+        )
+
+        # test topic links for channel with protected history
+        core_stream = self.make_stream("core", realm, True, history_public_to_subscribers=False)
+        iago = self.example_user("iago")
+        hamlet = self.example_user("hamlet")
+
+        self.subscribe(iago, "core")
+        msg_id = self.send_stream_message(iago, "core", topic_name="testing")
+
+        msg = Message(
+            sender=iago,
+            sending_client=get_client("test"),
+            realm=realm,
+        )
+        content = "#**core>testing**"
+        self.assertEqual(
+            render_message_markdown(msg, content).rendered_content,
+            f'<p><a class="stream-topic" data-stream-id="{core_stream.id}" href="/#narrow/channel/{core_stream.id}-core/topic/testing/with/{msg_id}">#{core_stream.name} &gt; testing</a></p>',
+        )
+
+        # Test permalinks generated when a user with no access to the channel
+        # sends a topic link on behalf of a user who has access to the channel.
+        notification_bot = get_system_bot(settings.NOTIFICATION_BOT, iago.realm_id)
+
+        msg = Message(
+            sender=notification_bot,
+            sending_client=get_client("test"),
+            realm=realm,
+        )
+        content = "#**core>testing**"
+        self.assertEqual(
+            render_message_markdown(msg, content, acting_user=iago).rendered_content,
+            f'<p><a class="stream-topic" data-stream-id="{core_stream.id}" href="/#narrow/channel/{core_stream.id}-core/topic/testing/with/{msg_id}">#{core_stream.name} &gt; testing</a></p>',
+        )
+
+        # Test newly subscribed user to a channel with protected history
+        # won't have accessed to this message, and hence, the topic
+        # link would not be a permalink.
+        self.subscribe(hamlet, "core")
+
+        msg = Message(
+            sender=hamlet,
+            sending_client=get_client("test"),
+            realm=realm,
+        )
+        content = "#**core>testing**"
+        self.assertEqual(
+            render_message_markdown(msg, content).rendered_content,
+            f'<p><a class="stream-topic" data-stream-id="{core_stream.id}" href="/#narrow/channel/{core_stream.id}-core/topic/testing">#{core_stream.name} &gt; testing</a></p>',
+        )
+
+        # Test permalinks would not be generated when a user with no access to the
+        # channel sends a topic link on behalf of another user who has no access to
+        # the channel.
+        cordelia = self.example_user("cordelia")
+
+        msg = Message(
+            sender=notification_bot,
+            sending_client=get_client("test"),
+            realm=realm,
+        )
+        content = "#**core>testing**"
+        self.assertEqual(
+            render_message_markdown(msg, content, acting_user=cordelia).rendered_content,
+            "<p>#<strong>core&gt;testing</strong></p>",
+        )
+
+        # Test when trying to render a topic link of a channel with protected
+        # history, if message_sender is None, topic link is not permalink.
+        content = "#**core>testing**"
+        self.assertEqual(
+            markdown_convert_wrapper(content),
+            f'<p><a class="stream-topic" data-stream-id="{core_stream.id}" href="/#narrow/channel/{core_stream.id}-core/topic/testing">#{core_stream.name} &gt; testing</a></p>',
+        )
+
+        private_stream = self.make_stream("private", realm, invite_only=True)
+        content = "#**private>testing**"
+        self.assertEqual(
+            markdown_convert_wrapper(content),
+            f'<p><a class="stream-topic" data-stream-id="{private_stream.id}" href="/#narrow/channel/{private_stream.id}-private/topic/testing">#{private_stream.name} &gt; testing</a></p>',
+        )
+
+        # Permalink would not be generated if a user has metadata
+        # access to a stream but not content access.
+        cordelia_group_member_dict = UserGroupMembersData(
+            direct_members=[cordelia.id], direct_subgroups=[]
+        )
+        do_change_stream_group_based_setting(
+            private_stream,
+            "can_administer_channel_group",
+            cordelia_group_member_dict,
+            acting_user=cordelia,
+        )
+        user_group_membership_details = UserGroupMembershipDetails(user_recursive_group_ids=None)
+        self.assertTrue(
+            user_has_metadata_access(
+                cordelia, private_stream, user_group_membership_details, is_subscribed=False
+            )
+        )
+        self.assertFalse(
+            user_has_content_access(
+                cordelia, private_stream, user_group_membership_details, is_subscribed=False
+            )
+        )
+        msg = Message(
+            sender=cordelia,
+            sending_client=get_client("test"),
+            realm=realm,
+        )
+        content = "#**private>testing**"
+        self.assertEqual(
+            render_message_markdown(msg, content, acting_user=cordelia).rendered_content,
+            "<p>#<strong>private&gt;testing</strong></p>",
+        )
+
+        # User has content access now, so permalink would be generated.
+        do_change_stream_group_based_setting(
+            private_stream,
+            "can_add_subscribers_group",
+            cordelia_group_member_dict,
+            acting_user=cordelia,
+        )
+        user_group_membership_details = UserGroupMembershipDetails(user_recursive_group_ids=None)
+        self.assertTrue(
+            user_has_metadata_access(
+                cordelia, private_stream, user_group_membership_details, is_subscribed=False
+            )
+        )
+        self.assertTrue(
+            user_has_content_access(
+                cordelia, private_stream, user_group_membership_details, is_subscribed=False
+            )
+        )
+        msg = Message(
+            sender=cordelia,
+            sending_client=get_client("test"),
+            realm=realm,
+        )
+        content = "#**private>testing**"
+        self.assertEqual(
+            render_message_markdown(msg, content, acting_user=cordelia).rendered_content,
+            f'<p><a class="stream-topic" data-stream-id="{private_stream.id}" href="/#narrow/channel/{private_stream.id}-private/topic/testing">#{private_stream.name} &gt; testing</a></p>',
+        )
+
+    def test_message_id_multiple(self) -> None:
+        denmark = get_stream("Denmark", get_realm("zulip"))
+        sender_user_profile = self.example_user("othello")
+        msg = Message(
+            sender=sender_user_profile,
+            sending_client=get_client("test"),
+            realm=sender_user_profile.realm,
+        )
+        content = "As mentioned in #**Denmark>danish@123** and #**Denmark>danish@456**."
+        self.assertEqual(
+            render_message_markdown(msg, content).rendered_content,
+            "<p>As mentioned in "
+            f'<a class="message-link" '
+            f'href="/#narrow/channel/{denmark.id}-{denmark.name}/topic/danish/near/123">'
+            f"#Denmark &gt; danish @ 💬</a>"
+            " and "
+            f'<a class="message-link" '
+            f'href="/#narrow/channel/{denmark.id}-{denmark.name}/topic/danish/near/456">'
+            f"#Denmark &gt; danish @ 💬</a>"
+            ".</p>",
+        )
+
+    def test_empty_string_topic_message_link(self) -> None:
+        denmark = get_stream("Denmark", get_realm("zulip"))
+        sender = self.example_user("othello")
+        msg = Message(
+            sender=sender,
+            sending_client=get_client("test"),
+            realm=sender.realm,
+        )
+        content = "#**Denmark>@123**"
+        self.assertEqual(
+            render_message_markdown(msg, content).rendered_content,
+            f'<p><a class="message-link" href="/#narrow/channel/{denmark.id}-{denmark.name}/topic//near/123">#{denmark.name} &gt; <em>{Message.EMPTY_TOPIC_FALLBACK_NAME}</em> @ 💬</a></p>',
         )
 
     def test_possible_stream_names(self) -> None:
@@ -3095,7 +3669,7 @@ class MarkdownStreamMentionTests(ZulipTestCase):
         msg = Message(sender=sender_user_profile, sending_client=get_client("test"), realm=realm)
         content = "#**привет**"
         quoted_name = ".D0.BF.D1.80.D0.B8.D0.B2.D0.B5.D1.82"
-        href = f"/#narrow/stream/{uni.id}-{quoted_name}"
+        href = f"/#narrow/channel/{uni.id}-{quoted_name}"
         self.assertEqual(
             render_message_markdown(msg, content).rendered_content,
             f'<p><a class="stream" data-stream-id="{uni.id}" href="{href}">#{uni.name}</a></p>',
@@ -3118,7 +3692,7 @@ class MarkdownStreamMentionTests(ZulipTestCase):
         stream = self.make_stream(stream_name="Stream #1234", realm=realm)
         msg = Message(sender=sender_user_profile, sending_client=get_client("test"), realm=realm)
         content = "#**Stream #1234**"
-        href = f"/#narrow/stream/{stream.id}-Stream-.231234"
+        href = f"/#narrow/channel/{stream.id}-Stream-.231234"
         self.assertEqual(
             render_message_markdown(msg, content).rendered_content,
             f'<p><a class="stream" data-stream-id="{stream.id}" href="{href}">#{stream.name}</a></p>',
@@ -3152,34 +3726,6 @@ class MarkdownStreamMentionTests(ZulipTestCase):
             '<img src="https://external-content.zulipcdn.net/external_content/5cd6ddfa28639e2e95bb85a7c7910b31f5474e03/68747470733a2f2f6578616d706c652e636f6d2f74657374696d6167652e706e67">'
             "</a>"
             "</div>",
-        )
-
-
-class MarkdownMITTest(ZulipTestCase):
-    def test_mit_rendering(self) -> None:
-        """Test the Markdown configs for the MIT Zephyr mirroring system;
-        verifies almost all inline patterns are disabled, but
-        inline_interesting_links is still enabled"""
-        msg = "**test**"
-        realm = get_realm("zephyr")
-        client = get_client("zephyr_mirror")
-        message = Message(sending_client=client, sender=self.mit_user("sipbtest"))
-        converted = markdown_convert(msg, message_realm=realm, message=message)
-        self.assertEqual(
-            converted.rendered_content,
-            "<p>**test**</p>",
-        )
-        msg = "* test"
-        converted = markdown_convert(msg, message_realm=realm, message=message)
-        self.assertEqual(
-            converted.rendered_content,
-            "<p>* test</p>",
-        )
-        msg = "https://lists.debian.org/debian-ctte/2014/02/msg00173.html"
-        converted = markdown_convert(msg, message_realm=realm, message=message)
-        self.assertEqual(
-            converted.rendered_content,
-            '<p><a href="https://lists.debian.org/debian-ctte/2014/02/msg00173.html">https://lists.debian.org/debian-ctte/2014/02/msg00173.html</a></p>',
         )
 
 
@@ -3260,7 +3806,7 @@ class MarkdownApiTests(ZulipTestCase):
         stream_id = get_stream("Denmark", get_realm("zulip")).id
         self.assertEqual(
             response_dict["rendered"],
-            f'<p>This mentions <a class="stream" data-stream-id="{stream_id}" href="/#narrow/stream/{stream_id}-Denmark">#Denmark</a> and <span class="user-mention" data-user-id="{user_id}">@King Hamlet</span>.</p>',
+            f'<p>This mentions <a class="stream" data-stream-id="{stream_id}" href="/#narrow/channel/{stream_id}-Denmark">#Denmark</a> and <span class="user-mention" data-user-id="{user_id}">@King Hamlet</span>.</p>',
         )
 
 
@@ -3299,7 +3845,7 @@ class MarkdownErrorTests(ZulipTestCase):
         markdown_input = [
             "``` curl",
             "curl {{ api_url }}/v1/register",
-            "    -u BOT_EMAIL_ADDRESS:BOT_API_KEY",
+            "    -u EMAIL_ADDRESS:API_KEY",
             '    -d "queue_id=fb67bf8a-c031-47cc-84cf-ed80accacda8"',
             "```",
         ]
@@ -3313,14 +3859,14 @@ class MarkdownErrorTests(ZulipTestCase):
         markdown_input = [
             "``` curl",
             "curl {{ api_url }}/v1/register",
-            "    -u BOT_EMAIL_ADDRESS:BOT_API_KEY",
+            "    -u EMAIL_ADDRESS:API_KEY",
             '    -d "queue_id=fb67bf8a-c031-47cc-84cf-ed80accacda8"',
             "```",
         ]
         expected = [
             "",
             "**curl:curl {{ api_url }}/v1/register",
-            "    -u BOT_EMAIL_ADDRESS:BOT_API_KEY",
+            "    -u EMAIL_ADDRESS:API_KEY",
             '    -d "queue_id=fb67bf8a-c031-47cc-84cf-ed80accacda8"**',
             "",
             "",
@@ -3328,3 +3874,29 @@ class MarkdownErrorTests(ZulipTestCase):
 
         result = processor.run(markdown_input)
         self.assertEqual(result, expected)
+
+    def test_fenced_code_with_pygments_exception(self) -> None:
+        """Fallback to plain code when Pygments raises an exception."""
+        with (
+            self.assertLogs(level="ERROR") as log,
+            mock.patch("zerver.lib.markdown.fenced_code.CodeHilite.hilite") as mocked_hilite,
+        ):
+            mocked_hilite.side_effect = Exception("pygments crashed")
+
+            markdown_text = "```python\nprint('pygments fallback test')\n```"
+            rendered_html = markdown_convert(
+                markdown_text,
+                self.example_user("hamlet"),
+            ).rendered_content
+
+        self.assertIn("<pre", rendered_html)
+        self.assertIn("print('pygments fallback test')", rendered_html)
+        mocked_hilite.assert_called()
+        self.assertIn("Failed to highlight fenced code block", log.output[0])
+
+
+class TestHtmlToMarkdown(ZulipTestCase):
+    def test_unicode(self) -> None:
+        self.assertEqual(
+            convert_html_to_markdown("a rose is not a ros&eacute;"), "a rose is not a rosé"
+        )

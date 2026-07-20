@@ -15,6 +15,13 @@ from zerver.models import Realm, UserPresence, UserProfile
 def get_presence_dicts_for_rows(
     all_rows: Sequence[Mapping[str, Any]], slim_presence: bool
 ) -> dict[str, dict[str, Any]]:
+    # This function takes the presence data fetched from the database and
+    # turn it into an appropriate format for the API to return to clients.
+    # Used by the endpoints that fetch presence data:
+    # 1) `POST /users/me/presence`: https://zulip.com/api/update-presence
+    # 2) `POST /register` when presence data is requested:
+    #    https://zulip.com/api/register-queue
+    # 3) `GET /users/{user_id_or_email}/presence`: https://zulip.com/api/get-user-presence
     if slim_presence:
         # Stringify user_id here, since it's gonna be turned
         # into a string anyway by JSON, and it keeps mypy happy.
@@ -151,23 +158,41 @@ def get_presence_dict_by_realm(
     realm: Realm,
     slim_presence: bool = False,
     last_update_id_fetched_by_client: int | None = None,
+    history_limit_days: int | None = None,
     requesting_user_profile: UserProfile | None = None,
 ) -> tuple[dict[str, dict[str, Any]], int]:
-    two_weeks_ago = timezone_now() - timedelta(weeks=2)
+    now = timezone_now()
+    if history_limit_days is not None:
+        fetch_since_datetime = now - timedelta(days=history_limit_days)
+    else:
+        # The original behavior for this API was to return last two weeks
+        # of data at most, so we preserve that when the history_limit_days
+        # param is not provided.
+        fetch_since_datetime = now - timedelta(days=14)
+
     kwargs: dict[str, object] = dict()
     if last_update_id_fetched_by_client is not None:
         kwargs["last_update_id__gt"] = last_update_id_fetched_by_client
 
-    query = UserPresence.objects.filter(
-        realm_id=realm.id,
-        user_profile__is_active=True,
-        user_profile__is_bot=False,
-        # We can consider tweaking this value when last_update_id is being used,
-        # to potentially fetch more data since such a client is expected to only
-        # do it once and then only do small, incremental fetches.
-        last_connected_time__gte=two_weeks_ago,
-        **kwargs,
-    )
+    if last_update_id_fetched_by_client is None or last_update_id_fetched_by_client <= 0:
+        # If the client already has fetched some presence data, as indicated by
+        # last_update_id_fetched_by_client, then filtering by last_connected_time
+        # is redundant, as it shouldn't affect the results.
+        kwargs["last_connected_time__gte"] = fetch_since_datetime
+
+    if history_limit_days != 0:
+        query = UserPresence.objects.filter(
+            realm_id=realm.id,
+            user_profile__is_active=True,
+            user_profile__is_bot=False,
+            **kwargs,
+        )
+    else:
+        # If history_limit_days is 0, the client doesn't want any presence data.
+        # Explicitly return an empty QuerySet to avoid a query or races which
+        # might cause a UserPresence row to get fetched if it gets updated
+        # during the execution of this function.
+        query = UserPresence.objects.none()
 
     if settings.CAN_ACCESS_ALL_USERS_GROUP_LIMITS_PRESENCE and not check_user_can_access_all_users(
         requesting_user_profile
@@ -213,9 +238,10 @@ def get_presences_for_realm(
     realm: Realm,
     slim_presence: bool,
     last_update_id_fetched_by_client: int | None,
+    history_limit_days: int | None,
     requesting_user_profile: UserProfile,
 ) -> tuple[dict[str, dict[str, dict[str, Any]]], int]:
-    if realm.presence_disabled:
+    if realm.presence_disabled:  # nocoverage
         # Return an empty dict if presence is disabled in this realm
         return defaultdict(dict), -1
 
@@ -223,6 +249,7 @@ def get_presences_for_realm(
         realm,
         slim_presence,
         last_update_id_fetched_by_client,
+        history_limit_days,
         requesting_user_profile=requesting_user_profile,
     )
 
@@ -231,6 +258,7 @@ def get_presence_response(
     requesting_user_profile: UserProfile,
     slim_presence: bool,
     last_update_id_fetched_by_client: int | None = None,
+    history_limit_days: int | None = None,
 ) -> dict[str, Any]:
     realm = requesting_user_profile.realm
     server_timestamp = time.time()
@@ -238,6 +266,7 @@ def get_presence_response(
         realm,
         slim_presence,
         last_update_id_fetched_by_client,
+        history_limit_days,
         requesting_user_profile=requesting_user_profile,
     )
 

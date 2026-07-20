@@ -14,12 +14,12 @@ from tools.setup.emoji.emoji_setup_utils import get_emoji_code
 from zerver.lib.emoji_utils import hex_codepoint_to_emoji, unqualify_emoji
 
 CLDR_DATA_FILE = os.path.join(
-    ZULIP_PATH, "node_modules", "cldr-annotations-modern", "annotations", "en", "annotations.json"
+    ZULIP_PATH, "node_modules", "cldr-annotations-full", "annotations", "en", "annotations.json"
 )
 CLDR_DERIVED_DATA_FILE = os.path.join(
     ZULIP_PATH,
     "node_modules",
-    "cldr-annotations-derived-modern",
+    "cldr-annotations-derived-full",
     "annotationsDerived",
     "en",
     "annotations.json",
@@ -112,9 +112,9 @@ def convert_non_ascii_chars(name: str) -> str:
     }
     for before, after in replacements.items():
         name = name.replace(before, after)
-    assert (
-        name.isascii()
-    ), f"{name} still contains non-ascii characters. Add them to convert_non_ascii_chars."
+    assert name.isascii(), (
+        f"{name} still contains non-ascii characters. Add them to convert_non_ascii_chars."
+    )
     return name
 
 
@@ -188,7 +188,7 @@ def main() -> None:
 
     # STEP 4: We keep non-ascii (non-"English") characters in some emoji names if that's the correct
     # way to spell that word, but always add an alias for an ascii-only version of the word.
-    for emoji_code, emoji_names in all_emojis.items():
+    for emoji_names in all_emojis.values():
         for name in [emoji_names["canonical_name"]] + emoji_names["aliases"]:
             # These are known names where we don't have an ascii-only version and there are ascii aliases
             # that a user can still enter instead to get the same emoji.
@@ -200,7 +200,7 @@ def main() -> None:
                 # Now no other emoji can use this alias.
                 for code in alias_to_emoji_code[ascii_alias]:
                     all_emojis[code]["aliases"].remove(ascii_alias)
-                all_emojis[emoji_code]["aliases"].append(ascii_alias)
+                emoji_names["aliases"].append(ascii_alias)
 
     # STEP 5: Write final dictionary to `emoji_names.py`.
     with open(OUT_EMOJI_FILE, "w") as f:

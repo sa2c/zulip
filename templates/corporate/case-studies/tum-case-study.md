@@ -32,7 +32,7 @@ when Tobias came across Zulip.
 ## “Better user experience than Slack”
 
 Tobias evaluated Zulip by [visiting the Zulip development
-community](/try-zulip/) to see it in action. “It takes a bit of
+community](/development-community/) to see it in action. “It takes a bit of
 time to get used to, but Zulip has the best user experience of all the
 chat apps I’ve tried,” Tobias says. “With the discussion organized by
 topic within each channel, Zulip is the only app that makes hundreds of
@@ -78,7 +78,8 @@ contribute a few patches of my own,” Robert says.
 ---
 
 Learn more about [Zulip for Education](/for/education/), and how
-Zulip is being used at the [University of California San Diego](/case-studies/ucsd/).
+Zulip is being used at the [University of California San
+Diego](/case-studies/ucsd/) and the [National University of Córdoba](/case-studies/university-of-cordoba/).
 You can also check out our guides on using Zulip for [conferences](/for/events/)
 and [research](/for/research/)!
 

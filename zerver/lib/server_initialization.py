@@ -14,6 +14,7 @@ from zerver.models import (
 )
 from zerver.models.clients import get_client
 from zerver.models.presence import PresenceSequence
+from zerver.models.realm_audit_logs import AuditLogEventType
 from zerver.models.users import get_system_bot
 from zproject.backends import all_default_backend_names
 
@@ -31,12 +32,12 @@ def create_internal_realm() -> None:
 
     # For now a dummy value of -1 is given to groups fields which
     # is changed later before the transaction is committed.
-    for permission_configuration in Realm.REALM_PERMISSION_GROUP_SETTINGS.values():
-        setattr(realm, permission_configuration.id_field_name, -1)
+    for setting_name in Realm.REALM_PERMISSION_GROUP_SETTINGS:
+        setattr(realm, setting_name + "_id", -1)
     realm.save()
 
     RealmAuditLog.objects.create(
-        realm=realm, event_type=RealmAuditLog.REALM_CREATED, event_time=realm.date_created
+        realm=realm, event_type=AuditLogEventType.REALM_CREATED, event_time=realm.date_created
     )
     RealmUserDefault.objects.create(realm=realm)
     create_system_user_groups_for_realm(realm)
@@ -55,6 +56,8 @@ def create_internal_realm() -> None:
     # just ensures these get low IDs in production, and in development
     # avoids an extra database write for the first HTTP request in
     # most tests.
+    #
+    # These are currently also present in DATA_IMPORT_CLIENTS.
     get_client("Internal")
     get_client("website")
     get_client("ZulipMobile")
@@ -69,6 +72,9 @@ def create_internal_realm() -> None:
     bots = UserProfile.objects.filter(email__in=[bot_info[1] for bot_info in internal_bots])
     for bot in bots:
         bot.bot_owner = bot
+        # Avatars for system bots are hardcoded, so make sure gravatar
+        # won't be used..
+        bot.avatar_source = "U"
         bot.save()
 
     # Initialize the email gateway bot as able to forge senders.
@@ -82,8 +88,14 @@ def create_users(
     tos_version: str | None = None,
     bot_type: int | None = None,
     bot_owner: UserProfile | None = None,
+    is_imported_stub: bool = False,
 ) -> None:
     user_set = {(email, full_name, True) for full_name, email in name_list}
     bulk_create_users(
-        realm, user_set, bot_type=bot_type, bot_owner=bot_owner, tos_version=tos_version
+        realm,
+        user_set,
+        bot_type=bot_type,
+        bot_owner=bot_owner,
+        tos_version=tos_version,
+        is_imported_stub=is_imported_stub,
     )

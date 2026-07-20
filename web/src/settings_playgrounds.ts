@@ -1,22 +1,21 @@
 import $ from "jquery";
 
-import render_confirm_delete_playground from "../templates/confirm_dialog/confirm_delete_playground.hbs";
 import render_admin_playground_list from "../templates/settings/admin_playground_list.hbs";
 
-import {Typeahead} from "./bootstrap_typeahead";
-import * as bootstrap_typeahead from "./bootstrap_typeahead";
-import type {TypeaheadInputElement} from "./bootstrap_typeahead";
-import * as channel from "./channel";
-import * as confirm_dialog from "./confirm_dialog";
-import * as dialog_widget from "./dialog_widget";
-import {$t_html} from "./i18n";
-import * as ListWidget from "./list_widget";
-import * as realm_playground from "./realm_playground";
-import type {RealmPlayground} from "./realm_playground";
-import * as scroll_util from "./scroll_util";
-import {current_user, realm} from "./state_data";
-import {render_typeahead_item} from "./typeahead_helper";
-import * as ui_report from "./ui_report";
+import {Typeahead} from "./bootstrap_typeahead.ts";
+import * as bootstrap_typeahead from "./bootstrap_typeahead.ts";
+import type {TypeaheadInputElement} from "./bootstrap_typeahead.ts";
+import * as channel from "./channel.ts";
+import * as confirm_dialog from "./confirm_dialog.ts";
+import * as dialog_widget from "./dialog_widget.ts";
+import {$t_html} from "./i18n.ts";
+import * as ListWidget from "./list_widget.ts";
+import * as realm_playground from "./realm_playground.ts";
+import type {RealmPlayground} from "./realm_playground.ts";
+import * as scroll_util from "./scroll_util.ts";
+import {current_user, realm} from "./state_data.ts";
+import {render_typeahead_item} from "./typeahead_helper.ts";
+import * as ui_report from "./ui_report.ts";
 
 let pygments_typeahead: Typeahead<string>;
 
@@ -91,14 +90,15 @@ function build_page(): void {
     $(".admin_playgrounds_table").on("click", ".delete", function (e) {
         e.preventDefault();
         e.stopPropagation();
-        const $btn = $(this);
+        const $button = $(this);
         const url =
-            "/json/realm/playgrounds/" + encodeURIComponent($btn.attr("data-playground-id")!);
-        const html_body = render_confirm_delete_playground();
+            "/json/realm/playgrounds/" +
+            encodeURIComponent($button.closest("tr").attr("data-playground-id")!);
 
         confirm_dialog.launch({
-            html_heading: $t_html({defaultMessage: "Delete code playground?"}),
-            html_body,
+            modal_title_html: $t_html({defaultMessage: "Delete code playground?"}),
+            modal_content_html: $t_html({defaultMessage: "This action cannot be undone."}),
+            is_compact: true,
             id: "confirm_delete_code_playgrounds_modal",
             on_click() {
                 dialog_widget.submit_api_request(channel.del, url, {});
@@ -146,12 +146,7 @@ function build_page(): void {
                 },
                 error(xhr) {
                     $add_playground_button.prop("disabled", false);
-                    ui_report.error(
-                        $t_html({defaultMessage: "Failed"}),
-                        xhr,
-                        $playground_status,
-                        3000,
-                    );
+                    ui_report.error($t_html({defaultMessage: "Failed"}), xhr, $playground_status);
                 },
             });
         });
@@ -170,11 +165,12 @@ function build_page(): void {
             return [...language_labels.keys()];
         },
         helpOnEmptyStrings: true,
-        highlighter_html: (item: string): string =>
-            render_typeahead_item({primary: language_labels.get(item)}),
-        matcher(item: string, query: string): boolean {
+        item_html(_query: string): (item: string) => string {
+            return (item: string) => render_typeahead_item({primary: language_labels.get(item)});
+        },
+        matcher(query: string): (item: string) => boolean {
             const q = query.trim().toLowerCase();
-            return item.toLowerCase().startsWith(q);
+            return (item: string) => item.toLowerCase().startsWith(q);
         },
         sorter(items: string[], query: string): string[] {
             return bootstrap_typeahead.defaultSorter(items, query);

@@ -1,3 +1,5 @@
+import base64
+import binascii
 import logging
 from collections.abc import Callable
 from functools import wraps
@@ -5,6 +7,7 @@ from typing import Any, Concatenate
 
 import sentry_sdk
 from django.conf import settings
+from django.core.signing import BadSignature, SignatureExpired, TimestampSigner
 from django.http import HttpRequest, HttpResponse
 from django.urls import path
 from django.urls.resolvers import URLPattern
@@ -36,6 +39,32 @@ from zilencer.models import (
 logger = logging.getLogger(__name__)
 
 ParamT = ParamSpec("ParamT")
+
+REMOTE_SERVER_TAKEOVER_TOKEN_SALT = "remote_server_transfer"
+REMOTE_SERVER_TAKEOVER_TOKEN_VALIDITY_SECONDS = 10
+
+
+def generate_registration_transfer_verification_secret(hostname: str) -> str:
+    signer = TimestampSigner(salt=REMOTE_SERVER_TAKEOVER_TOKEN_SALT)
+    secret = base64.b16encode(signer.sign(hostname).encode()).decode()
+    return secret
+
+
+def validate_registration_transfer_verification_secret(secret: str, hostname: str) -> None:
+    signer = TimestampSigner(salt=REMOTE_SERVER_TAKEOVER_TOKEN_SALT)
+    try:
+        signed_data = base64.b16decode(secret).decode()
+        hostname_from_secret = signer.unsign(
+            signed_data, max_age=REMOTE_SERVER_TAKEOVER_TOKEN_VALIDITY_SECONDS
+        )
+    except SignatureExpired:
+        raise JsonableError(_("The verification secret has expired"))
+    except BadSignature:
+        raise JsonableError(_("The verification secret is invalid"))
+    except binascii.Error:
+        raise JsonableError(_("The verification secret is malformed"))
+    if hostname_from_secret != hostname:
+        raise JsonableError(_("The verification secret is for a different hostname"))
 
 
 class InvalidZulipServerError(JsonableError):
@@ -137,12 +166,13 @@ def remote_server_dispatch(request: HttpRequest, /, **kwargs: Any) -> HttpRespon
     result = get_target_view_function_or_response(request, kwargs)
     if isinstance(result, HttpResponse):
         return result
-    target_function, view_flags = result
+    target_function, _view_flags = result
     return authenticated_remote_server_view(target_function)(request, **kwargs)
 
 
 def remote_server_path(
     route: str,
-    **handlers: Callable[Concatenate[HttpRequest, RemoteZulipServer, ParamT], HttpResponse],
+    **handlers: Callable[Concatenate[HttpRequest, RemoteZulipServer, ParamT], HttpResponse]
+    | tuple[Callable[Concatenate[HttpRequest, RemoteZulipServer, ParamT], HttpResponse], set[str]],
 ) -> URLPattern:
     return path(route, remote_server_dispatch, handlers)

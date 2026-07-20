@@ -61,6 +61,7 @@ AUTHENTICATION_BACKENDS: tuple[str, ...] = (
     "zproject.backends.GitLabAuthBackend",
     "zproject.backends.AppleAuthBackend",
     "zproject.backends.GenericOpenIdConnectBackend",
+    "zproject.backends.DiscordAuthBackend",
 )
 
 EXTERNAL_URI_SCHEME = "http://"
@@ -115,6 +116,7 @@ elif os.path.isfile(_candidate_apns_cert_file):
 
 # Don't require anything about password strength in development
 PASSWORD_MIN_LENGTH = 0
+PASSWORD_MAX_LENGTH = 100
 PASSWORD_MIN_GUESSES = 0
 
 # Two factor authentication: Use the fake backend for development.
@@ -191,6 +193,8 @@ USE_X_FORWARDED_PORT = True
 
 # Override the default SAML entity ID
 SOCIAL_AUTH_SAML_SP_ENTITY_ID = "http://localhost:9991"
+if IS_DEV_DROPLET:
+    SOCIAL_AUTH_SAML_SP_ENTITY_ID = EXTERNAL_URI_SCHEME + "zulip." + EXTERNAL_HOST
 
 SOCIAL_AUTH_SUBDOMAIN = "auth"
 
@@ -206,17 +210,46 @@ SCIM_CONFIG: dict[str, SCIMConfigDict] = {
 
 SELF_HOSTING_MANAGEMENT_SUBDOMAIN = "selfhosting"
 DEVELOPMENT_DISABLE_PUSH_BOUNCER_DOMAIN_CHECK = True
-ZULIP_SERVICES_URL = f"http://push.{EXTERNAL_HOST}"
+ZULIP_SERVICES_URL = f"http://{EXTERNAL_HOST}"
 
 ZULIP_SERVICE_PUSH_NOTIFICATIONS = True
 ZULIP_SERVICE_SUBMIT_USAGE_STATISTICS = True
 
-# Breaks the UI if used, but enabled for development environment testing.
-ALLOW_GROUP_VALUED_SETTINGS = True
-
 # This value needs to be lower in development than usual to allow
 # for quicker testing of the feature.
 RESOLVE_TOPIC_UNDO_GRACE_PERIOD_SECONDS = 5
+
+# In a dev environment, 'zulipdev.com:9991' is used to access the landing page.
+# See: https://zulip.readthedocs.io/en/latest/subsystems/realms.html#working-with-subdomains-in-development-environment
+ROOT_DOMAIN_LANDING_PAGE = True
+
+# Enable demo organizations feature in dev environment.
+DEMO_ORG_DEADLINE_DAYS = 30
+
+# Enable ALTCHA, so that we test this flow; we can only do this on localhost.
+if external_host_env is None and not IS_DEV_DROPLET:
+    USING_CAPTCHA = True
+
+TOPIC_SUMMARIZATION_MODEL = "groq/llama-3.3-70b-versatile"
+# Defaults based on groq's pricing for Llama 3.3 70B Versatile 128k.
+# https://groq.com/pricing/
+OUTPUT_COST_PER_GIGATOKEN = 590
+INPUT_COST_PER_GIGATOKEN = 790
+MAX_PER_USER_MONTHLY_AI_COST = 1
+MAX_WEB_DATA_IMPORT_SIZE_MB = 1024
+
+# We override some rate limiting rules in development, when they prove
+# excessively limiting for development and testing purposes.
+RATE_LIMITING_RULES = {
+    "sends_email_by_ip": [
+        # This rule puts a limit on actions such as new organization creation,
+        # which we sometimes need to test repeatedly in development.
+        (86400, 1000),
+    ],
+    "demo_realm_creation_by_ip": [
+        (86400, 1000),
+    ],
+}
 
 DEFAULT_LOGO_URI = "/static/images/logo/recon-blue.svg"
 DEFAULT_NIGHT_LOGO_URI = "/static/images/logo/recon-white.svg"

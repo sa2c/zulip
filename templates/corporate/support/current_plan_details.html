@@ -20,7 +20,7 @@
     {% if plan_data.current_plan.discount %}
         <b>Discount</b>: {{ plan_data.current_plan.discount }}%<br />
     {% endif %}
-    {% if plan_data.is_legacy_plan %}
+    {% if plan_data.is_complimentary_access_plan %}
         <b>End date</b>: {{ plan_data.current_plan.end_date.strftime('%d %B %Y') }}<br />
     {% else %}
         <b>Licenses</b>: {{ plan_data.licenses_used }}/{{ plan_data.licenses }} ({% if plan_data.current_plan.automanage_licenses %}Automatic{% else %}Manual{% endif %})<br />
@@ -28,10 +28,11 @@
         {% if plan_data.current_plan.price_per_license %}
             <b>Price per license</b>: ${{ dollar_amount(plan_data.current_plan.price_per_license) }}<br />
         {% elif plan_data.current_plan.fixed_price %}
-            <b>Plan has a fixed price.</b><br />
+            <b>Plan type</b>: Fixed price<br />
         {% endif %}
         <b>Annual recurring revenue</b>: ${{ dollar_amount(plan_data.annual_recurring_revenue) }}<br />
         <b>Start of next billing cycle</b>: {{ plan_data.next_billing_cycle_start.strftime('%d %B %Y') }}<br />
     {% endif %}
+    <a target="_blank" rel="noopener noreferrer" href="/activity/plan_ledger/{{ plan_data.current_plan.id }}/">License ledger entries</a><br />
     {% endif %}
 </div>

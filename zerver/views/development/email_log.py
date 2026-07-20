@@ -8,7 +8,7 @@ from django.http import HttpRequest, HttpResponse
 from django.shortcuts import redirect, render
 from django.views.decorators.http import require_safe
 
-from confirmation.models import Confirmation, confirmation_url
+from confirmation.models import Confirmation
 from zerver.actions.realm_settings import do_send_realm_reactivation_email
 from zerver.actions.user_settings import do_change_user_delivery_email
 from zerver.actions.users import change_user_is_active
@@ -129,13 +129,12 @@ def generate_all_emails(request: HttpRequest) -> HttpResponse:
 
     # Email change successful
     key = Confirmation.objects.filter(type=Confirmation.EMAIL_CHANGE).latest("id").confirmation_key
-    url = confirmation_url(key, realm, Confirmation.EMAIL_CHANGE)
     user_profile = get_user_by_delivery_email(registered_email, realm)
-    result = client.get(url)
+    result = client.post("/accounts/confirm_new_email/", {"key": key})
     assert result.status_code == 200
 
     # Reset the email value so we can run this again
-    do_change_user_delivery_email(user_profile, registered_email)
+    do_change_user_delivery_email(user_profile, registered_email, acting_user=None)
 
     # Initial email with new account information for normal user
     send_account_registered_email(user_profile)

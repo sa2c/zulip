@@ -5,7 +5,7 @@ from typing import Any
 from django.conf import settings
 from django.utils.text import slugify
 
-from zerver.models import Stream
+from zerver.models import ChannelEmailAddress, Stream, UserProfile
 
 
 def default_option_handler_factory(address_option: str) -> Callable[[dict[str, Any]], None]:
@@ -33,6 +33,8 @@ class ZulipEmailForwardUserError(ZulipEmailForwardError):
 
 
 def get_email_gateway_message_string_from_address(address: str) -> str:
+    if settings.EMAIL_GATEWAY_PATTERN == "":
+        raise ZulipEmailForwardError("This server is not configured for incoming email.")
     pattern_parts = [re.escape(part) for part in settings.EMAIL_GATEWAY_PATTERN.split("%s")]
     if settings.EMAIL_GATEWAY_EXTRA_PATTERN_HACK:
         # Accept mails delivered to any Zulip server
@@ -47,11 +49,17 @@ def get_email_gateway_message_string_from_address(address: str) -> str:
     return msg_string
 
 
-def encode_email_address(stream: Stream, show_sender: bool = False) -> str:
-    return encode_email_address_helper(stream.name, stream.email_token, show_sender)
+def get_channel_email_token(stream: Stream, *, creator: UserProfile, sender: UserProfile) -> str:
+    channel_email_address, _created = ChannelEmailAddress.objects.get_or_create(
+        realm=stream.realm,
+        channel=stream,
+        creator=creator,
+        sender=sender,
+    )
+    return channel_email_address.email_token
 
 
-def encode_email_address_helper(name: str, email_token: str, show_sender: bool = False) -> str:
+def encode_email_address(name: str, email_token: str, show_sender: bool = False) -> str:
     # Some deployments may not use the email gateway
     if settings.EMAIL_GATEWAY_PATTERN == "":
         return ""

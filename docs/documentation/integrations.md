@@ -8,7 +8,18 @@ integrations involves writing Markdown files, either at
 `templates/zerver/integrations/{integration_name}.md` (for other
 integrations).
 
-Usually, this involves a few steps:
+The [integrations][api-integrations] in
+[zulip/python-zulip-api][api-repo] have their corresponding Markdown files
+at `zulip/integrations/{integration_name}/doc.md`, which are imported into
+[zulip/zulip][zulip-repo] at
+`static/generated/integrations/{integration_name}/doc.md` using the
+`tools/setup/generate_bots_integrations_static_files.py` script.
+
+[api-repo]: https://github.com/zulip/python-zulip-api/
+[api-integrations]: https://github.com/zulip/python-zulip-api/tree/main/zulip/integrations
+[zulip-repo]: https://github.com/zulip/zulip
+
+Typically, the documentation process involves the following steps:
 
 - Add text explaining all of the steps required to set up the
   integration, including what URLs to use, etc. See
@@ -17,34 +28,44 @@ Usually, this involves a few steps:
   Zulip's pre-defined Markdown macros can be used for some of these steps.
   See [Markdown macros](#markdown-macros) for further details.
 
-- Make sure you've added your integration to
-  `zerver/lib/integrations.py` in both the `WEBHOOK_INTEGRATIONS`
-  section (or `INTEGRATIONS` if not a webhook), and the
-  `DOC_SCREENSHOT_CONFIG` sections. These registries configure your
-  integration to appear on the `/integrations` page and make it
-  possible to automatically generate the screenshot of a sample
-  message (which is important for the screenshots to be updated as
-  Zulip's design changes).
+- Make sure you've added your integration to `zerver/lib/integrations.py` in
+  the relevant `*_INTEGRATIONS` list, such as the
+  `INCOMING_WEBHOOK_INTEGRATIONS` list for incoming webhook integrations.
 
-- You'll need to add an SVG graphic
-  of your integration's logo under the
+  These lists get aggregated into the `INTEGRATIONS` registry which
+  configures your integration to appear on the `/integrations` page, and
+  makes it possible to automatically generate the screenshot of an example
+  message, which is important so that these screenshots can be easily
+  updated as Zulip's design changes.
+
+- You'll need to add an SVG graphic of your integration's logo under the
   `static/images/integrations/logos/<name>.svg`, where `<name>` is the
   name of the integration, all in lower case; you can usually find them in the
   product branding or press page. Make sure to optimize the SVG graphic by
   running `tools/setup/optimize-svg`. This will also run
   `tools/setup/generate_integration_bots_avatars.py` automatically to generate
-  a smaller version of the image you just added and optimized. This smaller image will be
-  used as the bot avatar in the documentation screenshot that will be generated
-  in the next step.
+  a smaller version of the image you just added and optimized. This smaller
+  image will be used as the bot avatar in the documentation screenshot that
+  will be generated in the next step.
 
   If you cannot find an SVG graphic of the logo, please find and include a PNG
   image of the logo instead.
 
-- Finally, generate a message sent by the integration and take a screenshot of
-  the message to provide an example message in the documentation.
+- Finally, you will need to generate a message sent by the integration, and
+  generate a screenshot of the message to provide an example message in the
+  integration's documentation.
 
-  If your new integration is an incoming webhook integration, you can generate
-  the screenshot using `tools/screenshots/generate-integration-docs-screenshot`:
+  If your new integration is not an incoming webhook and does not have fixtures, add a
+  message template and topic to `zerver/webhooks/fixtureless_integrations.py`.
+  Then, add your integration's name to `FIXTURELESS_INTEGRATIONS_WITH_SCREENSHOTS`
+  in `zerver/lib/integrations.py`. See [this commit][example-commit] for an
+  example.
+
+  Otherwise, you should have already added your integration along with its
+  screenshot config to `INCOMING_WEBHOOK_INTEGRATIONS`.
+
+  Generate the screenshot using `tools/screenshots/generate-integration-docs-screenshot`,
+  where `integrationname` is the name of the integration:
 
   ```bash
   ./tools/screenshots/generate-integration-docs-screenshot --integration integrationname
@@ -56,6 +77,8 @@ Usually, this involves a few steps:
   name like "GitHub Bot", use the project's logo as the bot's avatar, and take
   the screenshot showing the channel/topic bar for the message, not just the
   message body.
+
+[example-commit]: https://github.com/zulip/zulip/commit/f6e847d026013097ecdc484ec6675680ce76aa84
 
 ## Markdown macros
 
@@ -74,7 +97,7 @@ Here are a few common macros used to document Zulip's integrations:
 - `{!create-channel.md!}` macro - Recommends that users create a dedicated
   channel for a given integration. Usually the first step is setting up an
   integration or incoming webhook. For an example rendering, see **Step 1** of
-  [the docs for Zulip's GitHub integration][github-integration].
+  [the docs for Zulip's Zendesk integration][zendesk].
 
 - `{!create-an-incoming-webhook.md!}` macro - Instructs users to create a bot
   for a given integration and select **Incoming webhook** as the **Bot type**.
@@ -85,32 +108,20 @@ Here are a few common macros used to document Zulip's integrations:
   for a given integration and select **Generic bot** as the **Bot type**. For an
   example rendering, see [the docs for Zulip's Matrix integration][matrix].
 
-- `{!create-an-incoming-webhook.md!}` macro - Instructs users to create a bot
-  for a given integration and select **Incoming webhook** as the **Bot type**.
-  This macro is usually used right after `{!create-channel.md!}`. For an example
-  rendering, see **Step 2** of [the docs for Zulip's GitHub integration][github-integration].
-
-  **Note:** If special configuration is
-  required to set up the URL and you can't use this macro, be sure to use the
-  `{{ api_url }}` template variable, so that your integration
-  documentation will provide the correct URL for whatever server it is
-  deployed on. If special configuration is required to set the `SITE`
-  variable, you should document that too.
+- `{!generate-webhook-url-basic.md!}` - Instructs user how to get the URL for a
+  bot for a given integration. Note that this macro should not be used with the
+  `{!create-channel.md!}` macro. For an example rendering, see **Step 2** of
+  [the docs for Zulip's GitHub integration][github-integration].
 
 - `{!generate-integration-url.md!}` - Instructs user how to get the URL for a
   bot for a given integration. An example URL is generated automatically for
-  every incoming webhook by using attributes in the `WebhookIntegration` class
+  every incoming webhook by using attributes in the `IncomingWebhookIntegration` class
   in [zerver/lib/integrations.py][integrations-file].
 
-- `{!append-channel-name.md!}` macro - Recommends appending `&stream=channel_name`
-  to a URL in cases where supplying a channel name in the URL is optional.
-  Supplying a channel name is optional for most Zulip integrations. If you use
-  `{!generate-integration-url.md!}`, this macro need not be used.
-
-- `{!append-topic.md!}` macro - Recommends appending `&topic=my_topic` to a URL
-  to supply a custom topic for webhook notification messages. Supplying a custom
-  topic is optional for most Zulip integrations. If you use
-  `{!generate-integration-url.md!}`, this macro need not be used.
+  **Note:** If special configuration is required to set up the URL and you can't
+  use these macros, be sure to use the `{{ api_url }}` template variable, so
+  that your integration documentation will provide the correct URL for whatever
+  server it is deployed on.
 
 - `{!congrats.md!}` macro - Inserts congratulatory lines signifying the
   successful setup of a given integration. This macro is usually used at
@@ -139,32 +150,23 @@ Here are a few common macros used to document Zulip's integrations:
   rendering, see **Step 4** of
   [the docs for Zulip's Codebase integration][codebase].
 
-- `{!git-append-branches.md!}` and `{!git-webhook-url-with-branches.md!}` -
-  These two macros explain how to specify a list of branches in the webhook URL
-  to filter notifications in our Git-related webhooks. For an example rendering,
-  see the last paragraph of **Step 2** in
-  [the docs for Zulip's GitHub integration][github-integration].
-
-- `{!webhook-url.md!}` - Used internally by `{!generate-integration-url.md!}`
-  to generate the webhook URL.
-
 - `{!webhook-url-with-bot-email.md!}` - Used in certain non-webhook integrations
   to generate URLs of the form:
 
   ```text
-  https://bot_email:bot_api_key@yourZulipDomain.zulipchat.com/api/v1/external/beanstalk
+  https://bot_email:bot_api_key@your-org.zulipchat.com/api/v1/external/beanstalk
   ```
 
   For an example rendering, see
-  [Zulip's Beanstalk integration](https://zulip.com/integrations/doc/beanstalk).
+  [Zulip's Beanstalk integration](https://zulip.com/integrations/beanstalk).
 
-[github-integration]: https://zulip.com/integrations/doc/github
-[zendesk]: https://zulip.com/integrations/doc/zendesk
-[matrix]: https://zulip.com/integrations/doc/matrix#configure-the-bridge
-[codebase]: https://zulip.com/integrations/doc/codebase
-[beanstalk]: https://zulip.com/integrations/doc/beanstalk
-[front]: https://zulip.com/integrations/doc/front
-[gitlab]: https://zulip.com/integrations/doc/gitlab
+[github-integration]: https://zulip.com/integrations/github
+[zendesk]: https://zulip.com/integrations/zendesk
+[matrix]: https://zulip.com/integrations/matrix#configure-the-bridge
+[codebase]: https://zulip.com/integrations/codebase
+[beanstalk]: https://zulip.com/integrations/beanstalk
+[front]: https://zulip.com/integrations/front
+[gitlab]: https://zulip.com/integrations/gitlab
 [integrations-file]: https://github.com/zulip/zulip/blob/main/zerver/lib/integrations.py
 
 ## Writing guidelines
@@ -172,7 +174,7 @@ Here are a few common macros used to document Zulip's integrations:
 For the vast majority of integrations, you should just copy the docs for a
 similar integration and edit it. [Basecamp][basecamp] is a good one to copy.
 
-[basecamp]: https://zulip.com/integrations/doc/basecamp
+[basecamp]: https://zulip.com/integrations/basecamp
 
 ### General writing guidelines
 
@@ -263,3 +265,99 @@ to find. A few things to keep in mind:
   the text is referring to that is difficult to locate.
 - Screenshots should never include the entirety of a third-party website’s page.
 - Each screenshot should come after the step that refers to it.
+
+## Markdown features
+
+Zulip's Markdown processor allows you to include several special features in
+your documentation to help improve its readability:
+
+- Since raw HTML is supported in Markdown, you can include arbitrary
+  HTML/CSS in your documentation as needed.
+
+- Code blocks allow you to highlight syntax, similar to
+  [Zulip's own Markdown](https://zulip.com/help/format-your-message-using-markdown).
+
+- Anchor tags can be used to link to headers in other documents.
+
+- Inline [icons](#icons) are used to refer to features in the Zulip UI.
+
+- Utilize [macros](#markdown-macros) to limit repeated content in the documentation.
+
+- Create special highlight warning blocks using
+  [tips and warnings](#tips-and-warnings).
+
+- Format instructions with tabs using
+  [Markdown tab switcher](#tab-switcher).
+
+### Icons
+
+See [icons documentation](../subsystems/icons.md). Icons should always be
+referred to with their in-app tooltip or a brief action name, _not_ the
+name of the icon in the code.
+
+### Tips and warnings
+
+A **tip** is any suggestion for the user that is not part of the main set of
+instructions. For instance, it may address a common problem users may
+encounter while following the instructions, or point to an option for power
+users.
+
+```md
+!!! tip ""
+
+    If you want notifications for issues, as well as events, you can
+    scroll down to **Webhooks** on the same page, and toggle the
+    **issue** checkbox.
+```
+
+A **keyboard tip** is a note for users to let them know that the same action
+can also be accomplished via a [keyboard shortcut](https://zulip.com/help/keyboard-shortcuts).
+
+```md
+!!! keyboard_tip ""
+
+    Use <kbd>D</kbd> to bring up your list of drafts.
+```
+
+A **warning** is a note on what happens when there is some kind of problem.
+Tips are more common than warnings.
+
+```md
+!!! warn ""
+
+    **Note**: Zulip also supports configuring this integration as a
+    webhook in Sentry.
+```
+
+All tips/warnings should appear inside tip/warning blocks. There
+should be only one tip/warning inside each block, and they usually
+should be formatted as a continuation of a numbered step.
+
+### Tab switcher
+
+Our Markdown processor supports easily creating a tab switcher widget
+design to easily show the instructions for different languages in API
+docs, etc. To create a tab switcher, write:
+
+```md
+{start_tabs}
+{tab|python}
+# First tab's content
+{tab|js}
+# Second tab's content
+{tab|curl}
+# Third tab's content
+{end_tabs}
+```
+
+The tab identifiers (e.g., `python` above) and their mappings to
+the tabs' labels are declared in
+[zerver/lib/markdown/tabbed_sections.py][tabbed-sections-code].
+
+This widget can also be used just to create a nice box around a set of
+instructions
+([example](https://zulip.com/help/deactivate-your-account)) by
+only declaring a single tab, which is often used for the main set of
+instructions for setting up an integration.
+
+[tabbed-sections-code]: https://github.com/zulip/zulip/blob/main/zerver/lib/markdown/tabbed_sections.py

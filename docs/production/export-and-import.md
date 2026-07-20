@@ -73,6 +73,20 @@ service (or back):
 
 ## Backups
 
+(backups)=
+
+:::{important}
+
+If you are using [Docker](docker.md), the recommended backup unit
+is a snapshot of the `/data` volume containing a recent `app:backup`
+database dump; see {doc}`docker:reference/data-volume`. The
+`manage.py backup` tool documented below also works for migrating
+between Docker and a standard installation in either direction, but
+is not the recommended mechanism for routine backups of a Docker
+deployment.
+
+:::
+
 The Zulip server has a built-in backup tool:
 
 ```bash
@@ -193,6 +207,12 @@ typing status data, API rate-limiting counters, and RabbitMQ queues
 that are essentially always empty in a healthy server (like outgoing
 emails to send). You can check whether these queues are empty using
 `rabbitmqctl list_queues`.
+
+On a [Docker](docker.md) deployment, the inclusion list is different
+— the backup unit is the `/data` volume rather than a `manage.py
+backup` tarball. See {doc}`docker:reference/data-volume` for the
+layout, and {ref}`docker:compose-volume-snapshot` or
+{ref}`docker:helm-volume-snapshot` for capturing it.
 
 #### Backup details
 
@@ -507,6 +527,8 @@ for more details on supported options.
 
 ## Database-only backup tools
 
+(wal-g)=
+
 The [Zulip-specific backup tool documented above](#backups) is perfect for an
 all-in-one backup solution, and can be used for nightly backups. For
 administrators wanting continuous point-in-time backups, Zulip has built-in
@@ -586,6 +608,53 @@ analysis of recent application-level data changes.
 
 You may also want to adjust the [incremental backups][incremental]
 configuration.
+
+### Restoring from wal-g backups
+
+The following steps will restore the database from the latest
+backup. Note that this process will _delete your current database_.
+
+1. As `root` on your database host, check your list of backups; the
+   most recent will be listed at the bottom, and is what will be
+   restored by the commands below.
+
+   ```shell
+   env-wal-g backup-list --pretty
+   ```
+
+1. Stop Zulip, if it is running. On your application host (which may
+   or may not be different from your database host, depending on your
+   configuration):
+
+   ```shell
+   /home/zulip/deployments/current/scripts/stop-server
+   ```
+
+1. As `root` on your database host, stop PostgreSQL:
+
+   ```shell
+   service postgresql stop
+   ```
+
+1. As `root` on your database host, delete the current database, and
+   restore from the backup. This may take some time, depending on the
+   size of your database and your connection to your backup storage.
+
+   ```shell
+   pg_version=$(crudini --get /etc/zulip/zulip.conf postgresql version)
+   rm -rf "/var/lib/postgresql/$pg_version/main"
+   env-wal-g backup-fetch "/var/lib/postgresql/$pg_version/main" LATEST
+   chown -R postgres.postgres "/var/lib/postgresql/$pg_version/main"
+   touch "/var/lib/postgresql/$pg_version/main/recovery.signal"
+   service postgresql start
+   ```
+
+1. As `root` on your application host, flush caches and start Zulip:
+
+   ```shell
+   /home/zulip/deployments/current/scripts/setup/flush-memcached
+   /home/zulip/deployments/current/scripts/start-server
+   ```
 
 [wal]: https://www.postgresql.org/docs/current/wal-intro.html
 [archive-timeout]: https://www.postgresql.org/docs/current/runtime-config-wal.html#GUC-ARCHIVE-TIMEOUT

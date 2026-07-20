@@ -28,7 +28,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Base images are built using `tools/ci/Dockerfile.prod.template`.
+          # Base images are built using `tools/ci/Dockerfile`.
           # The comments at the top explain how to build and upload these images.
           # Ubuntu 22.04 ships with Python 3.10.12.
           - docker_image: zulip/ci:jammy
@@ -48,6 +48,18 @@ jobs:
             os: noble
             include_documentation_tests: false
             include_frontend_tests: false
+          # Ubuntu 26.04 ships with Python 3.14.4.
+          - docker_image: zulip/ci:resolute
+            name: Ubuntu 26.04 (Python 3.14, backend)
+            os: resolute
+            include_documentation_tests: false
+            include_frontend_tests: false
+          # Debian 13 ships with Python 3.13.5.
+          - docker_image: zulip/ci:trixie
+            name: Debian 13 (Python 3.13, backend)
+            os: trixie
+            include_documentation_tests: false
+            include_frontend_tests: false
 
     runs-on: ubuntu-latest
     name: ${{ matrix.name }}
@@ -62,11 +74,11 @@ jobs:
       HOME: /home/github/
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Create cache directories
         run: |
-          dirs=(/srv/zulip-{venv,emoji}-cache)
+          dirs=(/srv/zulip-emoji-cache)
           sudo mkdir -p "${dirs[@]}"
           sudo chown -R github "${dirs[@]}"
 
@@ -76,12 +88,12 @@ jobs:
           path: /__w/.pnpm-store
           key: v1-pnpm-store-${{ matrix.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
-      - name: Restore python cache
+      - name: Restore uv cache
         uses: actions/cache@v4
         with:
-          path: /srv/zulip-venv-cache
-          key: v1-venv-${{ matrix.os }}-${{ hashFiles('requirements/dev.txt') }}
-          restore-keys: v1-venv-${{ matrix.os }}
+          path: ~/.cache/uv
+          key: uv-${{ matrix.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: uv-${{ matrix.os }}-
 
       - name: Restore emoji cache
         uses: actions/cache@v4
@@ -115,9 +127,10 @@ jobs:
         if: ${{ matrix.include_documentation_tests }}
         run: |
           source tools/ci/activate-venv
+          ./tools/build-help-center
           # In CI, we only test links we control in test-documentation to avoid flakes
           ./tools/test-documentation --skip-external-links
-          ./tools/test-help-documentation --skip-external-links
+          ./tools/test-help-documentation --skip-external-links --help-center
           ./tools/test-api
 
       - name: Run node tests
@@ -145,8 +158,13 @@ jobs:
         run: |
           source tools/ci/activate-venv
           ./manage.py makemessages --locale en
-          PYTHONWARNINGS=ignore ./tools/check-capitalization --no-generate
-          PYTHONWARNINGS=ignore ./tools/check-frontend-i18n --no-generate
+          ./tools/check-capitalization --no-generate
+          ./tools/check-frontend-i18n --no-generate
+
+      - name: Run astro check
+        if: ${{ matrix.include_frontend_tests }}
+        run: |
+          pnpm run --filter=starlight_help check
 
       - name: Run puppeteer tests
         if: ${{ matrix.include_frontend_tests }}
@@ -180,11 +198,8 @@ jobs:
       - name: Run miscellaneous tests
         run: |
           source tools/ci/activate-venv
+          env -u PYTHONDEVMODE -u PYTHONWARNINGS uv lock --check
 
-          # Currently our compiled requirements files will differ for different
-          # Python versions, so we will run test-locked-requirements only on the
-          # platform with the oldest one.
-          # ./tools/test-locked-requirements
           # ./tools/test-run-dev  # https://github.com/zulip/zulip/pull/14233
           #
           # This test has been persistently flaky at like 1% frequency, is slow,
@@ -214,18 +229,12 @@ jobs:
               exit 1
           fi
 
-      - name: Test locked requirements
-        if: ${{ matrix.os == 'jammy' }}
-        run: |
-          . /srv/zulip-py3-venv/bin/activate && \
-          ./tools/test-locked-requirements
-
       - name: Upload coverage reports
 
         # Only upload coverage when both frontend and backend
         # tests are run.
         if: ${{ matrix.include_frontend_tests }}
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
           files: var/coverage.xml,var/node-coverage/lcov.info
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -233,7 +242,7 @@ jobs:
       - name: Store Puppeteer artifacts
         # Upload these on failure, as well
         if: ${{ always() && matrix.include_frontend_tests }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: puppeteer
           path: ./var/puppeteer
@@ -247,6 +256,9 @@ jobs:
           set -x
           path="$(pnpm store path)"
           [[ "$path" == /__w/.pnpm-store/* ]]
+
+      - name: Minimize uv cache
+        run: uv cache prune --ci
 
       - name: Generate failure report string
         id: failure_report_string
@@ -264,3 +276,15 @@ jobs:
           topic: ${{ steps.failure_report_string.outputs.topic }}
           type: "stream"
           content: ${{ steps.failure_report_string.outputs.content }}
+
+  required-jobs:
+    name: "Required jobs"
+    if: always()
+    needs:
+      - tests
+    runs-on: ubuntu-slim
+    steps:
+      - name: "Check required jobs"
+        run: jq 'with_entries(.value |= .result | select(.value | IN("success", "skipped") | not)) | if . != {} then halt_error end' <<<"$NEEDS"
+        env:
+          NEEDS: ${{ toJSON(needs) }}

@@ -1,16 +1,19 @@
 import json
 import os
 import re
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from urllib.parse import urlsplit
 
 import scrapy
-from scrapy.http import Request, Response
+from scrapy.http.request import Request
+from scrapy.http.response import Response
+from scrapy.http.response.text import TextResponse
 from scrapy.linkextractors import IGNORED_EXTENSIONS
 from scrapy.linkextractors.lxmlhtml import LxmlLinkExtractor
 from scrapy.spidermiddlewares.httperror import HttpError
 from scrapy.utils.url import url_has_any_extension
 from twisted.python.failure import Failure
+from typing_extensions import override
 
 EXCLUDED_DOMAINS = [
     # Returns 429 rate-limiting errors
@@ -42,10 +45,7 @@ VNU_IGNORE = [
     # Real errors that should be fixed.
     r"Attribute “markdown” not allowed on element “div” at this point\.",
     r"No “p” element in scope but a “p” end tag seen\.",
-    (
-        r"Element “div” not allowed as child of element “ul” in this context\."
-        r" \(Suppressing further errors from this subtree\.\)"
-    ),
+    r"The heading “h\d” \(with computed level \d\) follows the heading “h\d” \(with computed level \d\), skipping \d heading levels?\.",
     # Opinionated informational messages.
     r"Trailing slash on void elements has no effect and interacts badly with unquoted attribute values\.",
 ]
@@ -58,7 +58,6 @@ ZULIP_SERVER_GITHUB_DIRECTORY_PATH_PREFIX = "/zulip/zulip/tree/main"
 
 
 class BaseDocumentationSpider(scrapy.Spider):
-    name: str | None = None
     # Exclude domain address.
     deny_domains: list[str] = []
     start_urls: list[str] = []
@@ -113,6 +112,8 @@ class BaseDocumentationSpider(scrapy.Spider):
     def check_fragment(self, response: Response) -> None:
         self.log(response)
         xpath_template = "//*[@id='{fragment}' or @name='{fragment}']"
+        assert isinstance(response, TextResponse)
+        assert response.request is not None
         fragment = urlsplit(response.request.url).fragment
         # Check fragment existing on response page.
         if not response.selector.xpath(xpath_template.format(fragment=fragment)):
@@ -165,8 +166,8 @@ class BaseDocumentationSpider(scrapy.Spider):
             if split_url.hostname == "github.com" and f"{split_url.path}/".startswith(
                 f"{ZULIP_SERVER_GITHUB_FILE_PATH_PREFIX}/"
             ):
-                file_path = (
-                    DEPLOY_ROOT + split_url.path[len(ZULIP_SERVER_GITHUB_FILE_PATH_PREFIX) :]
+                file_path = DEPLOY_ROOT + split_url.path.removeprefix(
+                    ZULIP_SERVER_GITHUB_FILE_PATH_PREFIX
                 )
                 if not os.path.isfile(file_path):
                     self.logger.error(
@@ -176,8 +177,8 @@ class BaseDocumentationSpider(scrapy.Spider):
             elif split_url.hostname == "github.com" and f"{split_url.path}/".startswith(
                 f"{ZULIP_SERVER_GITHUB_DIRECTORY_PATH_PREFIX}/"
             ):
-                dir_path = (
-                    DEPLOY_ROOT + split_url.path[len(ZULIP_SERVER_GITHUB_DIRECTORY_PATH_PREFIX) :]
+                dir_path = DEPLOY_ROOT + split_url.path.removeprefix(
+                    ZULIP_SERVER_GITHUB_DIRECTORY_PATH_PREFIX
                 )
                 if not os.path.isdir(dir_path):
                     self.logger.error(
@@ -201,10 +202,13 @@ class BaseDocumentationSpider(scrapy.Spider):
             errback=self.error_callback,
         )
 
-    def start_requests(self) -> Iterator[Request]:
+    @override
+    async def start(self) -> AsyncIterator[Request]:
         for url in self.start_urls:
-            yield from self._make_requests(url)
+            for request in self._make_requests(url):
+                yield request
 
+    @override
     def parse(self, response: Response) -> Iterator[Request]:
         self.log(response)
 
@@ -218,6 +222,7 @@ class BaseDocumentationSpider(scrapy.Spider):
                 errback=self.error_callback,
             )
 
+        assert isinstance(response, TextResponse)
         for link in LxmlLinkExtractor(
             deny_domains=self.deny_domains,
             deny_extensions=["doc"],
@@ -240,6 +245,7 @@ class BaseDocumentationSpider(scrapy.Spider):
             # likely due to a redirect.
             if urlsplit(response.url).netloc == "idmsa.apple.com":
                 return None
+            assert response.request is not None
             if response.status == 405 and response.request.method == "HEAD":
                 # Method 'HEAD' not allowed, repeat request with 'GET'
                 return self.retry_request_with_get(response.request)

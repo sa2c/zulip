@@ -2,41 +2,55 @@ import $ from "jquery";
 import assert from "minimalistic-assert";
 import * as tippy from "tippy.js";
 
+import render_decorated_channel_name from "../templates/decorated_channel_name.hbs";
 import render_dropdown_current_value_not_in_options from "../templates/dropdown_current_value_not_in_options.hbs";
 import render_dropdown_disabled_state from "../templates/dropdown_disabled_state.hbs";
+import render_dropdown_italic_state from "../templates/dropdown_italic_state.hbs";
 import render_dropdown_list from "../templates/dropdown_list.hbs";
 import render_dropdown_list_container from "../templates/dropdown_list_container.hbs";
-import render_inline_decorated_stream_name from "../templates/inline_decorated_stream_name.hbs";
 
-import * as blueslip from "./blueslip";
-import * as ListWidget from "./list_widget";
-import type {ListWidget as ListWidgetType} from "./list_widget";
-import {page_params} from "./page_params";
-import * as popover_menus from "./popover_menus";
-import type {StreamSubscription} from "./sub_store";
-import {parse_html} from "./ui_util";
-import * as util from "./util";
+import * as blueslip from "./blueslip.ts";
+import * as ListWidget from "./list_widget.ts";
+import type {ListWidget as ListWidgetType} from "./list_widget.ts";
+import {page_params} from "./page_params.ts";
+import * as popover_menus from "./popover_menus.ts";
+import type {StreamSubscription} from "./sub_store.ts";
+import {parse_html} from "./ui_util.ts";
+import * as util from "./util.ts";
 
 /* Sync with max-height set in zulip.css */
 export const DEFAULT_DROPDOWN_HEIGHT = 210;
+/* Default minimum items required to show the search box. */
+export const MIN_ITEMS_TO_SHOW_SEARCH_BOX = 3;
 const noop = (): void => {
     // Empty function for default values.
 };
 
-export enum DataTypes {
-    NUMBER = "number",
-    STRING = "string",
-}
+export type DataType = "number" | "string";
+export type DropdownTrigger = "keyboard" | "mouse";
 
 export type Option = {
     unique_id: number | string;
     name: string;
+    aliases?: string[];
+    description?: string;
+    is_direct_message?: boolean;
     is_setting_disabled?: boolean;
+    make_italic?: boolean;
     stream?: StreamSubscription;
+    bold_current_selection?: boolean;
+    has_delete_icon?: boolean;
+    has_edit_icon?: boolean;
+    has_manage_folder_icon?: boolean;
+    delete_icon_label?: string;
+    edit_icon_label?: string;
+    manage_folder_icon_label?: string;
+    manage_folder_icon?: string;
 };
 
-type DropdownWidgetOptions = {
+export type DropdownWidgetOptions = {
     widget_name: string;
+    widget_selector?: string;
     // You can bold the selected `option` by setting `option.bold_current_selection` to `true`.
     // Currently, not implemented for stream names.
     get_options: (current_value: string | number | undefined) => Option[];
@@ -44,16 +58,20 @@ type DropdownWidgetOptions = {
         event: JQuery.ClickEvent,
         instance: tippy.Instance,
         widget: DropdownWidget,
+        is_sticky_bottom_option_clicked: boolean,
     ) => void;
+    item_button_click_callback?: (event: JQuery.ClickEvent) => void;
     // Provide an parent element to widget which will be re-rendered if the widget is setup again.
     // It is important to not pass `$("body")` here for widgets that would be `setup()`
     // multiple times, so that we don't have duplicate event handlers.
     $events_container: JQuery;
-    on_show_callback?: (instance: tippy.Instance) => void;
+    on_show_callback?: (instance: tippy.Instance, widget: DropdownWidget) => void;
     on_mount_callback?: (instance: tippy.Instance) => void;
     on_hidden_callback?: (instance: tippy.Instance) => void;
     on_exit_with_escape_callback?: () => void;
     render_selected_option?: () => void;
+    // Used to add a sticky button at the bottom of the dropdown.
+    sticky_bottom_option?: string;
     // Used to focus the `target` after dropdown is closed. This is important since the dropdown is
     // appended to `body` and hence `body` is focused when the dropdown is closed, which makes
     // it hard for the user to get focus back to the `target`.
@@ -61,14 +79,24 @@ type DropdownWidgetOptions = {
     tippy_props?: Partial<tippy.Props>;
     // NOTE: Any value other than `undefined` will be rendered when class is initialized.
     default_id?: string | number | undefined;
-    unique_id_type?: DataTypes;
+    unique_id_type?: DataType;
+    highlight_current_value?: boolean;
     // Text to show if the current value is not in `get_options()`.
     text_if_current_value_not_in_options?: string;
     hide_search_box?: boolean;
+    hide_search_box_focus_first_item_on_keyboard_open?: boolean;
+    min_items_to_show_search_box?: number;
     // Disable the widget for spectators.
     disable_for_spectators?: boolean;
     dropdown_input_visible_selector?: string;
     prefer_top_start_placement?: boolean;
+    // Boolean variable to check whether the dropdown is opened
+    // with a keyboard trigger or not.
+    dropdown_triggered_via_keyboard?: boolean;
+    // When this is set, pressing tab will move focus to the target element.
+    tab_moves_focus_to_target?: (event: JQuery.KeyDownEvent) => string | undefined;
+    search_placeholder_text?: string;
+    sort_list_by_filter_value?: (items: Option[], filter_value: string) => Option[];
 };
 
 export class DropdownWidget {
@@ -81,55 +109,90 @@ export class DropdownWidget {
         event: JQuery.ClickEvent,
         instance: tippy.Instance,
         widget: DropdownWidget,
+        is_sticky_bottom_option_clicked: boolean,
     ) => void;
+    item_button_click_callback: (event: JQuery.ClickEvent) => void;
     focus_target_on_hidden: boolean;
-    on_show_callback: (instance: tippy.Instance) => void;
+    on_show_callback: (instance: tippy.Instance, widget: DropdownWidget) => void;
     on_mount_callback: (instance: tippy.Instance) => void;
     on_hidden_callback: (instance: tippy.Instance) => void;
     on_exit_with_escape_callback: () => void;
     render_selected_option: () => void;
+    sticky_bottom_option: string | undefined;
     tippy_props: Partial<tippy.Props>;
     list_widget: ListWidgetType<Option, Option> | undefined;
     instance: tippy.Instance | undefined;
     default_id: string | number | undefined;
     current_value: string | number | undefined;
-    unique_id_type: DataTypes | undefined;
+    unique_id_type: DataType | undefined;
+    highlight_current_value: boolean;
     $events_container: JQuery;
     text_if_current_value_not_in_options: string;
+    // Effective value used while dropdown is open.
     hide_search_box: boolean;
+    // Remember caller’s explicit request to hide search.
+    initial_hide_search_box: boolean;
+    // Only show the search box if options.length > threshold.
+    min_items_to_show_search_box: number;
+    hide_search_box_focus_first_item_on_keyboard_open: boolean;
     disable_for_spectators: boolean;
     dropdown_input_visible_selector: string;
     prefer_top_start_placement: boolean;
+    dropdown_triggered_via_keyboard: boolean;
+    keep_focus_on_search: boolean;
+    tab_moves_focus_to_target: ((event: JQuery.KeyDownEvent) => string | undefined) | undefined;
+    current_hover_index: number;
+
+    // TODO: This is only used in one widget, with no implementation
+    // here, so should be generalized or reworked.
+    item_clicked = false;
+    search_placeholder_text: string;
+    sort_list_by_filter_value: ((items: Option[], filter_value: string) => Option[]) | undefined;
 
     constructor(options: DropdownWidgetOptions) {
         this.widget_name = options.widget_name;
-        this.widget_selector = `#${CSS.escape(this.widget_name)}_widget`;
+        this.widget_selector = options.widget_selector ?? `#${CSS.escape(this.widget_name)}_widget`;
         // A widget wrapper may not exist based on the UI requirement.
         this.widget_wrapper_id = `${this.widget_selector}_wrapper`;
         this.widget_value_selector = `${this.widget_selector} .dropdown_widget_value`;
         this.get_options = options.get_options;
         this.item_click_callback = options.item_click_callback;
+        this.item_button_click_callback = options.item_button_click_callback ?? noop;
         this.focus_target_on_hidden = options.focus_target_on_hidden ?? true;
         this.on_show_callback = options.on_show_callback ?? noop;
         this.on_mount_callback = options.on_mount_callback ?? noop;
         this.on_hidden_callback = options.on_hidden_callback ?? noop;
         this.on_exit_with_escape_callback = options.on_exit_with_escape_callback ?? noop;
         this.render_selected_option = options.render_selected_option ?? noop;
+        this.sticky_bottom_option = options.sticky_bottom_option;
         // These properties can override any tippy props.
         this.tippy_props = options.tippy_props ?? {};
         this.list_widget = undefined;
-        this.instance = undefined;
         this.default_id = options.default_id;
         this.current_value = this.default_id;
         this.unique_id_type = options.unique_id_type;
+        this.highlight_current_value = options.highlight_current_value ?? true;
         this.$events_container = options.$events_container;
         this.text_if_current_value_not_in_options =
             options.text_if_current_value_not_in_options ?? "";
         this.hide_search_box = options.hide_search_box ?? false;
+        // Preserve caller's original request to hide the search box.
+        this.initial_hide_search_box = options.hide_search_box ?? false;
+        this.hide_search_box_focus_first_item_on_keyboard_open =
+            options.hide_search_box_focus_first_item_on_keyboard_open ?? false;
+        // Use constant default if the caller didn't provide a value.
+        this.min_items_to_show_search_box =
+            options.min_items_to_show_search_box ?? MIN_ITEMS_TO_SHOW_SEARCH_BOX;
         this.disable_for_spectators = options.disable_for_spectators ?? false;
         this.dropdown_input_visible_selector =
             options.dropdown_input_visible_selector ?? this.widget_selector;
         this.prefer_top_start_placement = options.prefer_top_start_placement ?? false;
+        this.dropdown_triggered_via_keyboard = false;
+        this.keep_focus_on_search = !this.hide_search_box;
+        this.tab_moves_focus_to_target = options.tab_moves_focus_to_target;
+        this.current_hover_index = 0;
+        this.search_placeholder_text = options.search_placeholder_text ?? "";
+        this.sort_list_by_filter_value = options.sort_list_by_filter_value;
     }
 
     init(): void {
@@ -146,7 +209,7 @@ export class DropdownWidget {
             `${this.widget_selector}, ${this.widget_wrapper_id}`,
             (e) => {
                 if (e.key === "Enter") {
-                    $(this.widget_selector).trigger("click");
+                    this.open({trigger: "keyboard"});
                     e.stopPropagation();
                     e.preventDefault();
                 }
@@ -228,22 +291,55 @@ export class DropdownWidget {
         }
     }
 
-    setup(): void {
-        this.init();
-        const delegate_container = this.$events_container.get(0);
-        if (delegate_container === undefined) {
-            blueslip.error(
-                "Cannot initialize dropdown. `$events_container` empty.",
-                this.$events_container,
-            );
+    update_hover_state($popper: JQuery): void {
+        assert(this.list_widget !== undefined);
+        const list_items = this.list_widget.get_current_list();
+        $popper.find(".list-item.current_selection").removeClass("current_selection");
+        if (this.sticky_bottom_option) {
+            $popper
+                .find(".sticky-bottom-option-button.current_selection")
+                .removeClass("current_selection");
+        }
+        if (this.current_hover_index === list_items.length && this.sticky_bottom_option) {
+            $popper.find(".sticky-bottom-option-button").addClass("current_selection");
             return;
         }
+        if (list_items.length === 0) {
+            return;
+        }
+        const current_hover_item = list_items[this.current_hover_index];
+        assert(current_hover_item !== undefined);
+        const $item = $popper
+            .find(`.list-item[data-unique-id="${current_hover_item.unique_id}"]`)
+            .addClass("current_selection");
+        if ($item.length === 0) {
+            this.list_widget.render(this.current_hover_index + 1);
+        }
+        const element = $item[0];
+        if (element) {
+            element.scrollIntoView({block: "nearest"});
+        }
+    }
+
+    setup(): void {
+        this.init();
+        const delegate_container = util.the(this.$events_container);
 
         if (this.disable_for_spectators && page_params.is_spectator) {
             return;
         }
 
-        this.instance = tippy.delegate(delegate_container, {
+        // We want to prevent focus from moving to the list item
+        // when it is clicked using a mouse.
+        $(this.widget_selector).on("mousedown", () => {
+            this.dropdown_triggered_via_keyboard = false;
+        });
+
+        $(this.widget_selector).on("keydown", () => {
+            this.dropdown_triggered_via_keyboard = true;
+        });
+
+        tippy.delegate(delegate_container, {
             ...popover_menus.default_popover_props,
             target: this.widget_selector,
             // Custom theme defined in popovers.css
@@ -258,11 +354,18 @@ export class DropdownWidget {
                     // mobile.
                     $(instance.popper).find(".tippy-box").addClass("show-when-reference-hidden");
                 }
+                // Automatically hide the search box for short lists,
+                // unless the caller explicitly requested to hide it.
+                if (!this.initial_hide_search_box) {
+                    const options = this.get_options(this.current_value);
+                    this.hide_search_box = options.length <= this.min_items_to_show_search_box;
+                }
                 instance.setContent(
                     parse_html(
                         render_dropdown_list_container({
                             widget_name: this.widget_name,
                             hide_search_box: this.hide_search_box,
+                            sticky_bottom_option: this.sticky_bottom_option,
                         }),
                     ),
                 );
@@ -272,6 +375,13 @@ export class DropdownWidget {
                     "input.dropdown-list-search-input",
                 );
 
+                if (this.search_placeholder_text) {
+                    $search_input.attr("placeholder", this.search_placeholder_text);
+                }
+
+                const selected_item_unique_id = this.current_value;
+                const highlight_current_value = this.highlight_current_value;
+
                 this.list_widget = ListWidget.create(
                     $dropdown_list_body,
                     this.get_options(this.current_value),
@@ -279,20 +389,42 @@ export class DropdownWidget {
                         name: `${CSS.escape(this.widget_name)}-list-widget`,
                         get_item: ListWidget.default_get_item,
                         modifier_html(item) {
-                            return render_dropdown_list({item});
+                            return render_dropdown_list({
+                                item: {
+                                    ...item,
+                                    highlight_value:
+                                        highlight_current_value &&
+                                        // Checks if the current item is current_value.
+                                        item.unique_id === selected_item_unique_id,
+                                },
+                            });
                         },
                         filter: {
                             $element: $search_input,
                             predicate(item, value) {
-                                return item.name.toLowerCase().includes(value);
+                                if (item.name.toLowerCase().includes(value)) {
+                                    return true;
+                                }
+                                if (item.aliases) {
+                                    return item.aliases.some((alias) =>
+                                        alias.toLowerCase().includes(value),
+                                    );
+                                }
+                                return false;
                             },
                         },
                         $simplebar_container: $popper.find(".dropdown-list-wrapper"),
+                        sort_by_filter_value: this.sort_list_by_filter_value,
                     },
                 );
 
                 $search_input.on("input.list_widget_filter", () => {
                     this.show_empty_if_no_items($popper);
+                    if (this.keep_focus_on_search) {
+                        $search_input.trigger("focus");
+                        this.current_hover_index = 0;
+                        this.update_hover_state($popper);
+                    }
                 });
 
                 // Keyboard handler
@@ -306,56 +438,154 @@ export class DropdownWidget {
                     }
 
                     const $search_input = $popper.find(".dropdown-list-search-input");
+                    const $sticky_bottom_option = $popper.find(".sticky-bottom-option-button");
+                    const $dropdown_list_container = $popper.find(".dropdown-list-container");
                     assert(this.list_widget !== undefined);
                     const list_items = this.list_widget.get_current_list();
-                    if (list_items.length === 0 && !(e.key === "Escape")) {
+                    if (
+                        list_items.length === 0 &&
+                        !(e.key === "Escape") &&
+                        !this.sticky_bottom_option
+                    ) {
                         // Let the browser handle it.
                         return;
                     }
 
+                    function get_item_by_index(index: number): JQuery {
+                        const item = list_items[index];
+                        assert(item !== undefined);
+                        return $popper.find(`.list-item[data-unique-id="${item.unique_id}"]`);
+                    }
+
                     function first_item(): JQuery {
-                        const first_item = list_items[0];
-                        assert(first_item !== undefined);
-                        return $popper.find(`.list-item[data-unique-id="${first_item.unique_id}"]`);
+                        return get_item_by_index(0);
                     }
 
                     function last_item(): JQuery {
-                        const last_item = list_items.at(-1);
-                        assert(last_item !== undefined);
-                        return $popper.find(`.list-item[data-unique-id="${last_item.unique_id}"]`);
+                        return get_item_by_index(list_items.length - 1);
                     }
 
-                    const render_all_items_and_focus_last_item = (): void => {
+                    const render_all_items = (): void => {
                         assert(this.list_widget !== undefined);
                         // List widget doesn't render all items by default, so we need to render all
                         // the items and focus on the last element.
                         const list_items = this.list_widget.get_current_list();
                         this.list_widget.render(list_items.length);
-                        trigger_element_focus(last_item());
                     };
 
                     const handle_arrow_down_on_last_item = (): void => {
-                        if (this.hide_search_box) {
+                        if (this.sticky_bottom_option) {
+                            trigger_element_focus($sticky_bottom_option);
+                        } else if (this.hide_search_box) {
                             trigger_element_focus(first_item());
                         } else {
                             trigger_element_focus($search_input);
                         }
                     };
 
+                    const handle_arrow_down_on_sticky_bottom_option = (): void => {
+                        if (this.hide_search_box && list_items.length > 0) {
+                            trigger_element_focus(first_item());
+                        } else if (!this.hide_search_box) {
+                            trigger_element_focus($search_input);
+                        }
+                    };
+
+                    const handle_arrow_up_on_sticky_bottom_option = (): void => {
+                        if (list_items.length > 0) {
+                            render_all_items();
+                            trigger_element_focus(last_item());
+                        } else if (!this.hide_search_box) {
+                            trigger_element_focus($search_input);
+                        }
+                    };
+
+                    const handle_arrow_down_on_search_input = (): void => {
+                        if (list_items.length > 0) {
+                            trigger_element_focus(first_item());
+                        } else if (this.sticky_bottom_option) {
+                            trigger_element_focus($sticky_bottom_option);
+                        }
+                    };
+
+                    const handle_arrow_down_on_sequential_focus = (): void => {
+                        switch (e.target) {
+                            case $search_input.get(0):
+                            case $dropdown_list_container.get(0):
+                                handle_arrow_down_on_search_input();
+                                break;
+                            case $sticky_bottom_option.get(0):
+                                handle_arrow_down_on_sticky_bottom_option();
+                                break;
+                            case last_item().get(0):
+                                handle_arrow_down_on_last_item();
+                                break;
+                            default:
+                                trigger_element_focus($(e.target).next());
+                        }
+                    };
+
+                    const handle_arrow_up_on_search_input = (): void => {
+                        if (this.sticky_bottom_option) {
+                            trigger_element_focus($sticky_bottom_option);
+                        } else {
+                            render_all_items();
+                            trigger_element_focus(last_item());
+                        }
+                    };
+
                     const handle_arrow_up_on_first_item = (): void => {
                         if (this.hide_search_box) {
-                            render_all_items_and_focus_last_item();
+                            if (this.sticky_bottom_option) {
+                                trigger_element_focus($sticky_bottom_option);
+                            } else {
+                                render_all_items();
+                                trigger_element_focus(last_item());
+                            }
                         } else {
                             trigger_element_focus($search_input);
                         }
                     };
 
+                    const update_highlighted_index = (new_index: number): void => {
+                        let length = list_items.length;
+                        if (this.sticky_bottom_option) {
+                            length += 1;
+                        }
+                        if (new_index >= length) {
+                            this.current_hover_index = 0;
+                        } else if (new_index < 0) {
+                            render_all_items();
+                            this.current_hover_index = length - 1;
+                        } else {
+                            this.current_hover_index = new_index;
+                        }
+                        this.update_hover_state($popper);
+                    };
+
                     switch (e.key) {
                         case "Enter":
-                            if (e.target === $search_input.get(0)) {
-                                // Select first item if in search input.
-                                first_item().trigger("click");
-                            } else if (list_items.length !== 0) {
+                            if (
+                                list_items.length === 0 ||
+                                e.target === $sticky_bottom_option.get(0)
+                            ) {
+                                $sticky_bottom_option.trigger("click");
+                            } else if (e.target === $search_input.get(0)) {
+                                if (this.keep_focus_on_search) {
+                                    if (
+                                        this.sticky_bottom_option &&
+                                        list_items.length === this.current_hover_index
+                                    ) {
+                                        $sticky_bottom_option.trigger("click");
+                                    } else {
+                                        const $item = get_item_by_index(this.current_hover_index);
+                                        $item.trigger("click");
+                                    }
+                                } else {
+                                    // Select first item if in search input.
+                                    first_item().trigger("click");
+                                }
+                            } else if (list_items.length > 0) {
                                 $(e.target).trigger("click");
                             }
                             e.stopPropagation();
@@ -365,60 +595,153 @@ export class DropdownWidget {
                         case "Escape":
                             popover_menus.hide_current_popover_if_visible(instance);
                             this.on_exit_with_escape_callback();
+                            this.current_hover_index = 0;
                             e.stopPropagation();
                             e.preventDefault();
                             break;
 
                         case "Tab":
-                        case "ArrowDown":
-                            switch (e.target) {
-                                case last_item().get(0):
-                                    handle_arrow_down_on_last_item();
-                                    break;
-                                case $search_input.get(0):
-                                    trigger_element_focus(first_item());
-                                    break;
-                                default:
-                                    trigger_element_focus($(e.target).next());
+                            if (this.tab_moves_focus_to_target) {
+                                // Prevent focus from leaving the dropdown even when no target
+                                // is available.
+                                e.preventDefault();
+                                e.stopPropagation();
+                                const target = this.tab_moves_focus_to_target(e);
+                                if (target !== undefined) {
+                                    popover_menus.hide_current_popover_if_visible(instance);
+                                    this.current_hover_index = 0;
+                                    $(target).trigger("focus");
+                                }
+                            } else if (!this.hide_search_box && this.keep_focus_on_search) {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                update_highlighted_index(this.current_hover_index + 1);
+                                break;
+                            } else {
+                                handle_arrow_down_on_sequential_focus();
+                                break;
                             }
-                            break;
-
-                        case "ArrowUp":
-                            switch (e.target) {
-                                case first_item().get(0):
-                                    handle_arrow_up_on_first_item();
-                                    break;
-                                case $search_input.get(0):
-                                    render_all_items_and_focus_last_item();
-                                    break;
-                                default:
-                                    trigger_element_focus($(e.target).prev());
-                            }
-                            break;
                     }
+
+                    if (!this.hide_search_box && this.keep_focus_on_search) {
+                        switch (e.key) {
+                            case "ArrowDown":
+                                e.preventDefault();
+                                e.stopPropagation();
+                                update_highlighted_index(this.current_hover_index + 1);
+                                break;
+                            case "ArrowUp":
+                                e.preventDefault();
+                                e.stopPropagation();
+                                update_highlighted_index(this.current_hover_index - 1);
+                                break;
+                        }
+                    } else {
+                        switch (e.key) {
+                            case "ArrowDown":
+                                handle_arrow_down_on_sequential_focus();
+                                break;
+
+                            case "ArrowUp":
+                                switch (e.target) {
+                                    case $search_input.get(0):
+                                    case $dropdown_list_container.get(0):
+                                        handle_arrow_up_on_search_input();
+                                        break;
+                                    case $sticky_bottom_option.get(0):
+                                        handle_arrow_up_on_sticky_bottom_option();
+                                        break;
+                                    case first_item().get(0):
+                                        handle_arrow_up_on_first_item();
+                                        break;
+                                    default:
+                                        trigger_element_focus($(e.target).prev());
+                                }
+                                break;
+                        }
+                    }
+                });
+
+                // We want to prevent focus from moving to the list item or the
+                // sticky bottom when it is clicked with a mouse. This is necessary
+                // because it was reported that the blue focus outline briefly
+                // appears when items are clicked, before the dropdown closes.
+                $popper.on("mousedown", ".list-item, .sticky-bottom-option-button", (event) => {
+                    event.preventDefault();
                 });
 
                 // Click on item.
-                $popper.one("click", ".list-item", (event) => {
+                $popper.on("click", ".list-item", (event) => {
+                    event.preventDefault();
                     const selected_unique_id = $(event.currentTarget).attr("data-unique-id");
                     assert(selected_unique_id !== undefined);
                     this.current_value = selected_unique_id;
-                    if (this.unique_id_type === DataTypes.NUMBER) {
+                    if (this.unique_id_type === "number") {
                         this.current_value = Number.parseInt(this.current_value, 10);
                     }
-                    this.item_click_callback(event, instance, this);
+                    this.item_click_callback(event, instance, this, false);
+                    this.current_hover_index = 0;
                 });
 
-                // Set focus on first element when dropdown opens.
+                $popper.on("click", ".dropdown-list-control-button", (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    this.item_button_click_callback(event);
+                    this.current_hover_index = 0;
+                });
+
+                // Click on $sticky_bottom_option.
+                $popper.on("click", ".sticky-bottom-option-button", (event) => {
+                    this.item_click_callback(event, instance, this, true);
+                    this.current_hover_index = 0;
+                });
+
+                // Adjust focus based on how the dropdown was opened
                 setTimeout(() => {
                     if (this.hide_search_box) {
-                        $dropdown_list_body.find(".list-item:first-child").trigger("focus");
+                        if (this.dropdown_triggered_via_keyboard) {
+                            assert(this.list_widget !== undefined);
+                            let $focus_target = $();
+
+                            if (!this.hide_search_box_focus_first_item_on_keyboard_open) {
+                                $focus_target = $dropdown_list_body.find(
+                                    `.list-item[data-unique-id="${this.current_value}"]`,
+                                );
+                            }
+
+                            if ($focus_target.length === 0) {
+                                const first_item = this.list_widget.get_current_list()[0];
+                                if (first_item !== undefined) {
+                                    $focus_target = $dropdown_list_body.find(
+                                        `.list-item[data-unique-id="${first_item.unique_id}"]`,
+                                    );
+                                }
+                            }
+
+                            if ($focus_target.length === 0 && this.sticky_bottom_option) {
+                                $focus_target = $popper.find(".sticky-bottom-option-button");
+                            }
+
+                            if ($focus_target.length === 0) {
+                                return;
+                            }
+
+                            $focus_target.trigger("focus");
+                        } else {
+                            // Focus the dropdown container so that the popper's
+                            // keydown handler can take care of the keyboard navigation.
+                            $popper.find(".dropdown-list-container").trigger("focus");
+                        }
                     } else {
                         $search_input.trigger("focus");
+                        if (this.keep_focus_on_search) {
+                            this.current_hover_index = 0;
+                            this.update_hover_state($popper);
+                        }
                     }
                 }, 0);
 
-                this.on_show_callback(instance);
+                this.on_show_callback(instance, this);
                 this.adjust_dropdown_position_post_list_render(instance);
             },
             onMount: (instance: tippy.Instance) => {
@@ -429,8 +752,9 @@ export class DropdownWidget {
                 if (this.focus_target_on_hidden) {
                     $(this.widget_selector).trigger("focus");
                 }
+                this.current_hover_index = 0;
                 this.on_hidden_callback(instance);
-                this.instance = undefined;
+                instance.destroy();
             },
             ...this.tippy_props,
         });
@@ -438,6 +762,16 @@ export class DropdownWidget {
 
     value(): number | string | undefined {
         return this.current_value;
+    }
+
+    open({trigger = "mouse"}: {trigger?: DropdownTrigger} = {}): void {
+        const widget_element = $(this.widget_selector).get(0);
+        if (widget_element === undefined) {
+            return;
+        }
+
+        this.dropdown_triggered_via_keyboard = trigger === "keyboard";
+        widget_element.click();
     }
 
     // NOTE: This function needs to be explicitly called when you want to update the
@@ -469,9 +803,11 @@ export class DropdownWidget {
 
         if (option.is_setting_disabled) {
             $(this.widget_value_selector).html(render_dropdown_disabled_state({name: option.name}));
+        } else if (option.make_italic) {
+            $(this.widget_value_selector).html(render_dropdown_italic_state({name: option.name}));
         } else if (option.stream) {
             $(this.widget_value_selector).html(
-                render_inline_decorated_stream_name({
+                render_decorated_channel_name({
                     stream: option.stream,
                     show_colored_icon: true,
                 }),

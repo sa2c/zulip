@@ -24,7 +24,6 @@ from typing_extensions import ParamSpec
 
 from zerver.lib.exceptions import ApiParamValidationError, JsonableError
 from zerver.lib.request import (
-    _REQ,
     RequestConfusingParamsError,
     RequestNotes,
     RequestVariableMissingError,
@@ -230,9 +229,9 @@ def parse_single_parameter(
             # This prohibits the use of `Optional[Annotated[T, ApiParamConfig(...)]] = None`
             # and encourages `Annotated[Optional[T], ApiParamConfig(...)] = None`
             # to avoid confusion when the parameter metadata is unintentionally nested.
-            assert not has_api_param_config or is_optional(
-                annotated_type
-            ), API_PARAM_CONFIG_USAGE_HINT.format(param_name=param_name, param_type=param_type)
+            assert not has_api_param_config or is_optional(annotated_type), (
+                API_PARAM_CONFIG_USAGE_HINT.format(param_name=param_name, param_type=param_type)
+            )
             param_type = inner_type
 
     param_config: ApiParamConfig | None = None
@@ -241,7 +240,7 @@ def parse_single_parameter(
         # metadata attached to Annotated. Note that we do not transform
         # param_type to its underlying type because the Annotated metadata might
         # still be needed by other parties like Pydantic.
-        ignored_type, *annotations = get_args(param_type)
+        _type, *annotations = get_args(param_type)
         for annotation in annotations:
             if not isinstance(annotation, ApiParamConfig):
                 continue
@@ -317,6 +316,7 @@ def parse_view_func_signature(
 ERROR_TEMPLATES = {
     "bool_parsing": _("{var_name} is not a boolean"),
     "bool_type": _("{var_name} is not a boolean"),
+    "dataclass_type": _("{var_name} does not have the expected format"),
     "datetime_parsing": _("{var_name} is not a date"),
     "datetime_type": _("{var_name} is not a date"),
     "dict_type": _("{var_name} is not a dict"),
@@ -339,6 +339,8 @@ ERROR_TEMPLATES = {
     "unexpected_keyword_argument": _('Argument "{argument}" at {var_name} is unexpected'),
     "string_pattern_mismatch": _("{var_name} has invalid format"),
     "string_fixed_length": _("{var_name} is not length {length}"),
+    "too_long": _("{var_name} is too long (limit: {max_length} items)"),
+    "too_short": _("{var_name} is too short (minimum {min_length} items)"),
 }
 
 
@@ -455,19 +457,16 @@ def typed_endpoint(
             view_func_name=endpoint_info.view_func_full_name
         )
     else:
-        assert (
-            len(endpoint_info.parameters) != 0
-        ), UNEXPECTEDLY_MISSING_KEYWORD_ONLY_PARAMETERS.format(
-            view_func_name=endpoint_info.view_func_full_name
+        assert len(endpoint_info.parameters) != 0, (
+            UNEXPECTEDLY_MISSING_KEYWORD_ONLY_PARAMETERS.format(
+                view_func_name=endpoint_info.view_func_full_name
+            )
         )
     for func_param in endpoint_info.parameters:
-        assert not isinstance(
-            func_param.default, _REQ
-        ), f"Unexpected REQ for parameter {func_param.param_name}; REQ is incompatible with typed_endpoint"
         if func_param.path_only:
-            assert (
-                func_param.default is NotSpecified
-            ), f"Path-only parameter {func_param.param_name} should not have a default value"
+            assert func_param.default is NotSpecified, (
+                f"Path-only parameter {func_param.param_name} should not have a default value"
+            )
         # Record arguments that should be documented so that our
         # automated OpenAPI docs tests can compare these against the code.
         if (
@@ -489,9 +488,9 @@ def typed_endpoint(
                 # the URL, so there's no need for us to do anything.
                 #
                 # TODO: Run validators for path_only parameters for NewType.
-                assert (
-                    parameter.param_name in kwargs
-                ), f"Path-only variable {parameter.param_name} should be passed already"
+                assert parameter.param_name in kwargs, (
+                    f"Path-only variable {parameter.param_name} should be passed already"
+                )
             if parameter.param_name in kwargs:
                 # Skip parameters that are already supplied by the caller.
                 continue
@@ -579,6 +578,4 @@ def typed_endpoint(
 
         return return_value
 
-    # TODO: Remove this once we replace has_request_variables with typed_endpoint.
-    _wrapped_view_func.use_endpoint = True  # type: ignore[attr-defined] # Distinguish functions decorated with @typed_endpoint from those decorated with has_request_variables
     return _wrapped_view_func

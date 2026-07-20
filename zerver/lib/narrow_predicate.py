@@ -4,7 +4,7 @@ from typing import Any, Protocol
 from django.utils.translation import gettext as _
 
 from zerver.lib.exceptions import JsonableError
-from zerver.lib.narrow_helpers import NarrowTerm
+from zerver.lib.narrow_helpers import NeverNegatedNarrowTerm
 from zerver.lib.topic import RESOLVED_TOPIC_PREFIX, get_topic_from_message_info
 
 # "stream" is a legacy alias for "channel"
@@ -13,7 +13,7 @@ channel_operators: list[str] = ["channel", "stream"]
 channels_operators: list[str] = ["channels", "streams"]
 
 
-def check_narrow_for_events(narrow: Collection[NarrowTerm]) -> None:
+def check_narrow_for_events(narrow: Collection[NeverNegatedNarrowTerm]) -> None:
     supported_operators = [*channel_operators, "topic", "sender", "is"]
     unsupported_is_operands = ["followed"]
     for narrow_term in narrow:
@@ -31,7 +31,7 @@ class NarrowPredicate(Protocol):
 
 
 def build_narrow_predicate(
-    narrow: Collection[NarrowTerm],
+    narrow: Collection[NeverNegatedNarrowTerm],
 ) -> NarrowPredicate:
     """Changes to this function should come with corresponding changes to
     NarrowLibraryTest."""
@@ -57,7 +57,7 @@ def build_narrow_predicate(
                 # "is:private" is a legacy alias for "is:dm"
                 if message["type"] != "private":
                     return False
-            elif operator == "is" and operand in ["starred"]:
+            elif operator == "is" and operand == "starred":
                 if operand not in flags:
                     return False
             elif operator == "is" and operand == "unread":

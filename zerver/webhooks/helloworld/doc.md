@@ -2,8 +2,7 @@
 
 Learn how Zulip integrations work with this simple Hello World example!
 
-This webhook is Zulip's official [example
-integration](/api/incoming-webhooks-walkthrough).
+This webhook is Zulip's official [example integration][incoming-webhooks-walkthrough].
 
 {start_tabs}
 
@@ -20,16 +19,16 @@ integration](/api/incoming-webhooks-walkthrough).
     environment](https://zulip.readthedocs.io/en/latest/development/overview.html):
 
     ```
-        (zulip-py3-venv) vagrant@vagrant:/srv/zulip$
+        (zulip-server) vagrant@vagrant:/srv/zulip$
         ./manage.py send_webhook_fixture_message \
         > --fixture=zerver/tests/fixtures/helloworld/hello.json \
-        > '--url=http://localhost:9991/api/v1/external/helloworld?api_key=abcdefgh&stream=channel%20name;'
+        > '--url=http://localhost:9991/api{{ integration_url }}?api_key=abcdefgh&stream=channel%20name;'
     ```
 
     Or, use curl:
 
     ```
-    curl -X POST -H "Content-Type: application/json" -d '{ "featured_title":"Marilyn Monroe", "featured_url":"https://en.wikipedia.org/wiki/Marilyn_Monroe" }' http://localhost:9991/api/v1/external/helloworld\?api_key=abcdefgh&stream=channel%20name;
+    curl -X POST -H "Content-Type: application/json" -d '{ "featured_title":"Marilyn Monroe", "featured_url":"https://en.wikipedia.org/wiki/Marilyn_Monroe" }' http://localhost:9991/api{{ integration_url }}?api_key=abcdefgh&stream=channel%20name;
     ```
 
 {end_tabs}
@@ -41,3 +40,5 @@ integration](/api/incoming-webhooks-walkthrough).
 ### Related documentation
 
 {!webhooks-url-specification.md!}
+
+[incoming-webhooks-walkthrough]: https://zulip.readthedocs.io/en/latest/webhooks/incoming-webhooks-walkthrough.html

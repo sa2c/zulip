@@ -8,6 +8,7 @@ maxdepth: 3
 dependencies
 settings
 html-css
+icons
 accessibility
 events-system
 sending-messages
@@ -20,6 +21,7 @@ performance
 realms
 management-commands
 schema-migrations
+database-concurrency
 hashchange-system
 emoji
 onboarding-steps
@@ -33,9 +35,9 @@ django-upgrades
 release-checklist
 api-release-checklist
 input-pills
-presence
 unread_messages
 billing
 widgets
 slash-commands
+thumbnailing
 ```

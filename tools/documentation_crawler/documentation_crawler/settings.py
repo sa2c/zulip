@@ -14,7 +14,7 @@ NEWSPIDER_MODULE = "documentation_crawler.spiders"
 COMMANDS_MODULE = "documentation_crawler.commands"
 LOG_LEVEL = "WARNING"
 DOWNLOAD_TIMEOUT = 15
-
+DOWNLOAD_VERIFY_CERTIFICATES = True
 
 # Crawl responsibly by identifying yourself (and your website) on the user-agent
 USER_AGENT = (
@@ -95,5 +95,4 @@ ROBOTSTXT_OBEY = False
 # HTTPCACHE_STORAGE = 'scrapy.extensions.httpcache.FilesystemCacheStorage'
 
 # Set settings whose default value is deprecated to a future-proof value
-REQUEST_FINGERPRINTER_IMPLEMENTATION = "2.7"
 TWISTED_REACTOR = "twisted.internet.asyncioreactor.AsyncioSelectorReactor"

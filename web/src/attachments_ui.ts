@@ -1,19 +1,24 @@
 import $ from "jquery";
-import {z} from "zod";
+import type * as z from "zod/mini";
 
 import render_confirm_delete_attachment from "../templates/confirm_dialog/confirm_delete_attachment.hbs";
-import render_settings_upload_space_stats from "../templates/settings/upload_space_stats.hbs";
+import render_confirm_delete_detached_attachments_modal from "../templates/confirm_dialog/confirm_delete_detached_attachments.hbs";
 import render_uploaded_files_list from "../templates/settings/uploaded_files_list.hbs";
 
-import * as channel from "./channel";
-import * as dialog_widget from "./dialog_widget";
-import {$t, $t_html} from "./i18n";
-import * as ListWidget from "./list_widget";
-import * as loading from "./loading";
-import * as scroll_util from "./scroll_util";
-import {realm} from "./state_data";
-import * as timerender from "./timerender";
-import * as ui_report from "./ui_report";
+import {attachment_api_response_schema} from "./attachments.ts";
+import * as banners from "./banners.ts";
+import type {ActionButton} from "./buttons.ts";
+import * as channel from "./channel.ts";
+import * as dialog_widget from "./dialog_widget.ts";
+import {$t, $t_html} from "./i18n.ts";
+import * as ListWidget from "./list_widget.ts";
+import * as loading from "./loading.ts";
+import * as scroll_util from "./scroll_util.ts";
+import {message_edit_history_visibility_policy_values} from "./settings_config.ts";
+import * as settings_config from "./settings_config.ts";
+import {current_user, realm} from "./state_data.ts";
+import * as timerender from "./timerender.ts";
+import * as ui_report from "./ui_report.ts";
 
 type ServerAttachment = z.infer<typeof attachment_api_response_schema>["attachments"][number];
 
@@ -33,25 +38,6 @@ type AttachmentEvent =
           attachment: {id: number};
           upload_space_used: number;
       };
-
-const attachment_api_response_schema = z.object({
-    attachments: z.array(
-        z.object({
-            id: z.number(),
-            name: z.string(),
-            path_id: z.string(),
-            size: z.number(),
-            create_time: z.number(),
-            messages: z.array(
-                z.object({
-                    id: z.number(),
-                    date_sent: z.number(),
-                }),
-            ),
-        }),
-    ),
-    upload_space_used: z.number(),
-});
 
 let attachments: Attachment[];
 let upload_space_used: z.infer<typeof attachment_api_response_schema>["upload_space_used"];
@@ -85,23 +71,58 @@ function set_upload_space_stats(): void {
     if (realm.realm_upload_quota_mib === null) {
         return;
     }
-    const args = {
-        show_upgrade_message: realm.realm_plan_type === 2,
-        percent_used: percentage_used_space(upload_space_used),
-        upload_quota: bytes_to_size(mib_to_bytes(realm.realm_upload_quota_mib), true),
+    if (current_user.is_guest) {
+        return;
+    }
+
+    const show_upgrade_message =
+        realm.realm_plan_type === settings_config.realm_plan_types.limited.code &&
+        current_user.is_admin;
+    const $container = $("#attachment-stats-holder");
+
+    if (!$container) {
+        return;
+    }
+
+    let buttons: ActionButton[] = [];
+    if (show_upgrade_message) {
+        buttons = [
+            ...buttons,
+            {
+                label: $t({defaultMessage: "Upgrade"}),
+                custom_classes: "request-upgrade",
+                variant: "subtle",
+            },
+        ];
+    }
+
+    const UPLOAD_STATS_BANNER: banners.Banner = {
+        intent: show_upgrade_message ? "info" : "neutral",
+        label: $t(
+            {
+                defaultMessage:
+                    "Your organization is using {percent_used}% of your {upload_quota} file storage quota. Upgrade for more space.",
+            },
+            {
+                percent_used: percentage_used_space(upload_space_used),
+                upload_quota: bytes_to_size(mib_to_bytes(realm.realm_upload_quota_mib), true),
+            },
+        ),
+        buttons,
+        close_button: false,
     };
-    const rendered_upload_stats_html = render_settings_upload_space_stats(args);
-    $("#attachment-stats-holder").html(rendered_upload_stats_html);
+
+    banners.open(UPLOAD_STATS_BANNER, $container);
 }
 
 function delete_attachments(attachment: string, file_name: string): void {
-    const html_body = render_confirm_delete_attachment({file_name});
+    const modal_content_html = render_confirm_delete_attachment({file_name});
 
     dialog_widget.launch({
-        html_heading: $t_html({defaultMessage: "Delete file?"}),
-        html_body,
-        html_submit_button: $t_html({defaultMessage: "Delete"}),
-        id: "confirm_delete_file_modal",
+        modal_title_html: $t_html({defaultMessage: "Delete file?"}),
+        modal_content_html,
+        modal_submit_button_text: $t({defaultMessage: "Delete"}),
+        is_compact: true,
         focus_submit_on_open: true,
         on_click() {
             dialog_widget.submit_api_request(channel.del, "/json/attachments/" + attachment, {});
@@ -111,19 +132,19 @@ function delete_attachments(attachment: string, file_name: string): void {
 }
 
 function sort_mentioned_in(a: Attachment, b: Attachment): number {
-    const a_m = a.messages[0];
-    const b_m = b.messages[0];
+    const a_id = a.message_ids[0];
+    const b_id = b.message_ids[0];
 
-    if (!a_m) {
+    if (a_id === undefined) {
         return 1;
     }
-    if (!b_m) {
+    if (b_id === undefined) {
         return -1;
     }
 
-    if (a_m.id > b_m.id) {
+    if (a_id > b_id) {
         return 1;
-    } else if (a_m.id === b_m.id) {
+    } else if (a_id === b_id) {
         return 0;
     }
 
@@ -170,7 +191,7 @@ function render_attachments_ui(): void {
 function format_attachment_data(attachment: ServerAttachment): Attachment {
     return {
         ...attachment,
-        create_time_str: timerender.render_now(new Date(attachment.create_time)).time_str,
+        create_time_str: timerender.render_now(new Date(attachment.create_time * 1000)).time_str,
         size_str: bytes_to_size(attachment.size),
     };
 }
@@ -200,8 +221,12 @@ export function set_up_attachments(): void {
         text: $t({defaultMessage: "Loading…"}),
     });
 
+    $("#uploaded_files_table").on("click", ".download-attachment", function () {
+        $(this).siblings(".hidden-attachment-download")[0]?.click();
+    });
+
     $("#uploaded_files_table").on("click", ".remove-attachment", (e) => {
-        const file_name = $(e.target).closest(".uploaded_file_row").attr("id");
+        const file_name = $(e.target).closest(".uploaded_file_row").attr("data-attachment-name");
         delete_attachments(
             $(e.target).closest(".uploaded_file_row").attr("data-attachment-id")!,
             file_name!,
@@ -221,5 +246,61 @@ export function set_up_attachments(): void {
             loading.destroy_indicator($("#attachments_loading_indicator"));
             ui_report.error($t_html({defaultMessage: "Failed"}), xhr, $status);
         },
+    });
+}
+
+export function suggest_delete_detached_attachments(attachments_list: ServerAttachment[]): void {
+    const modal_content_html = render_confirm_delete_detached_attachments_modal({
+        attachments_list,
+        realm_message_edit_history_is_visible:
+            realm.realm_message_edit_history_visibility_policy !==
+            message_edit_history_visibility_policy_values.never.code,
+    });
+
+    // Since we want to delete multiple attachments, we want to be
+    // able to keep track of attachments to delete and which ones to
+    // retry if it fails.
+    const attachments_map = new Map<number, ServerAttachment>();
+    for (const attachment of attachments_list) {
+        attachments_map.set(attachment.id, attachment);
+    }
+
+    function do_delete_attachments(): void {
+        dialog_widget.show_dialog_spinner();
+        for (const [id, attachment] of attachments_map.entries()) {
+            void channel.del({
+                url: "/json/attachments/" + attachment.id,
+                success() {
+                    attachments_map.delete(id);
+                    if (attachments_map.size === 0) {
+                        dialog_widget.hide_dialog_spinner();
+                        dialog_widget.close();
+                    }
+                },
+                error() {
+                    dialog_widget.hide_dialog_spinner();
+                    ui_report.error(
+                        $t_html({defaultMessage: "One or more files could not be deleted."}),
+                        undefined,
+                        $("#dialog_error"),
+                    );
+                },
+            });
+        }
+        // This is to open "Manage uploaded files" link.
+        $("#confirm_delete_attachments_modal .uploaded_files_settings_link").on("click", (e) => {
+            e.stopPropagation();
+            dialog_widget.close();
+        });
+    }
+
+    dialog_widget.launch({
+        id: "confirm_delete_attachments_modal",
+        modal_title_html: $t_html({defaultMessage: "Delete uploaded files?"}),
+        modal_content_html,
+        modal_submit_button_text: $t({defaultMessage: "Delete"}),
+        modal_exit_button_text: $t({defaultMessage: "Don't delete"}),
+        loading_spinner: true,
+        on_click: do_delete_attachments,
     });
 }

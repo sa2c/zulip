@@ -1,7 +1,7 @@
-import * as message_lists from "./message_lists";
-import * as message_store from "./message_store";
-import * as people from "./people";
-import type {UserStatusEmojiInfo} from "./user_status";
+import * as message_lists from "./message_lists.ts";
+import * as message_store from "./message_store.ts";
+import * as thumbnail from "./thumbnail.ts";
+import type {UserStatusEmojiInfo} from "./user_status.ts";
 
 export function rerender_messages_view(): void {
     for (const list of message_lists.all_rendered_message_lists()) {
@@ -79,10 +79,8 @@ export function update_user_full_name(user_id: number, full_name: string): void 
     rerender_messages_view_for_user(user_id);
 }
 
-export function update_avatar(user_id: number, avatar_url: string): void {
-    let url = avatar_url;
-    url = people.format_small_avatar_url(url);
-    message_store.update_small_avatar_url(user_id, url);
+export function update_avatar(user_id: number, avatar_url: string | null): void {
+    message_store.update_small_avatar_url(user_id, avatar_url);
     rerender_messages_view_for_user(user_id);
 }
 
@@ -92,4 +90,9 @@ export function update_user_status_emoji(
 ): void {
     message_store.update_status_emoji_info(user_id, status_emoji_info);
     rerender_messages_view_for_user(user_id);
+}
+
+export function update_thumbnails(): void {
+    thumbnail.set_media_preview_size_css_variable();
+    rerender_messages_view();
 }

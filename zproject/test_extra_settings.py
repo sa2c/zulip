@@ -31,7 +31,6 @@ DATABASES["default"] = {
     "USER": "zulip_test",
     "PASSWORD": LOCAL_DATABASE_PASSWORD,
     "HOST": "localhost",
-    "SCHEMA": "zulip",
     "ENGINE": "django.db.backends.postgresql",
     "TEST_NAME": "django_zulip_tests",
     "OPTIONS": {
@@ -54,6 +53,9 @@ if "RUNNING_OPENAPI_CURL_TEST" in os.environ:
 
 if "GENERATE_STRIPE_FIXTURES" in os.environ:
     GENERATE_STRIPE_FIXTURES = True
+
+if "GENERATE_LLM_FIXTURES" in os.environ:
+    GENERATE_LLM_FIXTURES = True
 
 if "BAN_CONSOLE_OUTPUT" in os.environ:
     BAN_CONSOLE_OUTPUT = True
@@ -145,6 +147,7 @@ S3_KEY = "test-key"
 S3_SECRET_KEY = "test-secret-key"
 S3_AUTH_UPLOADS_BUCKET = "test-authed-bucket"
 S3_AVATAR_BUCKET = "test-avatar-bucket"
+S3_EXPORT_BUCKET = "test-export-bucket"
 
 INLINE_URL_EMBED_PREVIEW = False
 
@@ -176,6 +179,8 @@ SOCIAL_AUTH_APPLE_AUDIENCE = [SOCIAL_AUTH_APPLE_APP_ID, SOCIAL_AUTH_APPLE_SERVIC
 SOCIAL_AUTH_APPLE_KEY = "KEYISKEY"
 SOCIAL_AUTH_APPLE_TEAM = "TEAMSTRING"
 SOCIAL_AUTH_APPLE_SECRET = get_from_file_if_exists("zerver/tests/fixtures/apple/private_key.pem")
+SOCIAL_AUTH_DISCORD_KEY = "key"
+SOCIAL_AUTH_DISCORD_SECRET = "secret"
 
 
 SOCIAL_AUTH_OIDC_ENABLED_IDPS: dict[str, OIDCIdPConfigDict] = {
@@ -190,16 +195,32 @@ SOCIAL_AUTH_OIDC_ENABLED_IDPS: dict[str, OIDCIdPConfigDict] = {
 SOCIAL_AUTH_OIDC_FULL_NAME_VALIDATED = True
 
 
+VIDEO_ZOOM_SERVER_TO_SERVER_ACCOUNT_ID = "account_id"
+VIDEO_ZOOM_API_URL = "https://api.zoom.us"
+VIDEO_ZOOM_OAUTH_URL = "https://zoom.example.com"
 VIDEO_ZOOM_CLIENT_ID = "client_id"
 VIDEO_ZOOM_CLIENT_SECRET = "client_secret"
+
+VIDEO_WEBEX_CLIENT_ID = "client_id"
+VIDEO_WEBEX_CLIENT_SECRET = "client_secret"
 
 BIG_BLUE_BUTTON_SECRET = "123"
 BIG_BLUE_BUTTON_URL = "https://bbb.example.com/bigbluebutton/"
 
+CONSTRUCTOR_GROUPS_URL = "https://example.constructor.app/api/groups/xapi"
+CONSTRUCTOR_GROUPS_ACCESS_KEY = "test-access-key"
+CONSTRUCTOR_GROUPS_SECRET_KEY = "test-secret-key"
+
+NEXTCLOUD_SERVER = "https://nextcloud.example.com"
+NEXTCLOUD_TALK_USERNAME = "username"
+NEXTCLOUD_TALK_PASSWORD = "password"
+
 # By default two factor authentication is disabled in tests.
 # Explicitly set this to True within tests that must have this on.
 TWO_FACTOR_AUTHENTICATION_ENABLED = False
+
 DEVELOPMENT_DISABLE_PUSH_BOUNCER_DOMAIN_CHECK = False
+ZULIP_SERVICES_URL = f"http://push.{EXTERNAL_HOST}"
 
 # Disable all Zulip services by default. Tests can activate them by
 # overriding settings explicitly when they want to enable something,
@@ -267,6 +288,7 @@ RATE_LIMITING_RULES: dict[str, list[tuple[int, int]]] = {
     "email_change_by_user": [],
     "password_reset_form_by_email": [],
     "sends_email_by_remote_server": [],
+    "transfer_remote_server_registration_endpoint_by_ip": [],
 }
 
 CLOUD_FREE_TRIAL_DAYS: int | None = None
@@ -280,8 +302,6 @@ SCIM_CONFIG: dict[str, SCIMConfigDict] = {
     }
 }
 
-ALLOW_GROUP_VALUED_SETTINGS = True
-
 # This override disables the grace period for undoing resolving/unresolving
 # a topic in tests.
 # This allows tests to not worry about the special behavior during the grace period.
@@ -289,3 +309,13 @@ ALLOW_GROUP_VALUED_SETTINGS = True
 RESOLVE_TOPIC_UNDO_GRACE_PERIOD_SECONDS = 0
 
 KATEX_SERVER = False
+
+ROOT_DOMAIN_LANDING_PAGE = False
+
+# Disable verifying webhook signatures in tests by default.
+# Tests that intend to verify webhook signatures should override this setting.
+VERIFY_WEBHOOK_SIGNATURES = False
+
+AUTH_LDAP_USER_ATTR_MAP = {
+    "full_name": "cn",
+}

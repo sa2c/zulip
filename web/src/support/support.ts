@@ -2,7 +2,7 @@ import ClipboardJS from "clipboard";
 import $ from "jquery";
 import assert from "minimalistic-assert";
 
-$(() => {
+function initialize(): void {
     $("body").on("click", "button.scrub-realm-button", function (this: HTMLButtonElement, e) {
         e.preventDefault();
         const message =
@@ -50,7 +50,7 @@ $(() => {
     $("body").on(
         "blur",
         "input[name='monthly_discounted_price']",
-        function (this: HTMLInputElement) {
+        function (this: HTMLInputElement, _event: JQuery.Event) {
             const input_monthly_price = $(this).val();
             if (!input_monthly_price) {
                 return;
@@ -76,7 +76,7 @@ $(() => {
     $("body").on(
         "blur",
         "input[name='annual_discounted_price']",
-        function (this: HTMLInputElement) {
+        function (this: HTMLInputElement, _event: JQuery.Event) {
             const input_annual_price = $(this).val();
             if (!input_annual_price) {
                 return;
@@ -100,4 +100,6 @@ $(() => {
             }
         },
     );
-});
+}
+
+initialize();

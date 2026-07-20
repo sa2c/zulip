@@ -1,13 +1,15 @@
 import $ from "jquery";
+import _ from "lodash";
 import assert from "minimalistic-assert";
-import {z} from "zod";
+import * as z from "zod/mini";
 
-import * as channel from "./channel";
-import {page_params} from "./page_params";
-import * as presence from "./presence";
-import * as watchdog from "./watchdog";
+import * as channel from "./channel.ts";
+import {electron_bridge} from "./electron_bridge.ts";
+import {page_params} from "./page_params.ts";
+import * as presence from "./presence.ts";
+import * as watchdog from "./watchdog.ts";
 
-const post_presence_response_schema = z.object({
+export const post_presence_response_schema = z.object({
     msg: z.string(),
     result: z.string(),
     // A bunch of these fields below are .optional() due to the fact
@@ -17,25 +19,21 @@ const post_presence_response_schema = z.object({
     // For ping_only requests, these fields are not returned in the
     // response. If we're fetching presence data however, they should
     // all be present, and send_presence_to_server() will validate that.
-    server_timestamp: z.number().optional(),
-    zephyr_mirror_active: z.boolean().optional(),
-    presences: z
-        .record(
+    server_timestamp: z.optional(z.number()),
+    presences: z.optional(
+        z.record(
             z.string(),
             z.object({
                 active_timestamp: z.number(),
                 idle_timestamp: z.number(),
             }),
-        )
-        .optional(),
-    presence_last_update_id: z.number().optional(),
+        ),
+    ),
+    presence_last_update_id: z.optional(z.number()),
 });
 
 /* Keep in sync with views.py:update_active_status_backend() */
-export enum ActivityState {
-    ACTIVE = "active",
-    IDLE = "idle",
-}
+export type ActivityState = "active" | "idle";
 
 /*
     Helpers for detecting user activity and managing user idle states
@@ -52,13 +50,29 @@ export let client_is_active = document.hasFocus();
 
 // new_user_input is a more strict version of client_is_active used
 // primarily for analytics.  We initialize this to true, to count new
-// page loads, but set it to false in the onload function in reload.js
+// page loads, but set it to false in the onload function in reload.ts
 // if this was a server-initiated-reload to avoid counting a
 // server-initiated reload as user activity.
 export let new_user_input = true;
 
+export let received_new_messages = false;
+
+type UserInputHook = () => void;
+const on_new_user_input_hooks: UserInputHook[] = [];
+
+export function register_on_new_user_input_hook(hook: UserInputHook): void {
+    on_new_user_input_hooks.push(hook);
+}
+
+export function set_received_new_messages(value: boolean): void {
+    received_new_messages = value;
+}
+
 export function set_new_user_input(value: boolean): void {
     new_user_input = value;
+    for (const hook of on_new_user_input_hooks) {
+        hook();
+    }
 }
 
 export function clear_for_testing(): void {
@@ -72,6 +86,8 @@ export function mark_client_idle(): void {
     client_is_active = false;
 }
 
+export const mark_client_idle_later = _.debounce(mark_client_idle, DEFAULT_IDLE_TIMEOUT_MS);
+
 export function compute_active_status(): ActivityState {
     // The overall algorithm intent for the `status` field is to send
     // `ACTIVE` (aka green circle) if we know the user is at their
@@ -84,20 +100,20 @@ export function compute_active_status(): ActivityState {
     //
     // The check for `get_idle_on_system === undefined` is feature
     // detection; older desktop app releases never set that property.
-    if (window.electron_bridge?.get_idle_on_system !== undefined) {
-        if (window.electron_bridge.get_idle_on_system()) {
-            return ActivityState.IDLE;
+    if (electron_bridge?.get_idle_on_system !== undefined) {
+        if (electron_bridge.get_idle_on_system()) {
+            return "idle";
         }
-        return ActivityState.ACTIVE;
+        return "active";
     }
 
     if (client_is_active) {
-        return ActivityState.ACTIVE;
+        return "active";
     }
-    return ActivityState.IDLE;
+    return "idle";
 }
 
-export function send_presence_to_server(redraw?: () => void): void {
+export let send_presence_to_server = (redraw?: () => void): void => {
     // Zulip has 2 data feeds coming from the server to the client:
     // The server_events data, and this presence feed.  Data from
     // server_events is nicely serialized, but if we've been offline
@@ -131,14 +147,7 @@ export function send_presence_to_server(redraw?: () => void): void {
         success(response) {
             const data = post_presence_response_schema.parse(response);
 
-            // Update Zephyr mirror activity warning
-            if (data.zephyr_mirror_active === false) {
-                $("#zephyr-mirror-error").addClass("show");
-            } else {
-                $("#zephyr-mirror-error").removeClass("show");
-            }
-
-            new_user_input = false;
+            set_new_user_input(false);
 
             if (redraw) {
                 assert(
@@ -163,6 +172,10 @@ export function send_presence_to_server(redraw?: () => void): void {
             }
         },
     });
+};
+
+export function rewire_send_presence_to_server(value: typeof send_presence_to_server): void {
+    send_presence_to_server = value;
 }
 
 export function mark_client_active(): void {
@@ -171,18 +184,19 @@ export function mark_client_active(): void {
         client_is_active = true;
         send_presence_to_server();
     }
+    mark_client_idle_later();
 }
 
 export function initialize(): void {
-    $("html").on("mousemove", () => {
-        new_user_input = true;
+    $(document).on("mousemove", () => {
+        set_new_user_input(true);
     });
 
-    $(window).on("focus", mark_client_active);
-    $(window).idle({
-        idle: DEFAULT_IDLE_TIMEOUT_MS,
-        onIdle: mark_client_idle,
-        onActive: mark_client_active,
-        keepTracking: true,
-    });
+    $(window).on(
+        "focus keydown mousedown mousemove touchmove touchstart wheel",
+        mark_client_active,
+    );
+    if (client_is_active) {
+        mark_client_idle_later();
+    }
 }

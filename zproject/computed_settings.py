@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import sys
@@ -34,6 +35,7 @@ from .configured_settings import (
     DEFAULT_RATE_LIMITING_RULES,
     EMAIL_BACKEND,
     EMAIL_HOST,
+    EMAIL_MAX_CONNECTION_LIFETIME_IN_MINUTES,
     ERROR_REPORTING,
     EXTERNAL_HOST,
     EXTERNAL_HOST_WITHOUT_PORT,
@@ -52,6 +54,7 @@ from .configured_settings import (
     REMOTE_POSTGRES_PORT,
     REMOTE_POSTGRES_SSLMODE,
     ROOT_SUBDOMAIN_ALIASES,
+    S3_REGION,
     SENTRY_DSN,
     SOCIAL_AUTH_APPLE_APP_ID,
     SOCIAL_AUTH_APPLE_SERVICES_ID,
@@ -65,6 +68,7 @@ from .configured_settings import (
     STATIC_URL,
     SUBMIT_USAGE_STATISTICS,
     TORNADO_PORTS,
+    USING_CAPTCHA,
     USING_PGROONGA,
     ZULIP_ADMINISTRATOR,
     ZULIP_SERVICE_PUSH_NOTIFICATIONS,
@@ -96,6 +100,11 @@ SERVER_GENERATION = int(time.time())
 # Key to authenticate this server to zulip.org for push notifications, etc.
 ZULIP_ORG_KEY = get_secret("zulip_org_key")
 ZULIP_ORG_ID = get_secret("zulip_org_id")
+
+raw_keys: str | None = get_secret("push_registration_encryption_keys")
+PUSH_REGISTRATION_ENCRYPTION_KEYS: dict[str, str] = {}
+if raw_keys is not None:
+    PUSH_REGISTRATION_ENCRYPTION_KEYS = json.loads(raw_keys)
 
 
 service_name_to_required_upload_level = {
@@ -150,9 +159,9 @@ if services is not None and set(services).intersection(
     {"submit_usage_statistics", "security_alerts", "mobile_push"}
 ):
     # None of these make sense enabled without ZULIP_SERVICES_URL.
-    assert (
-        ZULIP_SERVICES_URL is not None
-    ), "ZULIP_SERVICES_URL is required when any services are enabled."
+    assert ZULIP_SERVICES_URL is not None, (
+        "ZULIP_SERVICES_URL is required when any services are enabled."
+    )
 
 ANALYTICS_DATA_UPLOAD_LEVEL = max(
     [service_name_to_required_upload_level[service] for service in (services or [])],
@@ -168,6 +177,8 @@ if len(sys.argv) > 2 and sys.argv[0].endswith("manage.py") and sys.argv[1] == "p
 else:
     IS_WORKER = False
 
+# This should primarily be used to customize error messages
+RUNNING_IN_DOCKER = os.path.exists("/.dockerenv")
 
 # This is overridden in test_settings.py for the test suites
 PUPPETEER_TESTS = False
@@ -175,6 +186,8 @@ PUPPETEER_TESTS = False
 RUNNING_OPENAPI_CURL_TEST = False
 # This is overridden in test_settings.py for the test suites
 GENERATE_STRIPE_FIXTURES = False
+# This is overridden in test_settings.py for the test suites
+GENERATE_LLM_FIXTURES = False
 # This is overridden in test_settings.py for the test suites
 BAN_CONSOLE_OUTPUT = False
 # This is overridden in test_settings.py for the test suites
@@ -284,7 +297,12 @@ if not TORNADO_PORTS:
     TORNADO_PORTS = get_tornado_ports(config_file)
 TORNADO_PROCESSES = len(TORNADO_PORTS)
 
-RUNNING_INSIDE_TORNADO = False
+RUNNING_INSIDE_TORNADO = (
+    len(sys.argv) > 1 and "manage.py" in sys.argv[0] and sys.argv[1] == "runtornado"
+)
+
+if RUNNING_INSIDE_TORNADO:
+    ROOT_URLCONF = "zproject.tornado_urls"
 
 SILENCED_SYSTEM_CHECKS = [
     # auth.W004 checks that the UserProfile field named by USERNAME_FIELD has
@@ -339,7 +357,6 @@ DATABASES: dict[str, dict[str, Any]] = {
         "PASSWORD": "",
         # Host = '' => connect to localhost by default
         "HOST": "",
-        "SCHEMA": "zulip",
         "CONN_MAX_AGE": 600,
         "OPTIONS": {
             "connection_factory": TimeTrackingConnection,
@@ -370,10 +387,7 @@ elif REMOTE_POSTGRES_HOST != "":
         DATABASES["default"].update(
             PASSWORD=get_secret("postgres_password"),
         )
-    if REMOTE_POSTGRES_SSLMODE != "":
-        DATABASES["default"]["OPTIONS"]["sslmode"] = REMOTE_POSTGRES_SSLMODE
-    else:
-        DATABASES["default"]["OPTIONS"]["sslmode"] = "verify-full"
+    DATABASES["default"]["OPTIONS"]["sslmode"] = REMOTE_POSTGRES_SSLMODE
 elif (
     get_config("postgresql", "database_user", "zulip") != "zulip"
     and get_secret("postgres_password") is not None
@@ -382,7 +396,6 @@ elif (
         PASSWORD=get_secret("postgres_password"),
         HOST="localhost",
     )
-POSTGRESQL_MISSING_DICTIONARIES = get_config("postgresql", "missing_dictionaries", False)
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
@@ -409,15 +422,15 @@ CACHES: dict[str, dict[str, object]] = {
             "socket_timeout": 3600,
             "username": MEMCACHED_USERNAME,
             "password": MEMCACHED_PASSWORD,
-            "pickle_protocol": 4,
+            "pickle_protocol": 5,
         },
     },
     "database": {
         "BACKEND": "django.core.cache.backends.db.DatabaseCache",
         "LOCATION": "third_party_api_results",
-        # This cache shouldn't timeout; we're really just using the
-        # cache API to store the results of requests to third-party
-        # APIs like the Twitter API permanently.
+        # This is currently unused; it was previously used to cache
+        # API responses from third-party APIs like the Twitter API
+        # permanently.
         "TIMEOUT": None,
         "OPTIONS": {
             "MAX_ENTRIES": 100000000,
@@ -432,13 +445,6 @@ CACHES: dict[str, dict[str, object]] = {
 
 # Merge any local overrides with the default rules.
 RATE_LIMITING_RULES = {**DEFAULT_RATE_LIMITING_RULES, **RATE_LIMITING_RULES}
-
-# List of domains that, when applied to a request in a Tornado process,
-# will be handled with the separate in-memory rate limiting backend for Tornado,
-# which has its own buckets separate from the default backend.
-# In principle, it should be impossible to make requests to tornado that fall into
-# other domains, but we use this list as an extra precaution.
-RATE_LIMITING_DOMAINS_FOR_TORNADO = ["api_by_user", "api_by_ip"]
 
 # These ratelimits are also documented publicly at
 # https://zulip.readthedocs.io/en/latest/production/email-gateway.html
@@ -456,6 +462,11 @@ if DEVELOPMENT:
     TOR_EXIT_NODE_FILE_PATH = os.path.join(DEPLOY_ROOT, "var/tor-exit-nodes.json")
 else:
     TOR_EXIT_NODE_FILE_PATH = "/var/lib/zulip/tor-exit-nodes.json"
+
+if USING_CAPTCHA:
+    ALTCHA_HMAC_KEY = get_secret("altcha_hmac")
+else:
+    ALTCHA_HMAC_KEY = ""
 
 ########################################################################
 # SECURITY SETTINGS
@@ -509,18 +520,20 @@ ROOT_DOMAIN_URI = EXTERNAL_URI_SCHEME + EXTERNAL_HOST
 
 S3_KEY = get_secret("s3_key")
 S3_SECRET_KEY = get_secret("s3_secret_key")
+if LOCAL_UPLOADS_DIR is None and S3_REGION is None:
+    import boto3
+
+    S3_REGION = boto3.client("s3").meta.region_name
 
 DROPBOX_APP_KEY = get_secret("dropbox_app_key")
 
 BIG_BLUE_BUTTON_SECRET = get_secret("big_blue_button_secret")
 
-# Twitter API credentials
-# Secrecy not required because its only used for R/O requests.
-# Please don't make us go over our rate limit.
-TWITTER_CONSUMER_KEY = get_secret("twitter_consumer_key")
-TWITTER_CONSUMER_SECRET = get_secret("twitter_consumer_secret")
-TWITTER_ACCESS_TOKEN_KEY = get_secret("twitter_access_token_key")
-TWITTER_ACCESS_TOKEN_SECRET = get_secret("twitter_access_token_secret")
+CONSTRUCTOR_GROUPS_ACCESS_KEY = get_secret("constructor_groups_access_key")
+CONSTRUCTOR_GROUPS_SECRET_KEY = get_secret("constructor_groups_secret_key")
+
+NEXTCLOUD_TALK_USERNAME = get_secret("nextcloud_talk_username")
+NEXTCLOUD_TALK_PASSWORD = get_secret("nextcloud_talk_password")
 
 # These are the bots that Zulip sends automated messages as.
 INTERNAL_BOTS = [
@@ -608,7 +621,7 @@ LOCAL_FILES_DIR = os.path.join(LOCAL_UPLOADS_DIR, "files") if LOCAL_UPLOADS_DIR 
 # ZulipStorage when not DEBUG.
 
 if not DEBUG:
-    STATICFILES_STORAGE = "zerver.lib.storage.ZulipStorage"
+    STORAGES = {"staticfiles": {"BACKEND": "zerver.lib.storage.ZulipStorage"}}
     if PRODUCTION:
         STATIC_ROOT = "/home/zulip/prod-static"
     else:
@@ -671,6 +684,10 @@ default_template_engine_settings.update(
         os.path.join(DEPLOY_ROOT, "templates"),
         # The webhook integration templates
         os.path.join(DEPLOY_ROOT, "zerver", "webhooks"),
+        # The python-zulip-api:integrations package templates
+        # Keep above the zulip_bots templates to override bots with the same names
+        # (e.g., the Jira plugin doc and the Jira bot both use "jira/doc.md").
+        os.path.join("static" if DEBUG else STATIC_ROOT, "generated", "integrations"),
         # The python-zulip-api:zulip_bots package templates
         os.path.join("static" if DEBUG else STATIC_ROOT, "generated", "bots"),
     ],
@@ -747,10 +764,10 @@ WEBHOOK_ANOMALOUS_PAYLOADS_LOG_PATH = zulip_path("/var/log/zulip/webhooks_anomal
 WEBHOOK_UNSUPPORTED_EVENTS_LOG_PATH = zulip_path("/var/log/zulip/webhooks_unsupported_events.log")
 SOFT_DEACTIVATION_LOG_PATH = zulip_path("/var/log/zulip/soft_deactivation.log")
 TRACEMALLOC_DUMP_DIR = zulip_path("/var/log/zulip/tracemalloc")
-DELIVER_SCHEDULED_MESSAGES_LOG_PATH = zulip_path("/var/log/zulip/deliver_scheduled_messages.log")
 RETENTION_LOG_PATH = zulip_path("/var/log/zulip/message_retention.log")
 AUTH_LOG_PATH = zulip_path("/var/log/zulip/auth.log")
 SCIM_LOG_PATH = zulip_path("/var/log/zulip/scim.log")
+REGISTRATION_LOG_PATH = zulip_path("/var/log/zulip/registration.log")
 
 ZULIP_WORKER_TEST_FILE = zulip_path("/var/log/zulip/zulip-worker-test-file")
 
@@ -860,6 +877,7 @@ LOGGING: dict[str, Any] = {
         "ldap_file": file_handler(LDAP_LOG_PATH),
         "scim_file": file_handler(SCIM_LOG_PATH),
         "slow_queries_file": file_handler(SLOW_QUERIES_LOG_PATH, level="INFO"),
+        "registration_file": file_handler(REGISTRATION_LOG_PATH, level="INFO"),
         "webhook_anomalous_file": file_handler(
             WEBHOOK_ANOMALOUS_PAYLOADS_LOG_PATH, formatter="webhook_request_data"
         ),
@@ -949,6 +967,9 @@ LOGGING: dict[str, Any] = {
             "handlers": ["scim_file", "errors_file"],
             "propagate": False,
         },
+        "mail.log": {
+            "level": "WARNING",
+        },
         "pyvips": {
             "level": "ERROR",
             "handlers": ["console", "errors_file"],
@@ -999,6 +1020,10 @@ LOGGING: dict[str, Any] = {
         },
         "zulip.queue": {
             "level": "WARNING",
+        },
+        "zulip.registration": {
+            "handlers": ["registration_file", "errors_file"],
+            "propagate": False,
         },
         "zulip.retention": {
             "handlers": ["file", "errors_file"],
@@ -1104,6 +1129,11 @@ SOCIAL_AUTH_FIELDS_STORED_IN_SESSION = [
     "mobile_flow_otp",
     "desktop_flow_otp",
     "multiuse_object_key",
+    # Include "next" so python-social-auth treats it like other session fields
+    # and clears it when absent in subsequent auth requests. Otherwise,
+    # it saves it in the session due to its being the redirect field,
+    # but doesn't clear it from the session when the "next" is absent.
+    "next",
 ]
 SOCIAL_AUTH_LOGIN_ERROR_URL = "/login/"
 
@@ -1142,6 +1172,7 @@ SOCIAL_AUTH_GOOGLE_SECRET = get_secret("social_auth_google_secret")
 GOOGLE_OAUTH2_CLIENT_SECRET = get_secret("google_oauth2_client_secret")
 SOCIAL_AUTH_GOOGLE_KEY = SOCIAL_AUTH_GOOGLE_KEY or GOOGLE_OAUTH2_CLIENT_ID
 SOCIAL_AUTH_GOOGLE_SECRET = SOCIAL_AUTH_GOOGLE_SECRET or GOOGLE_OAUTH2_CLIENT_SECRET
+SOCIAL_AUTH_DISCORD_SECRET = get_secret("social_auth_discord_secret")
 
 if PRODUCTION:
     SOCIAL_AUTH_SAML_SP_PUBLIC_CERT = get_from_file_if_exists("/etc/zulip/saml/zulip-cert.crt")
@@ -1181,6 +1212,7 @@ for idp_name, idp_dict in SOCIAL_AUTH_SAML_ENABLED_IDPS.items():
         path = f"/etc/zulip/saml/idps/{idp_name}.crt"
     idp_dict["x509cert"] = get_from_file_if_exists(path)
 
+
 SOCIAL_AUTH_PIPELINE = [
     "social_core.pipeline.social_auth.social_details",
     "zproject.backends.social_auth_associate_user",
@@ -1205,8 +1237,11 @@ elif not EMAIL_HOST:
     WARN_NO_EMAIL = True
     EMAIL_BACKEND = "django.core.mail.backends.dummy.EmailBackend"
 else:
-    EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
-
+    # Route '0' to Django's default, everything else to custom class
+    if EMAIL_MAX_CONNECTION_LIFETIME_IN_MINUTES == 0:
+        EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+    else:
+        EMAIL_BACKEND = "zproject.email_backends.PersistentSMTPEmailBackend"
 EMAIL_TIMEOUT = 15
 
 if DEVELOPMENT:
@@ -1239,6 +1274,7 @@ CROSS_REALM_BOT_EMAILS = {
 MOBILE_NOTIFICATIONS_SHARDS = int(
     get_config("application_server", "mobile_notification_shards", "1")
 )
+USER_ACTIVITY_SHARDS = int(get_config("application_server", "user_activity_shards", "1"))
 
 TWO_FACTOR_PATCH_ADMIN = False
 
@@ -1248,6 +1284,9 @@ SENTRY_DSN = os.environ.get("SENTRY_DSN", SENTRY_DSN)
 SCIM_SERVICE_PROVIDER = {
     "USER_ADAPTER": "zerver.lib.scim.ZulipSCIMUser",
     "USER_FILTER_PARSER": "zerver.lib.scim_filter.ZulipUserFilterQuery",
+    "GROUP_ADAPTER": "zerver.lib.scim.ZulipSCIMGroup",
+    "GROUP_MODEL": "zerver.models.groups.NamedUserGroup",
+    "GROUP_FILTER_PARSER": "zerver.lib.scim_filter.ZulipGroupFilterQuery",
     # NETLOC is actually overridden by the behavior of base_scim_location_getter,
     # but django-scim2 requires it to be set, even though it ends up not being used.
     # So we need to give it some value here, and EXTERNAL_HOST is the most generic.
@@ -1264,3 +1303,8 @@ SCIM_SERVICE_PROVIDER = {
         },
     ],
 }
+
+# Which API key to use will be determined based on TOPIC_SUMMARIZATION_MODEL.
+TOPIC_SUMMARIZATION_API_KEY = get_secret("topic_summarization_api_key", None)
+
+PARTIAL_USERS = bool(os.environ.get("PARTIAL_USERS"))

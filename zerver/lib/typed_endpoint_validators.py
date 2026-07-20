@@ -1,6 +1,8 @@
 import re
 import zoneinfo
 from collections.abc import Collection
+from enum import Enum
+from typing import TypeVar
 
 from django.core.exceptions import ValidationError
 from django.core.validators import URLValidator
@@ -8,6 +10,7 @@ from django.utils.translation import gettext as _
 from pydantic import AfterValidator, BeforeValidator, NonNegativeInt
 from pydantic_core import PydanticCustomError
 
+from zerver.lib.exceptions import JsonableError
 from zerver.lib.timezone import canonicalize_timezone
 
 # The Pydantic.StringConstraints does not have validation for the string to be
@@ -66,7 +69,19 @@ def to_timezone_or_empty(s: str) -> str:
 
 
 def timezone_or_empty_validator() -> AfterValidator:
-    return AfterValidator(lambda s: to_timezone_or_empty(s))
+    return AfterValidator(to_timezone_or_empty)
+
+
+def check_timezone(s: str) -> str:
+    try:
+        zoneinfo.ZoneInfo(canonicalize_timezone(s))
+    except (ValueError, zoneinfo.ZoneInfoNotFoundError):
+        raise ValueError(_("Not a recognized time zone"))
+    return s
+
+
+def timezone_validator() -> AfterValidator:
+    return AfterValidator(check_timezone)
 
 
 def to_non_negative_int_or_none(s: str) -> NonNegativeInt | None:
@@ -83,7 +98,7 @@ def to_non_negative_int_or_none(s: str) -> NonNegativeInt | None:
 # type conversion will raise a ValueError if the string is not a valid
 # integer, and we want to return None in that case.
 def non_negative_int_or_none_validator() -> BeforeValidator:
-    return BeforeValidator(lambda s: to_non_negative_int_or_none(s))
+    return BeforeValidator(to_non_negative_int_or_none)
 
 
 def check_color(var_name: str, val: object) -> str:
@@ -93,3 +108,27 @@ def check_color(var_name: str, val: object) -> str:
     if not matched_results:
         raise ValueError(_("{var_name} is not a valid hex color code").format(var_name=var_name))
     return s
+
+
+EnumT = TypeVar("EnumT", bound=Enum)
+
+
+def parse_enum_from_string_value(
+    val: str,
+    setting_name: str,
+    enum: type[EnumT],
+) -> EnumT:
+    try:
+        return enum[val]
+    except KeyError:
+        raise JsonableError(_("Invalid {setting_name}").format(setting_name=setting_name))
+
+
+def check_uint32(val: int) -> int:
+    if not (0 <= val <= 4294967295):
+        raise ValueError(_("Not a valid unsigned 32-bit integer"))
+    return val
+
+
+def uint32_validator() -> AfterValidator:
+    return AfterValidator(check_uint32)

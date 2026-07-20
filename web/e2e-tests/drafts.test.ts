@@ -1,15 +1,15 @@
-import {strict as assert} from "assert";
+import assert from "node:assert/strict";
 
 import type {Page} from "puppeteer";
 
-import * as common from "./lib/common";
+import * as common from "./lib/common.ts";
 
 async function wait_for_drafts_to_disappear(page: Page): Promise<void> {
     await page.waitForSelector("#draft_overlay.show", {hidden: true});
 }
 
 async function wait_for_drafts_to_appear(page: Page): Promise<void> {
-    await page.waitForSelector("#draft_overlay.show");
+    await page.waitForSelector("#draft_overlay.show", {visible: true});
 }
 
 async function get_drafts_count(page: Page): Promise<number> {
@@ -51,8 +51,8 @@ async function test_restore_stream_message_draft_by_opening_compose_box(page: Pa
     // Wait for narrow to complete.
     const wait_for_change = true;
     await common.get_current_msg_list_id(page, wait_for_change);
-    await page.keyboard.press("Enter");
 
+    await page.waitForSelector("#left_bar_compose_reply_button_big", {visible: true});
     await page.click("#left_bar_compose_reply_button_big");
     await page.waitForSelector("#send_message_form", {visible: true});
 
@@ -75,6 +75,7 @@ async function create_private_message_draft(page: Page): Promise<void> {
 }
 
 async function test_restore_private_message_draft_by_opening_composebox(page: Page): Promise<void> {
+    await page.waitForSelector("#left_bar_compose_reply_button_big", {visible: true});
     await page.click("#left_bar_compose_reply_button_big");
     await page.waitForSelector("#private_message_recipient", {visible: true});
 
@@ -122,7 +123,7 @@ async function test_previously_created_drafts_rendered(page: Page): Promise<void
     assert.strictEqual(
         await common.get_text_from_selector(
             page,
-            "#drafts_table .overlay-message-row:nth-last-child(2) .rendered_markdown.restore-overlay-message",
+            "#drafts_table .overlay-message-row .private-message .rendered_markdown.restore-overlay-message",
         ),
         "Test direct message.",
     );
@@ -131,12 +132,12 @@ async function test_previously_created_drafts_rendered(page: Page): Promise<void
             page,
             "#drafts_table .overlay-message-row .message_header_private_message .stream_label",
         ),
-        "You and King Hamlet, Cordelia, Lear's daughter",
+        "You and Cordelia, Lear's daughter, King Hamlet",
     );
     assert.strictEqual(
         await common.get_text_from_selector(
             page,
-            "#drafts_table .overlay-message-row:last-child .rendered_markdown.restore-overlay-message",
+            "#drafts_table .overlay-message-row .message_row:not(.private-message) .rendered_markdown.restore-overlay-message",
         ),
         "Test stream message.",
     );
@@ -212,10 +213,10 @@ async function test_restore_private_message_draft_via_draft_overlay(page: Page):
         page,
         common.fullname.hamlet,
     );
-    await common.pm_recipient.expect(page, `${hamlet_internal_email},${cordelia_internal_email}`);
+    await common.pm_recipient.expect(page, `${cordelia_internal_email},${hamlet_internal_email}`);
     assert.strictEqual(
         await common.get_text_from_selector(page, "title"),
-        "Cordelia, Lear's daughter, King Hamlet - Zulip Dev - Zulip",
+        "Cordelia, Lear's daughter and King Hamlet - Zulip Dev - Zulip",
         "Didn't narrow to the direct messages with cordelia and hamlet",
     );
     await page.click("#compose_close");
@@ -290,9 +291,11 @@ async function test_delete_draft_on_clearing_text(page: Page): Promise<void> {
 async function drafts_test(page: Page): Promise<void> {
     await common.log_in(page);
     await page.click("#left-sidebar-navigation-list .top_left_all_messages");
-    await page.waitForSelector(".message-list .message_row", {visible: true});
-    // Assert that there is only one message list.
-    assert.equal((await page.$$(".message-list")).length, 1);
+    const message_list_id = await common.get_current_msg_list_id(page, true);
+    await page.waitForSelector(
+        `.message-list[data-message-list-id='${message_list_id}'] .message_row`,
+        {visible: true},
+    );
 
     await test_empty_drafts(page);
 
@@ -304,7 +307,6 @@ async function drafts_test(page: Page): Promise<void> {
     await common.send_message(page, "private", {
         recipient: "cordelia@zulip.com, hamlet@zulip.com",
         content: "howdy doo",
-        outside_view: true,
     });
     await create_private_message_draft(page);
     // Close and try restoring it by opening the composebox again.
@@ -324,4 +326,4 @@ async function drafts_test(page: Page): Promise<void> {
     await test_delete_draft_on_clearing_text(page);
 }
 
-common.run_test(drafts_test);
+await common.run_test(drafts_test);

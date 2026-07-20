@@ -4,18 +4,18 @@ You can choose from several convenient options for hosting Zulip:
 
 - Follow these instructions to **install a self-hosted Zulip server on a system
   of your choice**.
+- Use Zulip's [Docker image](docker.md)
 - Use a preconfigured
   [DigitalOcean droplet](https://marketplace.digitalocean.com/apps/zulip?refcode=3ee45da8ee26)
-- Use Zulip's [experimental Docker image](deployment.md#zulip-in-docker).
 - Use [Zulip Cloud](https://zulip.com/plans/) hosting. Read our [guide to choosing between Zulip Cloud and
-  self-hosting](https://zulip.com/help/getting-your-organization-started-with-zulip#choosing-between-zulip-cloud-and-self-hosting).
+  self-hosting](https://zulip.com/help/zulip-cloud-or-self-hosting).
 
 To **import data** from [Slack][slack-import], [Mattermost][mattermost-import], [Rocket.Chat][rocketchat-import], [Zulip Cloud][zulip-cloud-import], or [another Zulip
 server][zulip-server-import], follow the linked instructions.
 
 You can **try out Zulip** before setting up your own server by [checking
-it out](https://zulip.com/try-zulip/) in the Zulip development community, or
-[creating a free test organization](https://zulip.com/new/) on Zulip Cloud.
+it out](https://chat.zulip.org/?show_try_zulip_modal) in the Zulip development community,
+or [creating a free test organization](https://zulip.com/new/) on Zulip Cloud.
 
 :::{note}
 These instructions are for self-hosting Zulip. To
@@ -56,16 +56,34 @@ tarballs](https://download.zulip.com/server/SHA256SUMS.txt).
 
 ## Step 2: Install Zulip
 
-To set up Zulip with the most common configuration, run the installer as
-follows:
+To set up Zulip with the most common configuration, first become the
+`root` user, if you are not already:
 
 ```bash
-sudo -s  # If not already root
-./zulip-server-*/scripts/setup/install --certbot \
+[ "$(whoami)" != "root" ] && sudo -s
+```
+
+Then, run the installer, providing your email address and the public
+hostname that users will be able to access your server with:
+
+```bash
+./zulip-server-*/scripts/setup/install --push-notifications --certbot \
     --email=YOUR_EMAIL --hostname=YOUR_HOSTNAME
 ```
 
-This takes a few minutes to run, as it installs Zulip's dependencies. It is
+This command will immediately prompt you to agree to Zulip's [Terms of
+Service][terms], so that your server can be registered for the [Mobile Push
+Notification Service](mobile-push-notifications.md). To skip registering for
+access to push notifications at this time, remove the `--push-notifications`
+flag.
+
+:::{note}
+When registering for push notifications, you can configure whether your server
+will submit aggregate usage statistics. See `--no-submit-usage-statistics`
+[installer option](#installer-options) for details.
+:::
+
+The installer takes a few minutes to run, as it installs Zulip's dependencies. It is
 designed to be idempotent: if the script fails, once you've corrected the cause
 of the failure, you can just rerun the script. For more information, see
 [installer details](deployment.md#zulip-installer-details) and
@@ -73,11 +91,14 @@ of the failure, you can just rerun the script. For more information, see
 
 #### Installer options
 
-- `--email=it-team@example.com`: The email address for the **person or team who
-  maintains the Zulip installation**. Zulip users on your server will see this
-  as the contact email in automated emails, on help pages, on error pages, etc.
-  You can later configure a display name for your contact email with the
-  `ZULIP_ADMINISTRATOR` [setting][doc-settings].
+- `--email=it-team@example.com`: A **real email address for the person
+  or team who maintains the Zulip installation**. Zulip users on your
+  server will see this as the contact email in automated emails, on
+  help pages, on error pages, etc. If you use the [Mobile Push
+  Notification Service](mobile-push-notifications.md), this is used as
+  a point of contact. You can later configure a display name for your
+  contact email with the `ZULIP_ADMINISTRATOR`
+  [setting][doc-settings].
 
 - `--hostname=zulip.example.com`: The user-accessible domain name for this Zulip
   server, i.e., what users will type in their web browser. This becomes
@@ -89,9 +110,34 @@ of the failure, you can just rerun the script. For more information, see
   SSL certificate another way, it's easy to [provide it to
   Zulip][doc-ssl-manual].
 
+- `--push-notifications`/`--no-push-notifications`: With this option, the Zulip
+  installer registers your server for the [Mobile Push Notification
+  Service](mobile-push-notifications.md), and sets up the initial default
+  configuration. You will be immediately prompted to agree to the [Terms of
+  Service][terms], and your server will be registered at the end of the
+  installation process. You can learn more [about the
+  service](mobile-push-notifications.md) and why it's [necessary for push
+  notifications](mobile-push-notifications.md#why-a-push-notification-service-is-necessary).
+
+- `--no-submit-usage-statistics`: If you enable push notifications, by default
+  your server will submit [basic
+  metadata](mobile-push-notifications.md#uploading-basic-metadata) (required for
+  billing and for determining free plan eligibility), as well as [aggregate
+  usage statistics](mobile-push-notifications.md#uploading-usage-statistics).
+  You can disable submitting usage statistics by passing this flag. If push
+  notifications are not enabled, no data will be submitted, so this flag is
+  redundant.
+
+- `--agree-to-terms-of-service`: If you're using the `--push-notifications` flag,
+  you can pass this additional flag to indicate that you have read and agree to
+  the [Terms of Service][terms].
+  This skips the Terms of Service prompt, allowing for running the installer
+  with `--push-notifications` in scripts without requiring user input.
+
 - `--self-signed-cert`: With this option, the Zulip installer
   generates a self-signed SSL certificate for the server. This isn't
-  suitable for production use, but may be convenient for testing.
+  suitable for production use (unless your server is [behind a reverse
+  proxy][reverse-proxy]), but may be convenient for testing.
 
 For advanced installer options, see our [deployment options][doc-deployment-options]
 documentation.
@@ -109,6 +155,7 @@ If you are importing data, stop here and return to the import instructions for
 [doc-ssl-manual]: ssl-certificates.md#manual-install
 [doc-deployment-options]: deployment.md#advanced-installer-options
 [zulip-backups]: export-and-import.md#backups
+[reverse-proxy]: reverse-proxies.md
 [slack-import]: https://zulip.com/help/import-from-slack
 [mattermost-import]: https://zulip.com/help/import-from-mattermost
 [rocketchat-import]: https://zulip.com/help/import-from-rocketchat
@@ -145,10 +192,12 @@ Learning more:
   server administrators. This extremely low-traffic list is for
   important announcements, including [new
   releases](../overview/release-lifecycle.md) and security issues.
-- Follow [Zulip on Twitter](https://twitter.com/zulip).
+- Follow us on [Mastodon](https://fosstodon.org/@zulip) or
+  [Bluesky](https://bsky.app/profile/zulip.bsky.social).
 - Learn how to [configure your Zulip server settings](settings.md).
 - Learn about [Backups, export and import](export-and-import.md)
   and [upgrading](upgrade.md) a production Zulip
   server.
 
-[realm-admin-docs]: https://zulip.com/help/getting-your-organization-started-with-zulip
+[realm-admin-docs]: https://zulip.com/help/moving-to-zulip
+[terms]: https://zulip.com/policies/terms

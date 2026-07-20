@@ -9,10 +9,10 @@ import $ from "jquery";
 
 import render_login_to_access_modal from "../templates/login_to_access.hbs";
 
-import {page_params} from "./base_page_params";
-import * as browser_history from "./browser_history";
-import * as modals from "./modals";
-import {realm} from "./state_data";
+import {page_params} from "./base_page_params.ts";
+import * as browser_history from "./browser_history.ts";
+import * as modals from "./modals.ts";
+import {realm} from "./state_data.ts";
 
 export function current_hash_as_next(): string {
     return `next=/${encodeURIComponent(window.location.hash)}`;
@@ -26,7 +26,7 @@ export function build_login_link(): string {
     return login_link;
 }
 
-export function login_to_access(empty_narrow?: boolean): void {
+export let login_to_access = (empty_narrow?: boolean): void => {
     // Hide all overlays, popover and go back to the previous hash if the
     // hash has changed.
     const login_link = build_login_link();
@@ -49,4 +49,8 @@ export function login_to_access(empty_narrow?: boolean): void {
             browser_history.return_to_web_public_hash();
         },
     });
+};
+
+export function rewire_login_to_access(value: typeof login_to_access): void {
+    login_to_access = value;
 }

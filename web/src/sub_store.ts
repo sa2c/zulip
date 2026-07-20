@@ -1,15 +1,13 @@
-import type {z} from "zod";
+import * as z from "zod/mini";
 
-import * as blueslip from "./blueslip";
+import * as blueslip from "./blueslip.ts";
 import type {
     never_subscribed_stream_schema,
     stream_properties_schema,
     stream_schema,
     stream_specific_notification_settings_schema,
-    stream_subscription_schema,
-} from "./stream_types";
-
-type PartialBy<T, K extends keyof T> = Omit<T, K> & Partial<T>;
+} from "./stream_types.ts";
+import {api_stream_subscription_schema} from "./stream_types.ts";
 
 export type Stream = z.infer<typeof stream_schema>;
 export type StreamSpecificNotificationSettings = z.infer<
@@ -17,24 +15,26 @@ export type StreamSpecificNotificationSettings = z.infer<
 >;
 export type NeverSubscribedStream = z.infer<typeof never_subscribed_stream_schema>;
 export type StreamProperties = z.infer<typeof stream_properties_schema>;
-export type ApiStreamSubscription = z.infer<typeof stream_subscription_schema>;
-
-// These properties are added in `stream_data` when hydrating the streams and are not present in the data we get from the server.
-export type ExtraStreamAttrs = {
-    render_subscribers: boolean;
-    newly_subscribed: boolean;
-    subscribed: boolean;
-    previously_subscribed: boolean;
-};
+export type ApiStreamSubscription = z.infer<typeof api_stream_subscription_schema>;
 
 // This is the actual type of subscription objects we use in the app.
-export type StreamSubscription = PartialBy<
-    Omit<ApiStreamSubscription, "subscribers">,
-    "pin_to_top" | "email_address"
-> &
-    ExtraStreamAttrs;
+export const stream_subscription_schema = z.object({
+    ...z.omit(api_stream_subscription_schema, {
+        subscribers: true,
+        subscriber_count: true,
+    }).shape,
+    // These properties are added in `stream_data` when hydrating the streams and are not present in the data we get from the server.
+    newly_subscribed: z.boolean(),
+    subscribed: z.boolean(),
+    previously_subscribed: z.boolean(),
+});
+export type StreamSubscription = z.infer<typeof stream_subscription_schema>;
 
 const subs_by_stream_id = new Map<number, StreamSubscription>();
+
+export function stream_ids(): number[] {
+    return [...subs_by_stream_id.keys()];
+}
 
 export function get(stream_id: number): StreamSubscription | undefined {
     return subs_by_stream_id.get(stream_id);

@@ -14,14 +14,14 @@ from typing_extensions import override
 from zerver.actions.message_delete import do_delete_messages
 from zerver.lib.cache import cache_delete, cache_get, preview_url_cache_key
 from zerver.lib.camo import get_camo_url
-from zerver.lib.queue import queue_json_publish
+from zerver.lib.queue import queue_json_publish_rollback_unsafe
 from zerver.lib.test_classes import ZulipTestCase
 from zerver.lib.test_helpers import mock_queue_publish
 from zerver.lib.url_preview.oembed import get_oembed_data, strip_cdata
 from zerver.lib.url_preview.parsers import GenericParser, OpenGraphParser
 from zerver.lib.url_preview.preview import get_link_embed_data
 from zerver.lib.url_preview.types import UrlEmbedData, UrlOEmbedData
-from zerver.models import Message, Realm, UserProfile
+from zerver.models import Message, Realm, UserMessage, UserProfile
 from zerver.worker.embed_links import FetchLinksEmbedData
 
 
@@ -348,7 +348,7 @@ class PreviewTestCase(ZulipTestCase):
         url = "http://test.org/"
         self.create_mock_response(url)
 
-        with mock_queue_publish("zerver.actions.message_edit.queue_json_publish") as patched:
+        with mock_queue_publish("zerver.actions.message_edit.queue_event_on_commit") as patched:
             result = self.client_patch(
                 "/json/messages/" + str(msg_id),
                 {
@@ -377,7 +377,11 @@ class PreviewTestCase(ZulipTestCase):
     @responses.activate
     @override_settings(INLINE_URL_EMBED_PREVIEW=True)
     def _send_message_with_test_org_url(
-        self, sender: UserProfile, queue_should_run: bool = True, relative_url: bool = False
+        self,
+        sender: UserProfile,
+        queue_should_run: bool = True,
+        relative_url: bool = False,
+        other_content: str = "",
     ) -> Message:
         url = "http://test.org/"
         # Ensure the cache for this is empty
@@ -386,7 +390,7 @@ class PreviewTestCase(ZulipTestCase):
             msg_id = self.send_personal_message(
                 sender,
                 self.example_user("cordelia"),
-                content=url,
+                content=url + other_content,
             )
             if queue_should_run:
                 patched.assert_called_once()
@@ -434,7 +438,7 @@ class PreviewTestCase(ZulipTestCase):
             self.assertEqual(queue, "embed_links")
             event = patched.call_args[0][1]
 
-        def wrapped_queue_json_publish(*args: Any, **kwargs: Any) -> None:
+        def wrapped_queue_event_on_commit(*args: Any, **kwargs: Any) -> None:
             self.create_mock_response(original_url)
             self.create_mock_response(edited_url)
 
@@ -457,9 +461,9 @@ class PreviewTestCase(ZulipTestCase):
             self.assertTrue(responses.assert_call_count(edited_url, 0))
 
             with self.settings(TEST_SUITE=False), self.assertLogs(level="INFO") as info_logs:
-                # Now proceed with the original queue_json_publish and call the
-                # up-to-date event for edited_url.
-                queue_json_publish(*args, **kwargs)
+                # Now proceed with the original queue_json_publish_rollback_unsafe
+                # and call the up-to-date event for edited_url.
+                queue_json_publish_rollback_unsafe(*args, **kwargs)
                 msg = Message.objects.select_related("sender").get(id=msg_id)
                 assert msg.rendered_content is not None
                 self.assertIn(
@@ -472,7 +476,7 @@ class PreviewTestCase(ZulipTestCase):
             )
 
         with mock_queue_publish(
-            "zerver.actions.message_edit.queue_json_publish", wraps=wrapped_queue_json_publish
+            "zerver.actions.message_edit.queue_event_on_commit", wraps=wrapped_queue_event_on_commit
         ):
             result = self.client_patch(
                 "/json/messages/" + str(msg_id),
@@ -508,6 +512,144 @@ class PreviewTestCase(ZulipTestCase):
         self.assertTrue(
             "INFO:root:Time spent on get_link_embed_data for http://test.org/: "
             in info_logs.output[0]
+        )
+
+    def test_mentions_preserved(self) -> None:
+        # Updating the message with the preview content should be sure
+        # to preserve the mention data.
+        msg = self._send_message_with_test_org_url(
+            sender=self.example_user("hamlet"),
+            other_content=" @**Cordelia, Lear's daughter** mention",
+        )
+        self.assertEqual(
+            int(
+                UserMessage.objects.get(message=msg, user_profile=self.example_user("hamlet")).flags
+            ),
+            int(UserMessage.flags.read | UserMessage.flags.is_private),
+        )
+        self.assertEqual(
+            int(
+                UserMessage.objects.get(
+                    message=msg, user_profile=self.example_user("cordelia")
+                ).flags
+            ),
+            int(UserMessage.flags.mentioned | UserMessage.flags.is_private),
+        )
+
+        msg = self._send_message_with_test_org_url(
+            sender=self.example_user("hamlet"), other_content=" @*hamletcharacters* mention"
+        )
+        self.assertEqual(
+            int(
+                UserMessage.objects.get(message=msg, user_profile=self.example_user("hamlet")).flags
+            ),
+            int(
+                UserMessage.flags.mentioned | UserMessage.flags.read | UserMessage.flags.is_private
+            ),
+        )
+        self.assertEqual(
+            int(
+                UserMessage.objects.get(
+                    message=msg, user_profile=self.example_user("cordelia")
+                ).flags
+            ),
+            int(UserMessage.flags.mentioned | UserMessage.flags.is_private),
+        )
+
+    @responses.activate
+    @override_settings(INLINE_URL_EMBED_PREVIEW=True)
+    def test_topic_wildcard_mention_preserved(self) -> None:
+        url = "http://test.org/"
+        cache_delete(preview_url_cache_key(url))
+        hamlet = self.example_user("hamlet")
+        cordelia = self.example_user("cordelia")
+        self.subscribe(hamlet, "Denmark")
+        self.subscribe(cordelia, "Denmark")
+        with mock_queue_publish("zerver.actions.message_send.queue_event_on_commit") as patched:
+            msg_id = self.send_stream_message(
+                hamlet,
+                "Denmark",
+                topic_name="test",
+                content=url + " @**topic**",
+            )
+            patched.assert_called_once()
+            queue = patched.call_args[0][0]
+            self.assertEqual(queue, "embed_links")
+            event = patched.call_args[0][1]
+
+        # Hamlet sent the message, so he is a topic participant.
+        self.assertEqual(
+            int(UserMessage.objects.get(message_id=msg_id, user_profile=hamlet).flags),
+            int(UserMessage.flags.topic_wildcard_mentioned | UserMessage.flags.read),
+        )
+        # Cordelia is not a participant in the topic
+        self.assertEqual(
+            int(UserMessage.objects.get(message_id=msg_id, user_profile=cordelia).flags),
+            0,
+        )
+
+        self.create_mock_response(url)
+        with self.settings(TEST_SUITE=False), self.assertLogs(level="INFO") as info_logs:
+            FetchLinksEmbedData().consume(event)
+        self.assertTrue(
+            "INFO:root:Time spent on get_link_embed_data for http://test.org/: "
+            in info_logs.output[0]
+        )
+
+        # The topic wildcard mention flag must be preserved.
+        self.assertEqual(
+            int(UserMessage.objects.get(message_id=msg_id, user_profile=hamlet).flags),
+            int(UserMessage.flags.topic_wildcard_mentioned | UserMessage.flags.read),
+        )
+        self.assertEqual(
+            int(UserMessage.objects.get(message_id=msg_id, user_profile=cordelia).flags),
+            0,
+        )
+
+        # Test the topic wildcard mention flag is preserved when editing a message as well.
+        msg_id = self.send_stream_message(
+            cordelia, "Denmark", topic_name="test", content=" @**topic**"
+        )
+        # Both Hamlet and Cordelia are topic participants.
+        self.assertEqual(
+            int(UserMessage.objects.get(message_id=msg_id, user_profile=hamlet).flags),
+            int(UserMessage.flags.topic_wildcard_mentioned),
+        )
+        self.assertEqual(
+            int(UserMessage.objects.get(message_id=msg_id, user_profile=cordelia).flags),
+            int(UserMessage.flags.topic_wildcard_mentioned | UserMessage.flags.read),
+        )
+
+        self.login("cordelia")
+        with mock_queue_publish("zerver.actions.message_edit.queue_event_on_commit") as patched:
+            result = self.client_patch(
+                "/json/messages/" + str(msg_id),
+                {
+                    "content": url + " @**topic**",
+                },
+            )
+            self.assert_json_success(result)
+            patched.assert_called_once()
+            queue = patched.call_args[0][0]
+            self.assertEqual(queue, "embed_links")
+            event = patched.call_args[0][1]
+
+        self.create_mock_response(url)
+        with self.settings(TEST_SUITE=False), self.assertLogs(level="INFO") as info_logs:
+            FetchLinksEmbedData().consume(event)
+        self.assertTrue(
+            "INFO:root:Time spent on get_link_embed_data for http://test.org/: "
+            in info_logs.output[0]
+        )
+
+        # The topic wildcard mention flag must be preserved.
+        self.assertEqual(
+            int(UserMessage.objects.get(message_id=msg_id, user_profile=hamlet).flags),
+            int(UserMessage.flags.topic_wildcard_mentioned),
+        )
+        self.assertEqual(
+            int(UserMessage.objects.get(message_id=msg_id, user_profile=cordelia).flags),
+            int(UserMessage.flags.topic_wildcard_mentioned | UserMessage.flags.read),
         )
 
     def test_get_link_embed_data(self) -> None:
@@ -994,7 +1136,7 @@ class PreviewTestCase(ZulipTestCase):
             )
 
         msg.refresh_from_db()
-        expected_content = f"""<p><a href="https://www.youtube.com/watch?v=eSJTXC7Ixgg">YouTube - Clearer Code at Scale - Static Types at Zulip and Dropbox</a></p>\n<div class="youtube-video message_inline_image"><a data-id="eSJTXC7Ixgg" href="https://www.youtube.com/watch?v=eSJTXC7Ixgg"><img src="{get_camo_url("https://i.ytimg.com/vi/eSJTXC7Ixgg/default.jpg")}"></a></div>"""
+        expected_content = f"""<p><a href="https://www.youtube.com/watch?v=eSJTXC7Ixgg">YouTube - Clearer Code at Scale - Static Types at Zulip and Dropbox</a></p>\n<div class="youtube-video message_inline_image"><a data-id="eSJTXC7Ixgg" href="https://www.youtube.com/watch?v=eSJTXC7Ixgg"><img src="{get_camo_url("https://i.ytimg.com/vi/eSJTXC7Ixgg/mqdefault.jpg")}"></a></div>"""
         self.assertEqual(expected_content, msg.rendered_content)
 
     @responses.activate
@@ -1034,5 +1176,5 @@ class PreviewTestCase(ZulipTestCase):
             )
 
         msg.refresh_from_db()
-        expected_content = f"""<p><a href="https://www.youtube.com/watch?v=eSJTXC7Ixgg">YouTube link</a></p>\n<div class="youtube-video message_inline_image"><a data-id="eSJTXC7Ixgg" href="https://www.youtube.com/watch?v=eSJTXC7Ixgg"><img src="{get_camo_url("https://i.ytimg.com/vi/eSJTXC7Ixgg/default.jpg")}"></a></div>"""
+        expected_content = f"""<p><a href="https://www.youtube.com/watch?v=eSJTXC7Ixgg">YouTube link</a></p>\n<div class="youtube-video message_inline_image"><a data-id="eSJTXC7Ixgg" href="https://www.youtube.com/watch?v=eSJTXC7Ixgg"><img src="{get_camo_url("https://i.ytimg.com/vi/eSJTXC7Ixgg/mqdefault.jpg")}"></a></div>"""
         self.assertEqual(expected_content, msg.rendered_content)

@@ -52,8 +52,23 @@ rules:
     languages: [python]
     severity: ERROR
 
+  - id: use-wrapped-mimetypes
+    pattern-either:
+      - pattern: mimetypes.guess_type
+      - pattern: mimetypes.guess_file_type
+      - pattern: mimetypes.guess_all_extensions
+      - pattern: mimetypes.guess_extension
+    message: Use zerver.lib.mime_types (to ensure our EXTRA_MIME_TYPES are added)
+    languages: [python]
+    severity: ERROR
+    paths:
+      exclude:
+        - zerver/lib/mime_types.py
+
   - id: dont-import-models-in-migrations
     patterns:
+      - pattern-not: from zerver.lib.migrate import $X
+      - pattern-not: from zerver.lib.partial import partial
       - pattern-not: from zerver.lib.mime_types import $X
       - pattern-not: from zerver.lib.redis_utils import get_redis_client
       - pattern-not: from zerver.lib.utils import generate_api_key
@@ -72,6 +87,7 @@ rules:
       include:
         - "**/migrations"
       exclude:
+        - zerver/migrations/0001_squashed_0569.py
         - zerver/migrations/0032_verify_all_medium_avatar_images.py
         - zerver/migrations/0104_fix_unreads.py
         - zerver/migrations/0206_stream_rendered_description.py
@@ -93,6 +109,7 @@ rules:
       exclude:
         - analytics/migrations/0008_add_count_indexes.py
         - zerver/migrations/0001_initial.py
+        - zerver/migrations/0001_squashed_0569.py
         - zerver/migrations/0082_index_starred_user_messages.py
         - zerver/migrations/0083_index_mentioned_user_messages.py
         - zerver/migrations/0095_index_unread_user_messages.py
@@ -131,6 +148,9 @@ rules:
     pattern-either:
       - pattern: markupsafe.Markup(... .format(...))
       - pattern: markupsafe.Markup(f"...")
+      - pattern: markupsafe.Markup(f"..." "...")
+      - pattern: markupsafe.Markup("..." f"...")
+      - pattern: markupsafe.Markup("..." f"..." "...")
       - pattern: markupsafe.Markup(... + ...)
     severity: ERROR
     message: "Do not write an HTML injection vulnerability please"
@@ -138,17 +158,29 @@ rules:
   - id: sql-format
     languages: [python]
     pattern-either:
-      - pattern: ... .execute("...".format(...))
-      - pattern: ... .execute(f"...")
-      - pattern: ... .execute(... + ...)
+      - pattern: ... .execute("...".format(...), ...)
+      - pattern: ... .execute(f"...", ...)
+      - pattern: ... .execute(f"..." "...", ...)
+      - pattern: ... .execute("..." f"...", ...)
+      - pattern: ... .execute("..." f"..." "...", ...)
+      - pattern: ... .execute(... + ..., ...)
       - pattern: psycopg2.sql.SQL(... .format(...))
       - pattern: psycopg2.sql.SQL(f"...")
+      - pattern: psycopg2.sql.SQL(f"..." "...")
+      - pattern: psycopg2.sql.SQL("..." f"...")
+      - pattern: psycopg2.sql.SQL("..." f"..." "...")
       - pattern: psycopg2.sql.SQL(... + ...)
       - pattern: django.db.migrations.RunSQL(..., "..." .format(...), ...)
       - pattern: django.db.migrations.RunSQL(..., f"...", ...)
+      - pattern: django.db.migrations.RunSQL(..., f"..." "...", ...)
+      - pattern: django.db.migrations.RunSQL(..., "..." f"...", ...)
+      - pattern: django.db.migrations.RunSQL(..., "..." f"..." "...", ...)
       - pattern: django.db.migrations.RunSQL(..., ... + ..., ...)
       - pattern: django.db.migrations.RunSQL(..., [..., "..." .format(...), ...], ...)
       - pattern: django.db.migrations.RunSQL(..., [..., f"...", ...], ...)
+      - pattern: django.db.migrations.RunSQL(..., [..., f"..." "...", ...], ...)
+      - pattern: django.db.migrations.RunSQL(..., [..., "..." f"...", ...], ...)
+      - pattern: django.db.migrations.RunSQL(..., [..., "..." f"..." "...", ...], ...)
       - pattern: django.db.migrations.RunSQL(..., [..., ... + ..., ...], ...)
     severity: ERROR
     message: "Do not write a SQL injection vulnerability please"
@@ -175,24 +207,6 @@ rules:
           regex: (^|.*[^{])(\{\{)*\{[:!}].*
     severity: ERROR
     message: "Prefer {named} fields over positional {} in translated strings"
-
-  - id: mutable-default-type
-    languages: [python]
-    pattern-either:
-      - pattern: |
-          def $F(..., $A: typing.List[...] = zerver.lib.request.REQ(..., default=[...], ...), ...) -> ...:
-              ...
-      - pattern: |
-          def $F(..., $A: typing.Optional[typing.List[...]] = zerver.lib.request.REQ(..., default=[...], ...), ...) -> ...:
-              ...
-      - pattern: |
-          def $F(..., $A: typing.Dict[...] = zerver.lib.request.REQ(..., default={}, ...), ...) -> ...:
-              ...
-      - pattern: |
-          def $F(..., $A: typing.Optional[typing.Dict[...]] = zerver.lib.request.REQ(..., default={}, ...), ...) -> ...:
-              ...
-    severity: ERROR
-    message: "Guard mutable default with read-only type (Sequence, Mapping, AbstractSet)"
 
   - id: percent-formatting
     languages: [python]
@@ -226,7 +240,7 @@ rules:
     languages: [python]
     patterns:
       - pattern-either:
-          - pattern: Confirmation.objects.get(...)
+          - pattern: Confirmation.objects.get(..., confirmation_key=..., ...)
           - pattern: Confirmation.objects.filter(..., confirmation_key=..., ...)
       - pattern-not-inside: |
           def get_object_from_key(...):
@@ -265,6 +279,10 @@ rules:
       - pattern-not-inside: |
           @typed_endpoint
           def $F(..., *, ...)-> ...:
+            ...
+      - pattern-not-inside: |
+          @typed_endpoint
+          def $F(..., *args, ...)-> ...:
             ...
     message: |
       @typed_endpoint should not be used without keyword-only parameters.
@@ -361,3 +379,36 @@ rules:
       - pattern: urllib.parse.ParseResult
     severity: ERROR
     message: "Use urlsplit rather than urlparse"
+
+  - id: argparse-redundant-str
+    patterns:
+      - pattern: |
+          ....add_argument(..., type=str, ...)
+    message: |
+      The `type=str` argument is redundant in `argparse` because `str` is the default type.
+    fix-regex:
+      regex: ',\s*type=str'
+      replacement: ""
+    languages: [python]
+    severity: ERROR
+
+  - id: iterator-all
+    message: Use .iterator() when iterating over large sets once
+    pattern: |-
+      for $VAR in $THING.objects.all():
+          $BODY
+    fix: |-
+      for $VAR in $THING.objects.all().iterator():
+          $BODY
+    languages: [python]
+    severity: ERROR
+
+  - id: select-for-update-require-no-key
+    message: |
+      Call select_for_update() with an explicit no_key= (True/False) kwarg. We should be purposeful about which lock we need.
+      See https://zulip.readthedocs.io/en/latest/subsystems/database-concurrency.html#select-for-update for guidance.
+    patterns:
+      - pattern: $Q.select_for_update(...)
+      - pattern-not: $Q.select_for_update(..., no_key=..., ...)
+    languages: [python]
+    severity: ERROR

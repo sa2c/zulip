@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
-from urllib.parse import urlencode
 
 from django.conf import settings
 from django.db import connection
@@ -16,14 +15,9 @@ from django.utils.timezone import now as timezone_now
 from markupsafe import Markup
 from psycopg2.sql import Composable
 
-from corporate.lib.stripe import (
-    RealmBillingSession,
-    RemoteRealmBillingSession,
-    RemoteServerBillingSession,
-)
-from corporate.models import CustomerPlan, LicenseLedger
+from corporate.models.licenses import LicenseLedger
+from corporate.models.plans import CustomerPlan
 from zerver.lib.pysa import mark_sanitized
-from zerver.lib.url_encoding import append_url_query_string
 from zerver.models import Realm
 from zilencer.models import (
     RemoteCustomerUserCount,
@@ -42,13 +36,20 @@ class RemoteActivityPlanData:
     rate: str
 
 
+@dataclass
+class ActivityHeaderEntry:
+    name: str
+    value: str | Markup
+
+
 def make_table(
     title: str,
     cols: Sequence[str],
     rows: Sequence[Any],
     *,
+    header: list[ActivityHeaderEntry] | None = None,
     totals: Any | None = None,
-    stats_link: Markup | None = None,
+    title_link: Markup | None = None,
     has_row_class: bool = False,
 ) -> str:
     if not has_row_class:
@@ -58,7 +59,9 @@ def make_table(
 
         rows = list(map(fix_row, rows))
 
-    data = dict(title=title, cols=cols, rows=rows, totals=totals, stats_link=stats_link)
+    data = dict(
+        title=title, cols=cols, rows=rows, header=header, totals=totals, title_link=title_link
+    )
 
     content = loader.render_to_string(
         "corporate/activity/activity_table.html",
@@ -94,7 +97,7 @@ def dictfetchall(cursor: CursorWrapper) -> list[dict[str, Any]]:
 
 def format_optional_datetime(date: datetime | None, display_none: bool = False) -> str:
     if date:
-        return date.strftime("%Y-%m-%d %H:%M")
+        return date.replace(tzinfo=None).isoformat(" ", "minutes")
     elif display_none:
         return "None"
     else:
@@ -102,7 +105,7 @@ def format_optional_datetime(date: datetime | None, display_none: bool = False) 
 
 
 def format_datetime_as_date(date: datetime) -> str:
-    return date.strftime("%Y-%m-%d")
+    return date.date().isoformat()
 
 
 def format_none_as_zero(value: int | None) -> int:
@@ -112,18 +115,20 @@ def format_none_as_zero(value: int | None) -> int:
         return 0
 
 
-def user_activity_link(email: str, user_profile_id: int) -> Markup:
+def user_activity_link(link_text: str, user_profile_id: int) -> Markup:
     from corporate.views.user_activity import get_user_activity
 
     url = reverse(get_user_activity, kwargs=dict(user_profile_id=user_profile_id))
-    return Markup('<a href="{url}">{email}</a>').format(url=url, email=email)
+    if link_text == "":
+        return Markup('<a href="{url}"><i class="fa fa-user-circle"></i></a>').format(url=url)
+    return Markup('<a href="{url}">{link_text}</a>').format(url=url, link_text=link_text)
 
 
 def realm_activity_link(realm_str: str) -> Markup:
     from corporate.views.realm_activity import get_realm_activity
 
     url = reverse(get_realm_activity, kwargs=dict(realm_str=realm_str))
-    return Markup('<a href="{url}">{realm_str}</a>').format(url=url, realm_str=realm_str)
+    return Markup('<a href="{url}"><i class="fa fa-table"></i></a>').format(url=url)
 
 
 def realm_stats_link(realm_str: str) -> Markup:
@@ -133,11 +138,14 @@ def realm_stats_link(realm_str: str) -> Markup:
     return Markup('<a href="{url}"><i class="fa fa-pie-chart"></i></a>').format(url=url)
 
 
-def realm_support_link(realm_str: str) -> Markup:
-    support_url = reverse("support")
-    query = urlencode({"q": realm_str})
-    url = append_url_query_string(support_url, query)
+def user_support_link(email: str) -> Markup:
+    url = reverse("support", query={"q": email})
     return Markup('<a href="{url}"><i class="fa fa-gear"></i></a>').format(url=url)
+
+
+def realm_support_link(realm_str: str) -> Markup:
+    url = reverse("support", query={"q": realm_str})
+    return Markup('<a href="{url}">{realm}</i></a>').format(url=url, realm=realm_str)
 
 
 def realm_url_link(realm_str: str) -> Markup:
@@ -154,13 +162,17 @@ def remote_installation_stats_link(server_id: int) -> Markup:
 
 
 def remote_installation_support_link(hostname: str) -> Markup:
-    support_url = reverse("remote_servers_support")
-    query = urlencode({"q": hostname})
-    url = append_url_query_string(support_url, query)
+    url = reverse("remote_servers_support", query={"q": hostname})
     return Markup('<a href="{url}"><i class="fa fa-gear"></i></a>').format(url=url)
 
 
-def get_plan_rate_percentage(discount: str | None) -> str:
+def get_plan_rate_percentage(discount: str | None, has_fixed_price: bool) -> str:
+    # We want to clearly note plans with a fixed price, and not show
+    # them as paying 100%, as they are usually a special, negotiated
+    # rate with the customer.
+    if has_fixed_price:
+        return "Fixed"
+
     # CustomerPlan.discount is a string field that stores the discount.
     if discount is None or discount == "0":
         return "100%"
@@ -180,6 +192,9 @@ def get_remote_activity_plan_data(
     remote_realm: RemoteRealm | None = None,
     remote_server: RemoteZulipServer | None = None,
 ) -> RemoteActivityPlanData:
+    from corporate.lib.stripe import RemoteRealmBillingSession, RemoteServerBillingSession
+
+    has_fixed_price = plan.fixed_price is not None
     if plan.tier == CustomerPlan.TIER_SELF_HOSTED_LEGACY or plan.status in (
         CustomerPlan.DOWNGRADE_AT_END_OF_FREE_TRIAL,
         CustomerPlan.DOWNGRADE_AT_END_OF_CYCLE,
@@ -193,13 +208,13 @@ def get_remote_activity_plan_data(
         renewal_cents = RemoteRealmBillingSession(
             remote_realm=remote_realm
         ).get_annual_recurring_revenue_for_support_data(plan, license_ledger)
-        current_rate = get_plan_rate_percentage(plan.discount)
+        current_rate = get_plan_rate_percentage(plan.discount, has_fixed_price)
     else:
         assert remote_server is not None
         renewal_cents = RemoteServerBillingSession(
             remote_server=remote_server
         ).get_annual_recurring_revenue_for_support_data(plan, license_ledger)
-        current_rate = get_plan_rate_percentage(plan.discount)
+        current_rate = get_plan_rate_percentage(plan.discount, has_fixed_price)
 
     return RemoteActivityPlanData(
         current_status=plan.get_plan_status_as_text(),
@@ -210,6 +225,8 @@ def get_remote_activity_plan_data(
 
 
 def get_estimated_arr_and_rate_by_realm() -> tuple[dict[str, int], dict[str, str]]:  # nocoverage
+    from corporate.lib.stripe import RealmBillingSession
+
     # NOTE: Customers without a plan might still have a discount attached to them which
     # are not included in `plan_rate`.
     annual_revenue = {}
@@ -232,13 +249,16 @@ def get_estimated_arr_and_rate_by_realm() -> tuple[dict[str, int], dict[str, str
 
     for plan in plans:
         assert plan.customer.realm is not None
-        latest_ledger_entry = plan.latest_ledger_entry[0]  # type: ignore[attr-defined] # attribute from prefetch_related query
+        latest_ledger_entry = plan.latest_ledger_entry[0]
         assert latest_ledger_entry is not None
         renewal_cents = RealmBillingSession(
             realm=plan.customer.realm
         ).get_annual_recurring_revenue_for_support_data(plan, latest_ledger_entry)
         annual_revenue[plan.customer.realm.string_id] = renewal_cents
-        plan_rate[plan.customer.realm.string_id] = get_plan_rate_percentage(plan.discount)
+        has_fixed_price = plan.fixed_price is not None
+        plan_rate[plan.customer.realm.string_id] = get_plan_rate_percentage(
+            plan.discount, has_fixed_price
+        )
     return annual_revenue, plan_rate
 
 
@@ -267,7 +287,7 @@ def get_plan_data_by_remote_server() -> dict[int, RemoteActivityPlanData]:  # no
         server_id = plan.customer.remote_server.id
         assert server_id is not None
 
-        latest_ledger_entry = plan.latest_ledger_entry[0]  # type: ignore[attr-defined] # attribute from prefetch_related query
+        latest_ledger_entry = plan.latest_ledger_entry[0]
         assert latest_ledger_entry is not None
 
         plan_data = get_remote_activity_plan_data(
@@ -317,7 +337,7 @@ def get_plan_data_by_remote_realm() -> dict[int, dict[int, RemoteActivityPlanDat
         server_id = plan.customer.remote_realm.server_id
         assert server_id is not None
 
-        latest_ledger_entry = plan.latest_ledger_entry[0]  # type: ignore[attr-defined] # attribute from prefetch_related query
+        latest_ledger_entry = plan.latest_ledger_entry[0]
         assert latest_ledger_entry is not None
 
         plan_data = get_remote_activity_plan_data(
@@ -351,13 +371,13 @@ def get_plan_data_by_remote_realm() -> dict[int, dict[int, RemoteActivityPlanDat
 
 
 def get_remote_realm_user_counts(
-    event_time: datetime = timezone_now(),
+    event_time: datetime | None = None,
 ) -> dict[int, RemoteCustomerUserCount]:  # nocoverage
     user_counts_by_realm: dict[int, RemoteCustomerUserCount] = {}
     for log in (
         RemoteRealmAuditLog.objects.filter(
             event_type__in=RemoteRealmAuditLog.SYNCED_BILLING_EVENTS,
-            event_time__lte=event_time,
+            event_time__lte=timezone_now() if event_time is None else event_time,
             remote_realm__isnull=False,
         )
         # Important: extra_data is empty for some pre-2020 audit logs
@@ -378,13 +398,13 @@ def get_remote_realm_user_counts(
 
 
 def get_remote_server_audit_logs(
-    event_time: datetime = timezone_now(),
+    event_time: datetime | None = None,
 ) -> dict[int, list[RemoteRealmAuditLog]]:
     logs_per_server: dict[int, list[RemoteRealmAuditLog]] = defaultdict(list)
     for log in (
         RemoteRealmAuditLog.objects.filter(
             event_type__in=RemoteRealmAuditLog.SYNCED_BILLING_EVENTS,
-            event_time__lte=event_time,
+            event_time__lte=timezone_now() if event_time is None else event_time,
         )
         # Important: extra_data is empty for some pre-2020 audit logs
         # prior to the introduction of realm_user_count_by_role

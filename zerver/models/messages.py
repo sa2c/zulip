@@ -1,6 +1,3 @@
-# https://github.com/typeddjango/django-stubs/issues/1698
-# mypy: disable-error-code="explicit-override"
-
 import time
 from datetime import timedelta
 from typing import Any
@@ -45,7 +42,7 @@ class AbstractMessage(models.Model):
         RESOLVE_TOPIC_NOTIFICATION = 2
 
     # IMPORTANT: message.type is not to be confused with the
-    # "recipient type" ("channel" or "direct"), which is is sometimes
+    # "recipient type" ("channel" or "direct"), which is sometimes
     # called message_type in the APIs, CountStats or some variable
     # names. We intend to rename those to recipient_type.
     #
@@ -60,6 +57,21 @@ class AbstractMessage(models.Model):
         # associated database migration, so we're making use of it.
         db_default=MessageType.NORMAL,
     )
+
+    # Direct messages do not have topics in the API. Originally, all
+    # DMs had a topic of "" in the database. When we started using ""
+    # as the topic for "general chat", this caused problems with the
+    # PostgreSQL query planner. Because a large portion of all
+    # messages are DMs, PostgreSQL could do very inefficient table
+    # scans to fetch messages in general chat, ignoring the topic
+    # index, because it assumed most messages were in general chat.
+    #
+    # To avoid that query planner statistics problem, we use an
+    # unprintable character, which isn't permitted in actual topics,
+    # as the topic for DMs in the database. The "BEL" character is an
+    # arbitrary choice, but feels suitable given DMs trigger a
+    # notification sound.
+    DM_TOPIC = "\x07"
 
     # The message's topic.
     #
@@ -100,12 +112,17 @@ class AbstractMessage(models.Model):
     has_image = models.BooleanField(default=False, db_index=True)
     # Whether the message contains a link.
     has_link = models.BooleanField(default=False, db_index=True)
+    # If the message is a channel message (as opposed to a DM or group-DM)
+    is_channel_message = models.BooleanField(default=True, db_index=True)
 
     class Meta:
         abstract = True
 
     @override
     def __str__(self) -> str:
+        if not self.is_channel_message:
+            return f"{self.recipient.label()} /  / {self.sender!r}"
+
         return f"{self.recipient.label()} / {self.subject} / {self.sender!r}"
 
 
@@ -114,6 +131,10 @@ class ArchiveTransaction(models.Model):
     # Marks if the data archived in this transaction has been restored:
     restored = models.BooleanField(default=False, db_index=True)
     restored_timestamp = models.DateTimeField(null=True, db_index=True)
+
+    # ArchiveTransaction objects are regularly deleted. This flag allows tagging
+    # an ArchiveTransaction as protected from such automated deletion.
+    protect_from_deletion = models.BooleanField(default=False, db_index=True)
 
     type = models.PositiveSmallIntegerField(db_index=True)
     # Valid types:
@@ -150,7 +171,7 @@ class Message(AbstractMessage):
     # A detail worth noting:
     # * "direct" was introduced in 2023 with the goal of
     #   deprecating the original "private" and becoming the
-    #   preferred way to indicate a personal or huddle
+    #   preferred way to indicate a personal or direct_message_group
     #   Recipient type via the API.
     API_RECIPIENT_TYPES = ["direct", "private", "stream", "channel"]
 
@@ -159,6 +180,10 @@ class Message(AbstractMessage):
     search_tsvector = SearchVectorField(null=True)
 
     DEFAULT_SELECT_RELATED = ["sender", "realm", "recipient", "sending_client"]
+
+    # Name to be used for the empty topic with clients that have not
+    # yet migrated to have the `empty_topic_name` client capability.
+    EMPTY_TOPIC_FALLBACK_NAME = "general chat"
 
     class Meta:
         indexes = [
@@ -193,7 +218,7 @@ class Message(AbstractMessage):
                 name="zerver_message_realm_sender_recipient",
             ),
             models.Index(
-                # For analytics queries
+                # For analytics and retention queries
                 "realm_id",
                 "date_sent",
                 name="zerver_message_realm_date_sent",
@@ -205,6 +230,7 @@ class Message(AbstractMessage):
                 Upper("subject"),
                 F("id").desc(nulls_last=True),
                 name="zerver_message_realm_upper_subject",
+                condition=Q(is_channel_message=True),
             ),
             models.Index(
                 # Most stream/topic searches are case-insensitive by
@@ -216,22 +242,33 @@ class Message(AbstractMessage):
                 Upper("subject"),
                 F("id").desc(nulls_last=True),
                 name="zerver_message_realm_recipient_upper_subject",
+                condition=Q(is_channel_message=True),
             ),
             models.Index(
-                # Used by already_sent_mirrored_message_id, and when
-                # determining recent topics (we post-process to merge
-                # and show the most recent case)
+                # Used when determining recent topics (we post-process
+                # to merge and show the most recent case)
                 "realm_id",
                 "recipient_id",
                 "subject",
                 F("id").desc(nulls_last=True),
                 name="zerver_message_realm_recipient_subject",
+                condition=Q(is_channel_message=True),
             ),
             models.Index(
                 # Only used by update_first_visible_message_id
                 "realm_id",
                 F("id").desc(nulls_last=True),
                 name="zerver_message_realm_id",
+            ),
+            models.Index(
+                # Potentially useful for migrations that rewrite
+                # message edit history. Originally added for
+                # 0680_rename_general_chat_to_empty_string_topic,
+                # though that migration was adjusted in a way that no
+                # longer uses this.
+                fields=["id"],
+                condition=Q(edit_history__isnull=False),
+                name="zerver_message_edit_history_id",
             ),
         ]
 
@@ -244,16 +281,6 @@ class Message(AbstractMessage):
 
     def set_topic_name(self, topic_name: str) -> None:
         self.subject = topic_name
-
-    def is_stream_message(self) -> bool:
-        """
-        Find out whether a message is a stream message by
-        looking up its recipient.type.  TODO: Make this
-        an easier operation by denormalizing the message
-        type onto Message, either explicitly (message.type)
-        or implicitly (message.stream_id is not None).
-        """
-        return self.recipient.type == Recipient.STREAM
 
     def get_realm(self) -> Realm:
         return self.realm
@@ -290,6 +317,7 @@ def get_context_for_message(message: Message) -> QuerySet[Message]:
         realm_id=message.realm_id,
         recipient_id=message.recipient_id,
         subject__iexact=message.subject,
+        is_channel_message=True,
         id__lt=message.id,
         date_sent__gt=message.date_sent - timedelta(minutes=15),
     ).order_by("-id")[:10]
@@ -401,9 +429,7 @@ class Reaction(AbstractReaction):
             "emoji_name",
             "emoji_code",
             "reaction_type",
-            "user_profile__email",
             "user_profile_id",
-            "user_profile__full_name",
         ]
         # The ordering is important here, as it makes it convenient
         # for clients to display reactions in order without
@@ -442,7 +468,15 @@ class ArchivedReaction(AbstractReaction):
 class AbstractUserMessage(models.Model):
     id = models.BigAutoField(primary_key=True)
 
-    user_profile = models.ForeignKey(UserProfile, on_delete=CASCADE)
+    # We disable the index on this, because we provide a unique index
+    # on (user_profile_id, message_id) whose prefix can always be used
+    # instead of this index, and which is always going to produce
+    # sorted message-id rows.  Sometimes PostgreSQL would choose this
+    # non-sorted index and then have to perform an extra sort and
+    # limit after getting _all_ of the user's rows, which is quite
+    # wasteful.
+    user_profile = models.ForeignKey(UserProfile, on_delete=CASCADE, db_index=False)
+
     # The order here is important!  It's the order of fields in the bitfield.
     ALL_FLAGS = [
         "read",
@@ -602,10 +636,26 @@ class UserMessage(AbstractUserMessage):
             models.Index(
                 "user_profile",
                 "message",
+                condition=(
+                    Q(flags__andnz=AbstractUserMessage.flags.is_private.mask)
+                    & Q(flags__andz=AbstractUserMessage.flags.read.mask)
+                ),
+                name="zerver_usermessage_is_private_unread_message_id",
+            ),
+            models.Index(
+                "user_profile",
+                "message",
                 condition=Q(
                     flags__andnz=AbstractUserMessage.flags.active_mobile_push_notification.mask
                 ),
                 name="zerver_usermessage_active_mobile_push_notification_id",
+            ),
+            models.Index(
+                "message",
+                condition=Q(
+                    flags__andnz=AbstractUserMessage.flags.active_mobile_push_notification.mask
+                ),
+                name="zerver_usermessage_message_active_mobile_push_notification_idx",
             ),
         ]
 
@@ -626,8 +676,14 @@ class UserMessage(AbstractUserMessage):
         simultaneous duplicate API requests to mark a certain set of
         messages as read).
 
+        Note: Since we don't expect these UserMessage rows to be deleted by the
+        caller, a FOR NO KEY UPDATE lock might be sufficient here. However, we
+        don't expect the stronger FOR UPDATE lock to cause any issues,
+        so for now, we still pass no_key=False, acquiring the stronger lock.
         """
-        return UserMessage.objects.select_for_update(of=("self",)).order_by("message_id")
+        return UserMessage.objects.select_for_update(of=("self",), no_key=False).order_by(
+            "message_id"
+        )
 
     @staticmethod
     def has_any_mentions(user_profile_id: int, message_id: int) -> bool:
@@ -668,6 +724,7 @@ class ArchivedUserMessage(AbstractUserMessage):
 class ImageAttachment(models.Model):
     realm = models.ForeignKey(Realm, on_delete=CASCADE)
     path_id = models.TextField(db_index=True, unique=True)
+    content_type = models.TextField(null=True)
 
     original_width_px = models.IntegerField()
     original_height_px = models.IntegerField()
@@ -768,16 +825,8 @@ class Attachment(AbstractAttachment):
             "name": self.file_name,
             "path_id": self.path_id,
             "size": self.size,
-            # convert to JavaScript-style UNIX timestamp so we can take
-            # advantage of client time zones.
-            "create_time": int(time.mktime(self.create_time.timetuple()) * 1000),
-            "messages": [
-                {
-                    "id": m.id,
-                    "date_sent": int(time.mktime(m.date_sent.timetuple()) * 1000),
-                }
-                for m in self.messages.all()
-            ],
+            "create_time": int(time.mktime(self.create_time.timetuple())),
+            "message_ids": [m.id for m in self.messages.all()],
         }
 
 

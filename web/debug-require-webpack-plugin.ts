@@ -2,17 +2,15 @@
 // debugging.  It also exposes the list of modules it knows about as the keys
 // of the require.ids object.
 
-import path from "path";
+import path from "node:path";
 
-import type {ResolveRequest} from "enhanced-resolve";
-import type {Chunk, Compiler, WebpackPluginInstance} from "webpack";
-import {NormalModule, Template} from "webpack";
+import webpack from "webpack";
 
-export default class DebugRequirePlugin implements WebpackPluginInstance {
-    apply(compiler: Compiler): void {
+export default class DebugRequirePlugin implements webpack.WebpackPluginInstance {
+    apply(compiler: webpack.Compiler): void {
         const resolved = new Map<string, Set<string>>();
         const nameSymbol = Symbol("DebugRequirePluginName");
-        type NamedRequest = ResolveRequest & {
+        type NamedRequest = {
             [nameSymbol]?: string | undefined;
         };
         let debugRequirePath: string | false = false;
@@ -39,21 +37,19 @@ export default class DebugRequirePlugin implements WebpackPluginInstance {
                     return undefined!;
                 });
 
-                resolver
-                    .getHook("beforeResolved")
-                    .tap("DebugRequirePlugin", (req: ResolveRequest) => {
-                        // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
-                        const name = (req as NamedRequest)[nameSymbol];
-                        if (name !== undefined && req.path !== false) {
-                            const names = resolved.get(req.path);
-                            if (names) {
-                                names.add(name);
-                            } else {
-                                resolved.set(req.path, new Set([name]));
-                            }
+                resolver.getHook("beforeResolved").tap("DebugRequirePlugin", (req) => {
+                    // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
+                    const name = (req as NamedRequest)[nameSymbol];
+                    if (name !== undefined && req.path !== false) {
+                        const names = resolved.get(req.path);
+                        if (names) {
+                            names.add(name);
+                        } else {
+                            resolved.set(req.path, new Set([name]));
                         }
-                        return undefined!;
-                    });
+                    }
+                    return undefined!;
+                });
             });
 
         compiler.hooks.beforeCompile.tapPromise(
@@ -63,8 +59,8 @@ export default class DebugRequirePlugin implements WebpackPluginInstance {
                 debugRequirePath = await new Promise((resolve) => {
                     resolver.resolve(
                         {},
-                        __dirname,
-                        "./debug-require",
+                        import.meta.dirname,
+                        "./debug-require.cjs",
                         {},
                         (err?: Error | null, result?: string | false) => {
                             resolve(err ? false : result!);
@@ -77,7 +73,7 @@ export default class DebugRequirePlugin implements WebpackPluginInstance {
         compiler.hooks.compilation.tap("DebugRequirePlugin", (compilation) => {
             compilation.mainTemplate.hooks.bootstrap.tap(
                 "DebugRequirePlugin",
-                (source: string, chunk: Chunk) => {
+                (source: string, chunk: webpack.Chunk) => {
                     if (compilation.chunkGraph === undefined) {
                         return source;
                     }
@@ -87,8 +83,11 @@ export default class DebugRequirePlugin implements WebpackPluginInstance {
                     compilation.chunkGraph.hasModuleInGraph(
                         chunk,
                         (m) => {
-                            if (m instanceof NormalModule) {
+                            if (m instanceof webpack.NormalModule) {
                                 const id = compilation.chunkGraph.getModuleId(m);
+                                if (id === null) {
+                                    return false;
+                                }
                                 if (m.resource === debugRequirePath) {
                                     hasDebugRequire = true;
                                 }
@@ -110,7 +109,7 @@ export default class DebugRequirePlugin implements WebpackPluginInstance {
                     }
 
                     ids.sort();
-                    return Template.asString([
+                    return webpack.Template.asString([
                         source,
                         `__webpack_require__.debugRequireIds = ${JSON.stringify(
                             Object.fromEntries(ids),

@@ -4,12 +4,8 @@ from zerver.lib.test_classes import WebhookTestCase
 
 
 class SlackIncomingHookTests(WebhookTestCase):
-    CHANNEL_NAME = "slack_incoming"
-    URL_TEMPLATE = "/api/v1/external/slack_incoming?&api_key={api_key}&stream={stream}"
-    WEBHOOK_DIR_NAME = "slack_incoming"
-
     def test_message(self) -> None:
-        expected_topic_name = "(no topic)"
+        expected_topic_name = ""
         expected_message = """
 Hello, world.
 """.strip()
@@ -28,7 +24,7 @@ Hello, world.
             ("*foo*a*bar*", "*foo*a*bar*"),
             ("some _foo_ word", "some *foo* word"),
         ]
-        self.subscribe(self.test_user, self.CHANNEL_NAME)
+        self.subscribe(self.test_user, self.channel_name)
         for input_value, output_value in tests:
             payload = {"text": input_value}
             msg = self.send_webhook_payload(
@@ -39,8 +35,8 @@ Hello, world.
             )
             self.assert_channel_message(
                 message=msg,
-                channel_name=self.CHANNEL_NAME,
-                topic_name="(no topic)",
+                channel_name=self.channel_name,
+                topic_name="",
                 content=output_value,
             )
 
@@ -66,7 +62,8 @@ Hello, world.
     def test_message_without_payload(self) -> None:
         self.url = self.build_webhook_url()
         result = self.client_post(self.url)
-        self.assert_json_error(result, "Missing 'payload' argument")
+        self.assertEqual(result.json()["error"], "Missing 'payload' argument")
+        self.assertEqual(result.json()["ok"], False)
 
     def test_message_with_actions(self) -> None:
         expected_topic_name = "C1H9RESGL"
@@ -88,7 +85,7 @@ Danny Torrence left the following *review* for your property:
         )
 
     def test_message_with_blocks(self) -> None:
-        expected_topic_name = "(no topic)"
+        expected_topic_name = ""
         expected_message = """
 Danny Torrence left the following review for your property:
 
@@ -141,7 +138,7 @@ Danny Torrence left the following review for your property:
         # Paste the JSON into
         # https://api.slack.com/tools/block-kit-builder to see how it
         # is rendered in Slack
-        expected_topic_name = "(no topic)"
+        expected_topic_name = ""
         expected_message = """
 ## Hello from TaskBot
 
@@ -176,7 +173,7 @@ There are two ways to quickly create tasks:
     def test_attachment_blocks(self) -> None:
         # On https://api.slack.com/tools/block-kit-builder choose
         # "Attachment preview" and paste the JSON in.
-        expected_topic_name = "(no topic)"
+        expected_topic_name = ""
         expected_message = """
 This is a section block with an accessory image.
 
@@ -198,7 +195,7 @@ This is a section block with a button.
         )
 
     def test_attachment_fields(self) -> None:
-        expected_topic_name = "(no topic)"
+        expected_topic_name = ""
         expected_message = """
 Build bla bla succeeded
 
@@ -218,13 +215,13 @@ Value without title
         )
 
     def test_attachment_pieces(self) -> None:
-        expected_topic_name = "(no topic)"
+        expected_topic_name = ""
         expected_message = """
 ## Test
 
 [](https://pbs.twimg.com/profile_images/625633822235693056/lNGUneLX_400x400.jpg)
 
-<time:1655945306>
+<time:2022-06-23T00:48:26+00:00>
         """.strip()
 
         self.check_webhook(
@@ -242,7 +239,7 @@ Value without title
         return self.webhook_fixture_data("slack_incoming", fixture_name, file_type=file_type)
 
     def test_attachment_pieces_title_null(self) -> None:
-        expected_topic_name = "(no topic)"
+        expected_topic_name = ""
         expected_message = """
 Sample pretext.
 
@@ -252,7 +249,7 @@ Sample text.
 
 Sample footer.
 
-<time:1655945306>
+<time:2022-06-23T00:48:26+00:00>
         """.strip()
 
         self.check_webhook(
@@ -262,7 +259,7 @@ Sample footer.
         )
 
     def test_attachment_pieces_image_url_null(self) -> None:
-        expected_topic_name = "(no topic)"
+        expected_topic_name = ""
         expected_message = """
 ## [Sample title.](https://www.google.com)
 
@@ -272,7 +269,7 @@ Sample text.
 
 Sample footer.
 
-<time:1655945306>
+<time:2022-06-23T00:48:26+00:00>
         """.strip()
 
         self.check_webhook(
@@ -282,7 +279,7 @@ Sample footer.
         )
 
     def test_attachment_pieces_ts_null(self) -> None:
-        expected_topic_name = "(no topic)"
+        expected_topic_name = ""
         expected_message = """
 ## [Sample title.](https://www.google.com)
 
@@ -302,7 +299,7 @@ Sample footer.
         )
 
     def test_attachment_pieces_text_null(self) -> None:
-        expected_topic_name = "(no topic)"
+        expected_topic_name = ""
         expected_message = """
 ## [Sample title.](https://www.google.com)
 
@@ -312,7 +309,7 @@ Sample pretext.
 
 Sample footer.
 
-<time:1655945306>
+<time:2022-06-23T00:48:26+00:00>
         """.strip()
 
         self.check_webhook(
@@ -322,7 +319,7 @@ Sample footer.
         )
 
     def test_attachment_pieces_pretext_null(self) -> None:
-        expected_topic_name = "(no topic)"
+        expected_topic_name = ""
         expected_message = """
 ## [Sample title.](https://www.google.com)
 
@@ -332,7 +329,7 @@ Sample text.
 
 Sample footer.
 
-<time:1655945306>
+<time:2022-06-23T00:48:26+00:00>
         """.strip()
 
         self.check_webhook(
@@ -342,7 +339,7 @@ Sample footer.
         )
 
     def test_attachment_pieces_footer_null(self) -> None:
-        expected_topic_name = "(no topic)"
+        expected_topic_name = ""
         expected_message = """
 ## [Sample title.](https://www.google.com)
 
@@ -352,7 +349,7 @@ Sample text.
 
 [](https://pbs.twimg.com/profile_images/625633822235693056/lNGUneLX_400x400.jpg)
 
-<time:1655945306>
+<time:2022-06-23T00:48:26+00:00>
         """.strip()
 
         self.check_webhook(
@@ -362,7 +359,7 @@ Sample text.
         )
 
     def test_attachment_pieces_title_link_null(self) -> None:
-        expected_topic_name = "(no topic)"
+        expected_topic_name = ""
         expected_message = """
 ## Sample title.
 
@@ -374,7 +371,7 @@ Sample text.
 
 Sample footer.
 
-<time:1655945306>
+<time:2022-06-23T00:48:26+00:00>
         """.strip()
 
         self.check_webhook(
@@ -385,3 +382,6 @@ Sample footer.
 
     def test_attachment_pieces_all_null(self) -> None:
         self.check_webhook("attachment_pieces_all_null", expect_noop=True)
+
+    def test_broken_image(self) -> None:
+        self.check_webhook("broken_image", "", "Some image here")

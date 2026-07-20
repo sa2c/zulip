@@ -33,18 +33,20 @@ https://stackoverflow.com/questions/2090717
 """
 
 import glob
-import itertools
-import json
 import os
 import re
 import subprocess
 from collections.abc import Collection, Iterator, Mapping
 from typing import Any
 
+import orjson
 from django.core.management.base import CommandParser
 from django.core.management.commands import makemessages
+from django.template import engines
+from django.template.backends.jinja2 import Jinja2
 from django.template.base import BLOCK_TAG_END, BLOCK_TAG_START
 from django.utils.translation import template
+from jinja2.environment import Environment
 from typing_extensions import override
 
 strip_whitespace_right = re.compile(
@@ -52,6 +54,11 @@ strip_whitespace_right = re.compile(
 )
 strip_whitespace_left = re.compile(
     rf"\s+({BLOCK_TAG_START}-\s*(endtrans|pluralize).*?-?{BLOCK_TAG_END})"
+)
+trim_blocks = re.compile(rf"({BLOCK_TAG_START}[-+]?\s*(trans|pluralize)[^+]*?{BLOCK_TAG_END})\n")
+lstrip_blocks = re.compile(
+    rf"^[ \t]+({BLOCK_TAG_START}\s*(endtrans|pluralize).*?[-+]?{BLOCK_TAG_END})",
+    re.MULTILINE,
 )
 
 regexes = [
@@ -67,14 +74,32 @@ tags = [
 ]
 
 frontend_compiled_regexes = [re.compile(regex) for regex in regexes]
-multiline_js_comment = re.compile(r"/\*.*?\*/", re.DOTALL)
-singleline_js_comment = re.compile(r"//.*?\n")
 
 
-def strip_whitespaces(src: str) -> str:
-    src = strip_whitespace_left.sub("\\1", src)
-    src = strip_whitespace_right.sub("\\1", src)
+def strip_whitespaces(src: str, env: Environment) -> str:
+    src = strip_whitespace_left.sub(r"\1", src)
+    src = strip_whitespace_right.sub(r"\1", src)
+    if env.trim_blocks:
+        src = trim_blocks.sub(r"\1", src)
+    if env.lstrip_blocks:
+        src = lstrip_blocks.sub(r"\1", src)
     return src
+
+
+# this regex looks for {% trans %} blocks that don't have 'trimmed' or 'notrimmed' set.
+# capturing {% endtrans %} ensures this doesn't affect DTL {% trans %} tags.
+trans_block_re = re.compile(
+    rf"({BLOCK_TAG_START}[-+]?\s*trans)(?!\s+(?:no)?trimmed)"
+    rf"(.*?{BLOCK_TAG_END}.*?{BLOCK_TAG_START}[-+]?\s*?endtrans\s*?[-+]?{BLOCK_TAG_END})",
+    re.DOTALL,
+)
+
+
+def apply_i18n_trimmed_policy(src: str, env: Environment) -> str:
+    # if env.policies["ext.i18n.trimmed"]: insert 'trimmed' flag on jinja {% trans %} blocks.
+    if not env.policies.get("ext.i18n.trimmed", False):
+        return src
+    return trans_block_re.sub(r"\1 trimmed \2", src)
 
 
 class Command(makemessages.Command):
@@ -100,6 +125,7 @@ class Command(makemessages.Command):
             default="translations.json",
             help="Namespace of the frontend locale file",
         )
+        parser.set_defaults(add_location="file")
 
     @override
     def handle(self, *args: Any, **options: Any) -> None:
@@ -136,18 +162,24 @@ class Command(makemessages.Command):
         # Extend the regular expressions that are used to detect
         # translation blocks with an "OR jinja-syntax" clause.
         template.endblock_re = re.compile(
-            template.endblock_re.pattern + r"|" + r"""^-?\s*endtrans\s*-?$"""
+            template.endblock_re.pattern + "|" + r"""^[-+]?\s*endtrans\s*[-+]?$"""
         )
         template.block_re = re.compile(
-            template.block_re.pattern + r"|" + r"""^-?\s*trans(?:\s+(?!'|")(?=.*?=.*?)|\s*-?$)"""
+            template.block_re.pattern
+            + "|"
+            + r"""^[-+]?\s*trans(?:\s+(?:no)?trimmed)?(?:\s+(?!'|")(?=.*?=.*?)|\s*[-+]?$)"""
         )
         template.plural_re = re.compile(
-            template.plural_re.pattern + r"|" + r"""^-?\s*pluralize(?:\s+.+|-?$)"""
+            template.plural_re.pattern + "|" + r"""^[-+]?\s*pluralize(?:\s+.+|[-+]?$)"""
         )
-        template.constant_re = re.compile(r"""_\(((?:".*?")|(?:'.*?')).*\)""")
+        template.constant_re = re.compile(r""".*?_\(((?:".*?(?<!\\)")|(?:'.*?(?<!\\)')).*?\)""")
+
+        jinja_engine = engines["Jinja2"]
+        assert isinstance(jinja_engine, Jinja2)
 
         def my_templatize(src: str, *args: Any, **kwargs: Any) -> str:
-            new_src = strip_whitespaces(src)
+            new_src = strip_whitespaces(src, jinja_engine.env)
+            new_src = apply_i18n_trimmed_policy(new_src, jinja_engine.env)
             return old_templatize(new_src, *args, **kwargs)
 
         template.templatize = my_templatize
@@ -175,13 +207,6 @@ class Command(makemessages.Command):
 
         return translation_strings
 
-    def ignore_javascript_comments(self, data: str) -> str:
-        # Removes multi line comments.
-        data = multiline_js_comment.sub("", data)
-        # Removes single line (//) comments.
-        data = singleline_js_comment.sub("", data)
-        return data
-
     def get_translation_strings(self) -> list[str]:
         translation_strings: list[str] = []
         dirname = self.get_template_dir()
@@ -192,16 +217,6 @@ class Command(makemessages.Command):
                     continue
                 with open(os.path.join(dirpath, filename)) as reader:
                     data = reader.read()
-                    translation_strings.extend(self.extract_strings(data))
-        for dirpath, dirnames, filenames in itertools.chain(
-            os.walk("web/src"), os.walk("web/shared/src")
-        ):
-            for filename in [f for f in filenames if f.endswith((".js", ".ts"))]:
-                if filename.startswith("."):
-                    continue
-                with open(os.path.join(dirpath, filename)) as reader:
-                    data = reader.read()
-                    data = self.ignore_javascript_comments(data)
                     translation_strings.extend(self.extract_strings(data))
 
         extracted = subprocess.check_output(
@@ -215,7 +230,7 @@ class Command(makemessages.Command):
                 "web/src/**/*.ts",
             ]
         )
-        translation_strings.extend(json.loads(extracted).values())
+        translation_strings.extend(orjson.loads(extracted).values())
 
         return list(set(translation_strings))
 
@@ -276,11 +291,18 @@ class Command(makemessages.Command):
         for locale, output_path in zip(self.get_locales(), self.get_output_paths(), strict=False):
             self.stdout.write(f"[frontend] processing locale {locale}")
             try:
-                with open(output_path) as reader:
-                    old_strings = json.load(reader)
+                with open(output_path, "rb") as reader:
+                    old_strings = orjson.loads(reader.read())
             except (OSError, ValueError):
                 old_strings = {}
 
             new_strings = self.get_new_strings(old_strings, translation_strings, locale)
-            with open(output_path, "w") as writer:
-                json.dump(new_strings, writer, indent=2, sort_keys=True)
+            with open(output_path, "wb") as writer:
+                writer.write(
+                    orjson.dumps(
+                        new_strings,
+                        option=orjson.OPT_APPEND_NEWLINE
+                        | orjson.OPT_INDENT_2
+                        | orjson.OPT_SORT_KEYS,
+                    )
+                )

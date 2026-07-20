@@ -204,14 +204,20 @@ def get_schema(endpoint: str, method: str, status_code: str) -> dict[str, Any]:
         return schema
 
 
-def get_openapi_fixture(endpoint: str, method: str, status_code: str = "200") -> dict[str, Any]:
+def get_openapi_fixture(
+    endpoint: str, method: str, status_code: str = "200"
+) -> list[dict[str, Any]]:
     """Fetch a fixture from the full spec object."""
-    return get_schema(endpoint, method, status_code)["example"]
-
-
-def get_openapi_fixture_description(endpoint: str, method: str, status_code: str = "200") -> str:
-    """Fetch a fixture from the full spec object."""
-    return get_schema(endpoint, method, status_code)["description"]
+    if "example" not in get_schema(endpoint, method, status_code):
+        return openapi_spec.openapi()["paths"][endpoint][method.lower()]["responses"][status_code][
+            "content"
+        ]["application/json"]["examples"].values()
+    return [
+        {
+            "description": get_schema(endpoint, method, status_code)["description"],
+            "value": get_schema(endpoint, method, status_code)["example"],
+        }
+    ]
 
 
 def get_curl_include_exclude(endpoint: str, method: str) -> list[dict[str, Any]]:
@@ -231,6 +237,11 @@ def check_requires_administrator(endpoint: str, method: str) -> bool:
     return openapi_spec.openapi()["paths"][endpoint][method.lower()].get(
         "x-requires-administrator", False
     )
+
+
+def check_requires_owner(endpoint: str, method: str) -> bool:
+    """Fetch if the endpoint requires owner config."""
+    return openapi_spec.openapi()["paths"][endpoint][method.lower()].get("x-requires-owner", False)
 
 
 def check_additional_imports(endpoint: str, method: str) -> list[str] | None:
@@ -279,17 +290,15 @@ def generate_openapi_fixture(endpoint: str, method: str) -> list[str]:
             else:
                 subschema_status_code = status_code
             fixture_dict = get_openapi_fixture(endpoint, method, subschema_status_code)
-            fixture_description = get_openapi_fixture_description(
-                endpoint, method, subschema_status_code
-            ).strip()
-            fixture_json = json.dumps(
-                fixture_dict, indent=4, sort_keys=True, separators=(",", ": ")
-            )
-
-            fixture.extend(fixture_description.splitlines())
-            fixture.append("``` json")
-            fixture.extend(fixture_json.splitlines())
-            fixture.append("```")
+            for example in fixture_dict:
+                fixture_json = json.dumps(
+                    example["value"], indent=4, sort_keys=True, separators=(",", ": ")
+                )
+                if "description" in example:
+                    fixture.extend(example["description"].strip().splitlines())
+                fixture.append("``` json")
+                fixture.extend(fixture_json.splitlines())
+                fixture.append("```")
     return fixture
 
 
@@ -439,9 +448,9 @@ def validate_test_response(request: Request, response: Response) -> bool:
     """
 
     if request.path.startswith("/json/"):
-        path = request.path[len("/json") :]
+        path = request.path.removeprefix("/json")
     elif request.path.startswith("/api/v1/"):
-        path = request.path[len("/api/v1") :]
+        path = request.path.removeprefix("/api/v1")
     else:
         return False
     assert request.method is not None
@@ -466,7 +475,7 @@ def validate_test_response(request: Request, response: Response) -> bool:
         return True
     # Code is not declared but appears in various 400 responses. If
     # common, it can be added to 400 response schema
-    if status_code.startswith("4"):
+    if status_code.startswith("4") or status_code == "502":
         # This return statement should ideally be not here. But since
         # we have not defined 400 responses for various paths this has
         # been added as all 400 have the same schema.  When all 400
@@ -522,13 +531,13 @@ def deprecated_note_in_description(description: str) -> bool:
 def check_deprecated_consistency(deprecated: bool, description: str) -> None:
     # Test to make sure deprecated parameters are marked so.
     if deprecated_note_in_description(description):
-        assert (
-            deprecated
-        ), f"Missing `deprecated: true` despite being described as deprecated:\n\n{description}\n"
+        assert deprecated, (
+            f"Missing `deprecated: true` despite being described as deprecated:\n\n{description}\n"
+        )
     if deprecated:
-        assert deprecated_note_in_description(
-            description
-        ), f"Marked as `deprecated: true`, but changes documentation doesn't properly explain as **Deprecated** in the standard format\n\n:{description}\n"
+        assert deprecated_note_in_description(description), (
+            f"Marked as `deprecated: true`, but changes documentation doesn't properly explain as **Deprecated** in the standard format\n\n:{description}\n"
+        )
 
 
 # Skip those JSON endpoints whose query parameters are different from
@@ -567,14 +576,14 @@ def validate_test_request(
     assert request.method is not None
     method = request.method.lower()
     if request.path.startswith("/json/"):
-        url = request.path[len("/json") :]
+        url = request.path.removeprefix("/json")
         # Some JSON endpoints have different parameters compared to
         # their `/api/v1` counterparts.
         if (url, method) in SKIP_JSON:
             return
     else:
         assert request.path.startswith("/api/v1/")
-        url = request.path[len("/api/v1") :]
+        url = request.path.removeprefix("/api/v1")
 
     # TODO: Add support for file upload endpoints that lack the /json/
     # or /api/v1/ prefix.

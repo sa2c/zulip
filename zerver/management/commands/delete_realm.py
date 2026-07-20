@@ -3,6 +3,7 @@ from typing import Any
 
 from django.conf import settings
 from django.core.management.base import CommandError
+from django.db import transaction
 from typing_extensions import override
 
 from zerver.actions.realm_settings import do_delete_all_realm_attachments
@@ -37,7 +38,8 @@ realms used for testing; consider using deactivate_realm instead."""
             # Deleting a Realm object also deletes associating billing
             # metadata in an invariant-violating way, so we should
             # never use this tool for a realm with billing set up.
-            from corporate.models import CustomerPlan, get_customer_by_realm
+            from corporate.models.customers import get_customer_by_realm
+            from corporate.models.plans import CustomerPlan
 
             customer = get_customer_by_realm(realm)
             if customer and (
@@ -55,13 +57,14 @@ realms used for testing; consider using deactivate_realm instead."""
         if confirmation != realm.string_id:
             raise CommandError("Aborting!")
 
-        # Explicitly remove the attachments and their files in backend
-        # storage; failing to do this leaves dangling files
-        do_delete_all_realm_attachments(realm)
+        with transaction.atomic(durable=True):
+            # Explicitly remove the attachments and their files in backend
+            # storage; failing to do this leaves dangling files
+            do_delete_all_realm_attachments(realm)
 
-        # TODO: This approach leaks Recipient and DirectMessageGroup
-        # objects, because those don't have a foreign key to the Realm
-        # or any other model it cascades to (Realm/Stream/UserProfile/etc.).
-        realm.delete()
+            # TODO: This approach leaks Recipient and DirectMessageGroup
+            # objects, because those don't have a foreign key to the Realm
+            # or any other model it cascades to (Realm/Stream/UserProfile/etc.).
+            realm.delete()
 
         print("Realm has been successfully permanently deleted.")

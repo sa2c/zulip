@@ -1,8 +1,9 @@
 import _ from "lodash";
 
-import type {Message} from "./message_store";
-import * as people from "./people";
-import type {StateData} from "./state_data";
+import type {Message} from "./message_store.ts";
+import * as message_store from "./message_store.ts";
+import * as people from "./people.ts";
+import type {StateData} from "./state_data.ts";
 
 // For simplicity, we use a list for our internal
 // data, since that matches what the server sends us.
@@ -56,7 +57,7 @@ export function process_message(message: Message): void {
         const after_punctuation = "(?=\\s)|$|<|[\\)\\\"\\?!:.,';\\]!]";
 
         const regex = new RegExp(`(${before_punctuation})(${clean})(${after_punctuation})`, "ig");
-        message.content = message.content.replace(
+        const updated_content = message.content.replace(
             regex,
             (
                 match: string,
@@ -81,6 +82,7 @@ export function process_message(message: Message): void {
                 return before + "<span class='alert-word'>" + word + "</span>" + after;
             },
         );
+        message_store.update_message_content(message, updated_content);
     }
 }
 
@@ -89,7 +91,7 @@ export function notifies(message: Message): boolean {
     // alert words into a message, just because that can be annoying for
     // certain types of workflows where everybody on your team, including
     // yourself, sets up an alert word to effectively mention the team.
-    return !people.is_current_user(message.sender_email) && message.alerted;
+    return !people.is_my_user_id(message.sender_id) && message.alerted;
 }
 
 export const initialize = (params: StateData["alert_words"]): void => {

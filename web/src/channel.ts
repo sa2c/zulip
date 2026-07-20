@@ -1,13 +1,13 @@
 import * as Sentry from "@sentry/browser";
 import $ from "jquery";
 import _ from "lodash";
-import {z} from "zod";
+import * as z from "zod/mini";
 
-import {page_params} from "./base_page_params";
-import * as blueslip from "./blueslip";
-import * as reload_state from "./reload_state";
-import {normalize_path, shouldCreateSpanForRequest} from "./sentry";
-import * as spectators from "./spectators";
+import {page_params} from "./base_page_params.ts";
+import * as blueslip from "./blueslip.ts";
+import * as reload_state from "./reload_state.ts";
+import {normalize_path, shouldCreateSpanForRequest} from "./sentry.ts";
+import * as spectators from "./spectators.ts";
 
 // We omit `success` handler from original `AjaxSettings` type because it types
 // the `data` parameter as `any` type and we want to avoid that.
@@ -24,11 +24,7 @@ type AjaxRequestHandlerOptions = Omit<JQuery.AjaxSettings, "success"> & {
     error?: JQuery.Ajax.ErrorCallback<unknown>;
 };
 
-type PatchRequestData =
-    | {processData: false; data: FormData}
-    | {processData?: true | undefined; data: Record<string, unknown>};
-
-export type AjaxRequestHandler = typeof call | typeof patch;
+export type AjaxRequestHandler = typeof call;
 
 let password_change_in_progress = false;
 export let password_changes = 0;
@@ -48,28 +44,32 @@ function call(args: AjaxRequestHandlerOptions): JQuery.jqXHR<unknown> | undefine
         return undefined;
     }
 
-    const existing_span = Sentry.getCurrentHub().getScope().getSpan();
     const txn_title = `call ${args.type} ${normalize_path(args.url)}`;
     const span_data = {
         op: "function",
-        description: txn_title,
         data: {
             url: args.url,
             method: args.type,
         },
     };
-    let span: Sentry.Span | undefined;
+    /* istanbul ignore if */
     if (!shouldCreateSpanForRequest(args.url)) {
-        // Leave the span unset, so we don't record a transaction
-    } else {
-        if (!existing_span) {
-            span = Sentry.startTransaction({...span_data, name: txn_title});
-        } else {
-            /* istanbul ignore next */
-            span = existing_span.startChild(span_data);
-        }
+        return call_in_span(undefined, args);
     }
+    return Sentry.startSpanManual({...span_data, name: txn_title}, (span) => {
+        try {
+            return call_in_span(span, args);
+        } catch (error) /* istanbul ignore next */ {
+            span?.end();
+            throw error;
+        }
+    });
+}
 
+function call_in_span(
+    span: Sentry.Span | undefined,
+    args: AjaxRequestHandlerOptions,
+): JQuery.jqXHR<unknown> {
     // Remember the number of completed password changes when the
     // request was initiated. This allows us to detect race
     // situations where a password change occurred before we got a
@@ -84,9 +84,10 @@ function call(args: AjaxRequestHandlerOptions): JQuery.jqXHR<unknown> | undefine
             // Ignore errors by default
         });
     args.error = function wrapped_error(xhr, error_type, xhn) {
+        /* istanbul ignore if */
         if (span !== undefined) {
-            span.setHttpStatus(xhr.status);
-            span.finish();
+            Sentry.setHttpStatus(span, xhr.status);
+            span.end();
         }
         if (reload_state.is_in_progress()) {
             // If we're in the process of reloading the browser,
@@ -149,9 +150,10 @@ function call(args: AjaxRequestHandlerOptions): JQuery.jqXHR<unknown> | undefine
             // Do nothing by default
         });
     args.success = function wrapped_success(data, textStatus, jqXHR) {
+        /* istanbul ignore if */
         if (span !== undefined) {
-            span.setHttpStatus(jqXHR.status);
-            span.finish();
+            Sentry.setHttpStatus(span, jqXHR.status);
+            span.end();
         }
         if (reload_state.is_in_progress()) {
             // If we're in the process of reloading the browser,
@@ -165,15 +167,7 @@ function call(args: AjaxRequestHandlerOptions): JQuery.jqXHR<unknown> | undefine
         orig_success(data, textStatus, jqXHR);
     };
 
-    try {
-        const scope = Sentry.getCurrentHub().pushScope();
-        if (span !== undefined) {
-            scope.setSpan(span);
-        }
-        return $.ajax(args);
-    } finally {
-        Sentry.getCurrentHub().popScope();
-    }
+    return $.ajax(args);
 }
 
 export function get(options: AjaxRequestHandlerOptions): JQuery.jqXHR<unknown> | undefined {
@@ -197,19 +191,9 @@ export function del(options: AjaxRequestHandlerOptions): JQuery.jqXHR<unknown> |
     return call(args);
 }
 
-export function patch(
-    options: Omit<AjaxRequestHandlerOptions, "data"> & PatchRequestData,
-): JQuery.jqXHR<unknown> | undefined {
-    // Send a PATCH as a POST in order to work around QtWebkit
-    // (Linux/Windows desktop app) not supporting PATCH body.
-    if (options.processData === false) {
-        // If we're submitting a FormData object, we need to add the
-        // method this way
-        options.data.append("method", "PATCH");
-    } else {
-        options.data = {...options.data, method: "PATCH"};
-    }
-    return post(options);
+export function patch(options: AjaxRequestHandlerOptions): JQuery.jqXHR<unknown> | undefined {
+    const args = {type: "PATCH", dataType: "json", ...options};
+    return call(args);
 }
 
 export function xhr_error_message(message: string, xhr: JQuery.jqXHR<unknown>): string {

@@ -18,7 +18,7 @@ guide](https://zulip.com/development-community/#where-do-i-send-my-message)
 offers guidelines on how the major public channels in the community are used.
 Don’t stress too much about picking the right place if you’re not sure, as
 moderators can [move your question thread to a different
-channel](https://zulip.com/help/move-content-to-another-stream) if needed.
+channel](https://zulip.com/help/move-content-to-another-channel) if needed.
 
 ## How to ask a great question
 
@@ -42,9 +42,6 @@ In brief, to formulate a great question, you should:
 When your question is answered, follow through on the advice you receive, and (when
 appropriate) summarize the resolution of your problem so that others can learn
 from your experience.
-
-You can find additional helpful tips in our guide to [what makes a great Zulip
-contributor](contributing.md#what-makes-a-great-zulip-contributor).
 
 ## Follow the community guidelines
 

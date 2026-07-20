@@ -1,8 +1,9 @@
 import os
 
-ZULIP_VERSION = "9.0"
+ZULIP_VERSION = "12.1"
 
 # Add information on number of commits and commit hash to version, if available
+ZULIP_VERSION_WITHOUT_COMMIT = ZULIP_VERSION
 zulip_git_version_file = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "zulip-git-version"
 )
@@ -13,9 +14,9 @@ if os.path.exists(zulip_git_version_file):
 ZULIP_VERSION = lines.pop(0).strip()
 ZULIP_MERGE_BASE = lines.pop(0).strip()
 
-LATEST_MAJOR_VERSION = "9.0"
-LATEST_RELEASE_VERSION = "9.0"
-LATEST_RELEASE_ANNOUNCEMENT = "https://blog.zulip.com/2023/12/15/zulip-8-0-released/"
+LATEST_MAJOR_VERSION = "12.0"
+LATEST_RELEASE_VERSION = "12.1"
+LATEST_RELEASE_ANNOUNCEMENT = "https://blog.zulip.com/zulip-server-12-0"
 
 # Versions of the desktop app below DESKTOP_MINIMUM_VERSION will be
 # prevented from connecting to the Zulip server.  Versions above
@@ -24,18 +25,15 @@ LATEST_RELEASE_ANNOUNCEMENT = "https://blog.zulip.com/2023/12/15/zulip-8-0-relea
 DESKTOP_MINIMUM_VERSION = "5.4.3"
 DESKTOP_WARNING_VERSION = "5.9.3"
 
-# Bump the API_FEATURE_LEVEL whenever an API change is made
-# that clients might want to condition on.  If we forget at
-# the time we make the change, then bump it later as soon
-# as we notice; clients using API_FEATURE_LEVEL will just not
-# use the new feature/API until the bump.
-#
-# Changes should be accompanied by documentation explaining what the
-# new level means in api_docs/changelog.md, as well as "**Changes**"
-# entries in the endpoint's documentation in `zulip.yaml`.
+# API_FEATURE_LEVEL is bumped exclusively by tools/merge-api-changelogs, run by
+# maintainers when an API change is merged to the main branch. When writing an
+# API change, you run `tools/create-api-changelog`, which creates a special API
+# changelog file and unique random ID for you to use when documentating your API
+# change. For full process, see:
+# https://zulip.readthedocs.io/en/latest/documentation/api.html#step-by-step-guide
+# Also available at docs/documentation/api.md.
 
-API_FEATURE_LEVEL = 277  # Last bumped for Zulip 9.0
-
+API_FEATURE_LEVEL = 500
 
 # Bump the minor PROVISION_VERSION to indicate that folks should provision
 # only when going from an old version of the code to a newer version. Bump
@@ -50,4 +48,4 @@ API_FEATURE_LEVEL = 277  # Last bumped for Zulip 9.0
 #   historical commits sharing the same major version, in which case a
 #   minor version bump suffices.
 
-PROVISION_VERSION = (287, 0)  # bumped 2024-07-17 to rebuild emoji_names
+PROVISION_VERSION = (379, 0)  # bumped 2026-05-12 to upgrade Python requirements

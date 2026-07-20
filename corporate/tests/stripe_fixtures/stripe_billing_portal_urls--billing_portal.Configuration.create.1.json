@@ -12,7 +12,8 @@
     "customer_update": {
       "allowed_updates": [
         "address",
-        "name"
+        "name",
+        "email"
       ],
       "enabled": true
     },
@@ -20,7 +21,8 @@
       "enabled": false
     },
     "payment_method_update": {
-      "enabled": false
+      "enabled": false,
+      "payment_method_configuration": null
     },
     "subscription_cancel": {
       "cancellation_reason": {
@@ -43,10 +45,14 @@
     "subscription_update": {
       "default_allowed_updates": [],
       "enabled": false,
-      "proration_behavior": "none"
+      "proration_behavior": "none",
+      "schedule_at_period_end": {
+        "conditions": []
+      },
+      "trial_update_behavior": "end_trial"
     }
   },
-  "id": "bpc_1P41mnDEQaroqDjsdPjrKGWc",
+  "id": "stripe_billing_portal_urls--billing_portal.Configuration.create.1.json",
   "is_default": false,
   "livemode": false,
   "login_page": {
@@ -54,6 +60,7 @@
     "url": null
   },
   "metadata": {},
+  "name": null,
   "object": "billing_portal.configuration",
   "updated": 1000000000
 }

@@ -104,6 +104,7 @@ function lookup() {
 
 AWS_ZONE_ID=$(lookup zone_id)
 SECURITY_GROUPS=$(lookup security_groups)
+read -r -a SECURITY_GROUPS <<<"$SECURITY_GROUPS"
 INSTANCE_TYPE=$(lookup instance_type)
 IAM_PROFILE=$(lookup iam_profile)
 AZ=$(lookup availability_zone)
@@ -112,8 +113,8 @@ DISK_SIZE=$(lookup disk_size)
 # Determine the architecture
 ARCH=$($AWS ec2 describe-instance-types --instance-types "$INSTANCE_TYPE" --query 'InstanceTypes[*].ProcessorInfo.SupportedArchitectures[0]' --output text)
 
-# Lookup the latest 22.04 image
-AMI_ID=$($AWS ec2 describe-images --owners 099720109477 --filters 'Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-*-22.04*' "Name=architecture,Values=$ARCH" --query 'sort_by(Images, &CreationDate)[-1].ImageId' --output text)
+# Lookup the latest 24.04 image
+AMI_ID=$($AWS ec2 describe-images --owners 099720109477 --filters 'Name=name,Values=ubuntu/images/hvm-ssd-gp3/ubuntu-*-24.04*' "Name=architecture,Values=$ARCH" --query 'sort_by(Images, &CreationDate)[-1].ImageId' --output text)
 
 # Verify it doesn't exist already
 ZONE_NAME=$($AWS route53 get-hosted-zone --id "$AWS_ZONE_ID" | jq -r '.HostedZone.Name')
@@ -127,16 +128,24 @@ if [ "$EXISTING_RECORDS" != "0" ]; then
     exit 1
 fi
 
+DEVICES+=(
+    "DeviceName=/dev/sda1,Ebs={VolumeSize=$DISK_SIZE,VolumeType=gp3,Throughput=125,Iops=3000,Encrypted=true}"
+)
+if [[ "$ROLES" == *"frontend"* ]]; then
+    DEVICES+=(
+        "DeviceName=/dev/sdf,Ebs={VolumeSize=100,VolumeType=gp3,Throughput=125,Iops=3000,Encrypted=true,DeleteOnTermination=True}"
+    )
+fi
+
 # https://docs.aws.amazon.com/cli/latest/reference/ec2/run-instances.html
-# shellcheck disable=SC2206  # We intentionally split $SECURITY_GROUPS
 EXTRA_ARGS+=(
     --iam-instance-profile "Name=\"$IAM_PROFILE\""
     --image-id "$AMI_ID"
     --instance-type "$INSTANCE_TYPE"
-    --security-group-ids $SECURITY_GROUPS
+    --security-group-ids "${SECURITY_GROUPS[@]}"
     --monitoring Enabled=true
     --placement "AvailabilityZone=$AZ"
-    --block-device-mappings "DeviceName=/dev/sda1,Ebs={VolumeSize=$DISK_SIZE,VolumeType=gp3,Throughput=125,Iops=3000,Encrypted=true}"
+    --block-device-mappings "${DEVICES[@]}"
     --metadata-options "InstanceMetadataTags=enabled"
 )
 
@@ -174,8 +183,8 @@ INSTANCEID=$(echo "$INSTANCE_DATA" | jq -r .Instances[0].InstanceId)
 PUBLIC_DNS_NAME=""
 while [ -z "$PUBLIC_DNS_NAME" ]; do
     sleep 1
-    PUBLIC_DNS_NAME=$($AWS ec2 describe-instances --instance-ids "$INSTANCEID" \
-        | jq -r .Reservations[0].Instances[0].PublicDnsName)
+    INSTANCE_DATA=$($AWS ec2 describe-instances --instance-ids "$INSTANCEID")
+    PUBLIC_DNS_NAME=$(echo "$INSTANCE_DATA" | jq -r .Reservations[0].Instances[0].PublicDnsName)
 done
 
 # Add the hostname to the zone
@@ -199,8 +208,28 @@ EOF
 $AWS route53 change-resource-record-sets --hosted-zone-id "$AWS_ZONE_ID" --change-batch "file://$ROUTE53_CHANGES"
 rm "$ROUTE53_CHANGES"
 
+# Add the name to the root volume
+VOLUME_ID=$(
+    echo "$INSTANCE_DATA" | jq -r \
+        '.Reservations[0].Instances[0].BlockDeviceMappings[]
+         | select(.DeviceName == "/dev/sda1")
+         | .Ebs.VolumeId'
+)
+$AWS ec2 create-tags --resources "$VOLUME_ID" --tags "Key=Name,Value=$SERVER root"
+
+# Add volume name to tmp volume
+if [[ "$ROLES" == *"frontend"* ]]; then
+    VOLUME_ID=$(
+        echo "$INSTANCE_DATA" | jq -r \
+            '.Reservations[0].Instances[0].BlockDeviceMappings[]
+             | select(.DeviceName == "/dev/sdf")
+             | .Ebs.VolumeId'
+    )
+    $AWS ec2 create-tags --resources "$VOLUME_ID" --tags "Key=Name,Value=$SERVER tmp"
+fi
+
 set +x
 echo
 echo
 echo ">>> Install started successfully!  Provisioning takes 5-6min."
-echo "    sleep 360 && ssh root@$HOSTNAME"
+echo "    sleep 360 && tsh ssh root@$HOSTNAME"

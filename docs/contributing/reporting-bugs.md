@@ -22,9 +22,9 @@ what to include in a bug report.
 
 1. **Describe** what you were expecting to see, what you saw instead, and steps
    that may help others reproduce the surprising behavior you experienced.
-   Include screenshots and/or screen captures (see [recommended
-   tools](../tutorials/screenshot-and-gif-software.md)) if they help
-   communicate what you are describing, but avoid posting long videos.
+   Include screenshots and/or screen captures (see
+   [recommended tools](../contributing/presenting-visual-changes.md#screenshot-and-gif-software))
+   if they help communicate what you are describing, but avoid posting long videos.
 1. **Indicate the [version](https://zulip.com/help/view-zulip-version)** of the
    Zulip app where you encountered the bug. It may also be helpful to note your
    operating system, whether you are using the web app or the desktop app, and
@@ -55,7 +55,7 @@ Steps and best practices for filing a GitHub issue:
    - [zulip/zulip](https://github.com/zulip/zulip/issues) for issues with the
      Zulip web app or server. A good default if you aren't sure which repository
      to use.
-   - [zulip/zulip-mobile](https://github.com/zulip/zulip-mobile/issues) for
+   - [zulip/zulip-flutter](https://github.com/zulip/zulip-flutter/issues) for
      issues with the mobile apps.
    - [zulip/zulip-desktop](https://github.com/zulip/zulip-desktop/issues) for
      issues that are specific to the Zulip desktop app, and therefore _do not_
@@ -104,8 +104,9 @@ Steps and best practices for starting a conversation:
      help](https://chat.zulip.org/#narrow/channel/31-production-help) for issues
      related to self-hosting Zulip. See the [troubleshooting
      guide](../production/troubleshooting.md) for additional details.
-3. **[Start a new topic](https://zulip.com/help/starting-a-new-topic)** for
-   discussing your issue, using a brief summary of the issue as the name of the topic.
+3. **[Start a new topic](https://zulip.com/help/introduction-to-topics#how-to-start-a-new-topic)**
+   for discussing your issue, using a brief summary of the issue as the name of
+   the topic.
 
 If you aren't sure where to post or how to name your topic, don't worry!
 Moderators can always rename the topic, or move the thread to another channel.

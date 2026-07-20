@@ -32,7 +32,7 @@ def calculate_discounted_price(apps: StateApps, schema_editor: BaseDatabaseSchem
 
     Customer = apps.get_model("corporate", "Customer")
     customers_to_update = []
-    for customer in Customer.objects.all():
+    for customer in Customer.objects.all().iterator():
         if not customer.required_plan_tier or not customer.default_discount:
             continue
 
@@ -75,7 +75,7 @@ class Migration(migrations.Migration):
             field=models.IntegerField(default=0),
         ),
         # Populate the new discounted price fields based on existing default discount.
-        migrations.RunPython(calculate_discounted_price),
+        migrations.RunPython(calculate_discounted_price, elidable=True),
         migrations.RemoveField(
             model_name="customer",
             name="default_discount",

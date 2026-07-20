@@ -1,8 +1,3 @@
-/* The height of the settings header (including tab switcher). */
-$settings_header_height: 45px;
-/* The width of the settings sidebar. */
-$settings_sidebar_width: 255px;
-
 label {
     margin: 0;
 }
@@ -44,6 +39,7 @@ a.help_link_widget {
     &:hover {
         color: inherit;
         opacity: 1;
+        text-decoration: none;
     }
 }
 
@@ -51,67 +47,6 @@ h3,
 .settings-section-title {
     .help_link_widget {
         margin-left: 5px;
-    }
-}
-
-.new-style {
-    .block {
-        display: block;
-    }
-
-    .center-block {
-        margin: 0 auto;
-    }
-
-    .center {
-        text-align: center;
-    }
-
-    .w-200 {
-        width: 200px;
-    }
-
-    .grid {
-        & label {
-            min-width: 200px;
-        }
-
-        .warning {
-            display: inline-block;
-            vertical-align: top;
-            width: 150px;
-            padding: 5px 10px;
-            text-align: left;
-        }
-    }
-
-    #account-settings,
-    #profile-field-settings {
-        .grid {
-            & label {
-                min-width: 120px;
-            }
-
-            .warning {
-                display: block;
-                width: calc(100% - 20px - 5px);
-                text-align: right;
-            }
-        }
-    }
-
-    .warning {
-        #pw_strength {
-            width: 140px;
-            height: 8px;
-            margin: 6px 0 0;
-        }
-    }
-
-    .button {
-        & ul {
-            text-align: left;
-        }
     }
 }
 
@@ -153,21 +88,23 @@ h3,
 
 #change_password_modal,
 #change_email_modal {
-    max-width: 480px;
+    width: 34.2857em; /* 480px at 14px/em */
+    max-width: 90vw;
 }
 
-#change_email_modal {
-    #change_email_form {
-        margin: 0;
-    }
+#change-email-form-input-email {
+    max-width: 90%;
 }
 
 .disabled_setting_tooltip {
     cursor: not-allowed;
 }
 
-#account-settings .deactivate_realm_button {
-    margin-left: 10px;
+#account-settings .deactivate-buttons-group {
+    display: flex;
+    align-items: center;
+    gap: 0.5em;
+    flex-wrap: wrap;
 }
 
 #change_email_button,
@@ -185,21 +122,73 @@ h3,
     min-width: 0;
 }
 
-.admin-realm-description {
-    height: 16em;
-    width: 100%;
-    max-width: 500px;
+.change-email {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.admin-realm-description,
+.admin-realm-welcome-message-custom-text {
+    /* We set the minimum height of textarea to be enough for two lines
+    of text. Since box-sizing is set to "border-box", we also add
+    2 * var(--input-vertical-padding) + 2 * var(--input-border-width). */
+    min-height: calc(
+        2em * var(--base-line-height-unitless) + 2 *
+            var(--input-vertical-padding) + 2 * var(--input-border-width)
+    );
+    width: 500px;
+    max-width: 80%;
+    min-width: 500px;
     box-sizing: border-box;
+}
+
+.admin-realm-description.rendered_markdown {
+    width: fit-content;
+    /* 500px at 16px */
+    max-width: 31.25em;
+    min-width: 0;
+
+    & > p:first-child {
+        padding-top: 0;
+    }
+
+    & > p:last-child {
+        margin-bottom: 0;
+    }
+}
+/* Show yellow outline when organization description is empty,
+   matching the compose box "approaching limit" warning style. */
+.admin-realm-description.empty-description:not(:disabled) {
+    border-color: var(
+        --color-message-content-container-border-approaching-limit
+    );
+}
+
+.admin-realm-welcome-message-custom-text {
+    margin-bottom: 10px;
+}
+
+#welcome_message_custom_text_buttons_container {
+    display: inline-flex;
+    /* 5px at 16px em */
+    gap: 0.3125em;
+    align-items: center;
 }
 
 .setting_notification_sound,
 .play_notification_sound {
     margin-right: 4px;
+}
 
-    & i {
-        font-size: 22px;
-        /* Visually center with chevron in select */
-        line-height: 26px;
+.play_notification_sound {
+    .notification-sound-icon {
+        font-size: 1.5714em; /* 22px at 14px / em */
+        /* Visually center with chevron in select
+        by setting the line-height equal to the height
+        of select which is equal to - 1.4em + 8px (4px
+        each for top and bottom paddings) + 2px (1px each
+        for top and bottom borders). */
+        line-height: calc(1.4 * var(--base-font-size-px) + 10px);
         cursor: pointer;
     }
 }
@@ -215,8 +204,8 @@ h3,
 }
 
 .wrapped-table {
-    word-break: break-word;
-    word-wrap: break-word;
+    overflow-wrap: anywhere;
+    overflow-wrap: break-word;
     white-space: pre-wrap;
     white-space: normal;
 }
@@ -225,6 +214,10 @@ h3,
     & table + .progressive-table-wrapper table tr.user_row td:first-of-type {
         width: 20%;
     }
+
+    /* This variable allows JavaScript to detect whether we are showing both
+    the left sidebar and settings content for the current screen width or not. */
+    --column-count: 2;
 }
 
 #uploaded_files_table > tr > td:nth-of-type(1),
@@ -244,17 +237,8 @@ h3,
     }
 }
 
-#playground-settings {
-    #playground_pygments_language,
-    #playground_name,
-    #playground_url_template {
-        width: calc(100% - 10em - 6em);
-    }
-}
-
-td .button {
-    margin: 2px 0;
-    box-shadow: none;
+#playground-settings .new-playground-form input {
+    width: calc(100% - 10em - 6em);
 }
 
 #language_selection_modal {
@@ -297,7 +281,7 @@ td .button {
         }
     }
 
-    .table-sticky-headers th {
+    .table-sticky-headers {
         position: sticky;
         top: 0;
         z-index: 1;
@@ -311,32 +295,17 @@ td .button {
     }
 
     .loading_indicator_text {
-        font-size: 12px;
+        font-size: 0.8571em; /* 12px at 14px/em */
         font-weight: 400;
         vertical-align: middle;
-        line-height: 20px;
+        line-height: inherit;
         display: inline-block;
         float: none;
         margin-top: 9px;
     }
 
-    .loading_indicator_spinner {
-        width: 30%;
-        height: 20px;
-        margin-top: 7px;
-        vertical-align: middle;
-        display: inline-block;
-    }
-
     .inline {
         display: inline !important;
-    }
-
-    /* Messy implementation of buttons with text and a pencil icon in them
-       having spacing before the pencil icon. */
-    & button.btn-link i.fa-pencil,
-    button[data-dismiss="modal"] i.fa-pencil {
-        margin-left: 3px;
     }
 
     .hidden-email {
@@ -348,13 +317,23 @@ td .button {
     too light. So, we set the color explicitly to original color of label to
     keep the color of the icon same even when the setting is disabled. */
     #id_realm_enable_spectator_access_label a {
-        color: hsl(0deg 0% 20%);
+        color: var(--color-realm-enable-spectator-access-link);
     }
 
+    /* The height and width of this should match input fields in settings
+       menu. We try to keep the padding and height the same, and both without
+       border-box box-sizing.
+
+       These styles should be kept in sync with the styles for .settings_select
+       in subscriptions.css */
     .settings_select {
-        height: 30px;
-        min-width: 325px;
+        box-sizing: unset;
+        /* Subtract 1px border on each side and 25+6 padding */
+        width: calc(var(--modal-input-width) - 33px);
         max-width: 100%;
+        padding-top: 4px;
+        padding-bottom: 4px;
+        height: 1.4em; /* To match height of input elements */
     }
 
     .account-settings-heading {
@@ -362,19 +341,27 @@ td .button {
     }
 }
 
+/* Make this one less wide because it's indented, so that the right
+   edge lines up with other dropdown menus. Usual 33px plus 23px extra
+   margin. */
+#id_realm_jitsi_server_url {
+    width: calc(var(--modal-input-width) - 33px - 23px);
+}
+
 /* list_select is similar to settings_select, but without the height styling. */
 .settings_select,
 .list_select {
     padding: 0 25px 0 6px;
-    color: hsl(0deg 0% 33%);
+    color: var(--color-text-default);
     border-radius: 4px;
-    border: 1px solid hsl(0deg 0% 80%);
+    border: var(--input-border-width) solid var(--color-border-legacy-input);
     cursor: pointer;
-    background-color: hsl(0deg 0% 100%);
+    background-color: var(--color-background-legacy-input);
+    font-size: inherit;
 
     &:disabled {
         cursor: not-allowed;
-        background-color: hsl(0deg 0% 93%);
+        background-color: var(--color-background-disabled-settings-select);
 
         /* This is reset for other browsers to use Chrome's opacity. */
         opacity: 0.7;
@@ -389,14 +376,38 @@ select.settings_select {
     background-image: var(--icon-chevron-down);
     background-repeat: no-repeat;
     background-position: 98%;
-    background-size: 14px;
+    background-size: 1em;
+    font-family: inherit;
 }
 
 #admin-active-users-list,
-#admin-bot-list {
+#admin-bot-list,
+#personal-bot-list {
     .table tr:first-of-type td {
         border-top: none;
     }
+
+    .tab-switcher {
+        margin-left: 0;
+        margin-top: 1em;
+    }
+}
+
+#admin-bot-list .user-status-settings,
+#personal-bot-list .user-status-settings {
+    display: flex;
+    justify-content: flex-end;
+}
+
+.config-download-text {
+    margin-top: 10px;
+    display: flex;
+    align-items: center;
+}
+
+.bot-list-error {
+    margin-top: 10px;
+    margin-bottom: 10px;
 }
 
 .user_role,
@@ -406,21 +417,62 @@ select.settings_select {
     word-break: normal;
 }
 
-.button,
-.input-group {
-    margin: 0 0 20px;
+.export_url_spinner,
+.last_active {
+    .loading_indicator_spinner {
+        width: 1.25em;
+        height: auto;
+        display: flex;
+        align-items: center;
+        margin: 0;
+        margin-left: 0.5em; /* The spinner is left-justified with a slight left margin to look good. */
+    }
 }
 
 .input-group {
-    /* Class to use when the following input-group is related and should
-       appear just after this element. Normally the margin is 20px, but
-       for related settings, we set it to 10px. */
-    &.thinner {
-        margin-bottom: 10px;
-    }
+    margin: 0 0 1.25em; /* 20px at 16px/em */
 
     & label.checkbox + label {
         cursor: pointer;
+    }
+
+    .message_count {
+        margin: 10px 0 0;
+    }
+}
+
+.settings-checkbox-wrapper {
+    width: fit-content;
+}
+
+#bot-edit-form,
+#api-key-modal {
+    .api-key-details-container,
+    .zuliprc-container {
+        display: flex;
+        align-items: center;
+        gap: 0.25em;
+
+        .buttons-container {
+            display: flex;
+            align-items: center;
+        }
+    }
+
+    .modal_text_input {
+        margin-bottom: 0;
+    }
+}
+
+#zuliprc-section {
+    /* Normally all input-group elements have bottom margin of 1.25em.
+    But here the buttons have bottom padding of 0.375em and thus there is
+    already some extra space between this and the section below it, so we
+    reduce the bottom margin by 0.375em. */
+    margin-bottom: 0.875em;
+
+    .modal-field-label {
+        margin-bottom: 0;
     }
 }
 
@@ -433,20 +485,19 @@ select.settings_select {
     /* Preserve the effective space allotted
        inside the input group.
 
-       Select element: 325px
+       Select element: --modal-input-width
        Button element: ~29px
-       Right margin:     4px
-       TOTAL           358px */
-    max-width: 358px;
+       Right margin:     4px */
+    max-width: calc(var(--modal-input-width) + 29px + 4px);
 
     .settings_select {
-        /* Hold the settings select to its usual 325px;
+        /* Hold the settings select to its usual value;
            a TODO would be to fix up the min- and max-
            width values on the parent class, as the
            min-width always applies, and max-width: 100%
            has no meaning without an actual width:
            declaration. */
-        max-width: 325px;
+        max-width: var(--modal-input-width);
         /* Disregard the min-width from the main
            .settings_select selector. */
         min-width: 0;
@@ -472,6 +523,21 @@ input[type="checkbox"] {
     }
 }
 
+.decorated-stream-name-dropdown-widget {
+    .dropdown_widget_value {
+        /* The max-width should account for the
+           16px-square box (at 16px/1em) for the
+           chevron icon. */
+        max-width: calc(100% - 1em);
+    }
+
+    .decorated-channel-name {
+        overflow-x: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+}
+
 .allow-subdomains,
 .new-realm-domain-allow-subdomains {
     margin: 0 !important;
@@ -483,7 +549,7 @@ input[type="checkbox"] {
 
 .admin-realm-form {
     & h3 {
-        margin-bottom: 10px;
+        margin: calc(0.3125 * var(--base-font-size-px)) 0; /* 5px 0 at 16px font size. */
     }
 
     .subsection-header h3 {
@@ -495,6 +561,7 @@ input[type="checkbox"] {
 .notification-settings-form {
     .subsection-header h3 {
         display: inline-block;
+        margin: calc(0.3125 * var(--base-font-size-px)) 0; /* 5px 0 at 16px font size. */
     }
 
     .tip {
@@ -503,56 +570,128 @@ input[type="checkbox"] {
     }
 }
 
+.send_test_notification {
+    margin-bottom: 15px;
+}
+
+.preferences-settings-form {
+    .tab-picker {
+        width: 325px;
+    }
+}
+
 .information-density-settings {
-    max-width: 325px;
+    display: flex;
+    gap: 2em;
+    margin: 0 0 20px;
 
-    .input-group {
+    &.disabled-setting .display-value {
+        opacity: 0.4;
+    }
+
+    .display-value {
+        background-color: var(--color-background-popover);
+        font-size: 1.15em;
+        line-height: 1;
         display: flex;
-        gap: 5px;
-        align-items: baseline;
+        align-items: center;
+        padding: 0.25em 0.375em;
+    }
 
-        label {
-            flex: 1 0 max-content;
+    .zulip-icon {
+        font-size: 1.15em;
+        width: 1.15em;
+        height: 1.15em;
+    }
+}
+
+#stream-specific-notify-table {
+    .reset_stream_notifications {
+        opacity: 0;
+        visibility: hidden;
+        transition: 0.2s ease;
+        transition-property: opacity, visibility;
+
+        &:hover {
+            cursor: pointer;
         }
 
-        .settings_text_input {
-            width: 0;
-            flex: 0 0 8ch;
-            margin-left: auto;
-            text-align: right;
+        &:active {
+            outline: none;
+        }
+    }
+
+    .unmute_stream {
+        &:hover {
+            cursor: pointer;
+        }
+
+        &:focus {
+            outline: none;
+        }
+    }
+
+    .stream-controls {
+        display: flex;
+        align-items: center;
+        /* This gap matches a single space character. */
+        gap: 0.4ch;
+
+        .stream-privacy {
+            display: flex;
+        }
+
+        &:hover {
+            .reset_stream_notifications {
+                opacity: 1;
+                visibility: visible;
+            }
         }
     }
 }
 
-#stream-specific-notify-table .unmute_stream {
-    position: relative;
-    left: 3px;
-    top: 2px;
+#customizable_stream_notifications_table .dropdown-widget-button {
+    /* 225px at 16px/1em */
+    width: 14.0625em;
 
-    &:hover {
-        color: hsl(0deg 0% 20%);
-        cursor: pointer;
+    &:focus {
+        outline: none;
+    }
+
+    &:focus-visible {
+        outline: 2px solid var(--color-outline-focus);
     }
 }
 
 .advanced-configurations-container {
-    .advance-config-title-container {
+    .advance-config-toggle-area {
+        cursor: pointer;
         display: flex;
         align-items: center;
-        cursor: pointer;
+        gap: 0 0.625em;
 
         .stream_setting_subsection_title {
-            margin: 4px 8px;
+            margin: 4px 0;
         }
 
         .toggle-advanced-configurations-icon {
-            font-size: 20px;
+            font-size: 1.4286em; /* 20px at 14px / em */
+        }
+    }
+
+    .advanced-configurations-collapase-view {
+        .admin-permissions-tip {
+            margin-bottom: 1em;
         }
     }
 }
 
-.organization-settings-parent > div:first-of-type {
-    margin-top: 10px;
+.channel-permissions .admin-permissions-tip {
+    margin-bottom: 1em;
+}
+
+.organization-settings-parent {
+    padding-top: 5px;
 }
 
 #id_org_profile_preview {
@@ -563,50 +702,54 @@ input[type="checkbox"] {
     margin-bottom: 20px;
 }
 
-.inline-block.organization-permissions-parent div:first-of-type {
-    margin-top: 10px;
+.inline-block.organization-permissions-parent {
+    padding-top: 5px;
 }
 
-.language_selection_widget .language_selection_button {
-    text-decoration: none;
-    color: hsl(0deg 0% 20%);
-    min-width: 0;
+#org-other-permissions .tip {
+    margin-top: 0;
+}
 
-    .fa.fa-pencil {
-        margin-left: 5px;
-    }
+.realm_default_language-dropdown-list-container,
+.default_language-dropdown-list-container {
+    /* This is same as saved snippets dropdown's width and
+    also makes all language names fit in the same line. */
+    width: 17.8571em;
+}
+
+#user_enter_sends_label kbd,
+#realm_enter_sends_label kbd {
+    /* 14px at 15px/1em */
+    font-size: 0.9333em;
+    font-style: normal;
+    font-weight: 500;
+    color: var(--color-kbd-enter-sends);
+    position: relative;
+    bottom: 1px;
+    margin: 0 2px;
+}
+
+.overlay-keyboard-shortcuts .popover-menu-hotkey-hints {
+    display: inline-flex;
+    padding-left: 0;
 }
 
 .edit-attachment-buttons {
     display: inline-block;
     vertical-align: middle;
-    height: 32px;
-}
-
-.edit-attachment-buttons .remove-attachment {
-    margin-left: 5px;
-}
-
-.edit-attachment-buttons #download_attachment {
-    display: block;
-    padding: 6px 9px;
-    text-decoration: none;
-
-    &:hover {
-        color: hsl(156deg 41% 40%);
-    }
 }
 
 .remove-alert-word {
     margin-top: 1px;
 }
 
-.alert_word_status_text {
-    word-break: break-word;
+.alert-word-status-banner {
+    margin-bottom: 20px;
 }
 
 .alert-notification {
-    display: inline-block;
+    display: inline-flex;
+    align-items: center;
     vertical-align: top;
     height: auto !important;
     width: auto !important;
@@ -615,8 +758,6 @@ input[type="checkbox"] {
     overflow-wrap: anywhere;
     background-color: transparent;
     border-radius: 4px;
-    margin-top: 14px;
-    margin-left: 10px;
     color: hsl(156deg 30% 50%);
     padding: 3px 10px;
 
@@ -635,8 +776,8 @@ input[type="checkbox"] {
     }
 
     .loading_indicator_spinner {
-        width: 13px;
-        height: 20px;
+        width: 0.9283em; /* 13px at 14px/em */
+        height: 1.4286em; /* 20px at 14px/em */
         margin: 0;
     }
 
@@ -653,8 +794,10 @@ input[type="checkbox"] {
 
     & img {
         margin-right: 6px;
-        vertical-align: middle;
-        margin-top: -2px;
+    }
+
+    .settings-save-checkmark {
+        width: 0.9285em; /* 13px at 14px/em */
     }
 }
 
@@ -662,12 +805,14 @@ input[type="checkbox"] {
     margin-top: 4px;
 }
 
-#add-custom-profile-field-btn {
-    float: right;
-    margin-top: 4px;
+#add-custom-profile-field-button {
+    margin-top: auto;
+    margin-bottom: 12px;
+    padding: 4px 14px;
 }
 
-#user-notification-settings {
+#user-notification-settings,
+#realm-user-default-settings {
     .notification-table {
         thead {
             background-color: var(--color-background-notification-table-thead);
@@ -703,6 +848,22 @@ input[type="checkbox"] {
     }
 }
 
+#edit-user-form .alert-notification.custom-field-status,
+#profile-settings .alert-notification.custom-field-status,
+#profile-settings .alert-notification.full-name-status,
+#profile-settings .alert-notification.timezone-setting-status {
+    padding-top: 0;
+    padding-bottom: 0;
+    margin-top: 0;
+    padding-left: 0;
+    margin-left: 5px;
+    border: none;
+}
+
+.user_timezone-dropdown-list-container {
+    width: calc(var(--modal-input-width));
+}
+
 #profile-settings {
     .custom-profile-fields-form .custom_user_field label,
     .full-name-change-container label,
@@ -710,23 +871,14 @@ input[type="checkbox"] {
         min-width: fit-content;
     }
 
-    .alert-notification.custom-field-status,
-    .alert-notification.full-name-status,
-    .alert-notification.timezone-setting-status {
-        padding-top: 0;
-        padding-bottom: 0;
-        margin-top: 0;
-        padding-left: 0;
-        margin-left: 5px;
-        border: none;
-    }
-
     .person_picker {
-        min-width: 319px;
+        /* Subtract 2 * (2px padding) + 2 * (1px border) */
+        min-width: calc(var(--modal-input-width) - 6px);
     }
 
-    & textarea {
-        width: 311px;
+    .settings-textarea {
+        /* Subtract 6px of padding from side */
+        width: calc(var(--modal-input-width) - 12px);
     }
 }
 
@@ -737,6 +889,23 @@ input[type="checkbox"] {
 .settings-profile-user-field {
     margin-top: 5px;
     max-width: fit-content;
+
+    > .settings_url_input {
+        margin-bottom: 0;
+    }
+}
+
+.settings-profile-user-field.editable-date-field {
+    display: grid;
+    grid-template-areas: "datepicker close-button";
+    grid-template-columns: minmax(0, 1fr) 1.4285em; /* 20px at 14px em */
+    align-items: center;
+    width: var(--modal-input-width);
+
+    .flatpickr-wrapper {
+        grid-column: datepicker-start / close-button-end;
+        grid-row: close-button;
+    }
 }
 
 .control-label-disabled {
@@ -748,19 +917,28 @@ input[type="checkbox"] {
     text-align: right;
 }
 
+.delete-choice {
+    display: inline-flex;
+
+    &.hide {
+        display: none;
+    }
+}
+
 #add-default-stream-modal {
     .dropdown-widget-button {
         display: inline-flex;
-    }
-
-    .default_stream_choices_table {
-        margin-top: 2px;
     }
 
     .choice-row {
         margin-bottom: 10px;
 
         &:last-of-type {
+            /* Remove margin-bottom for last choice row
+               to remove extra space between the modal
+               content and footer. */
+            margin-bottom: 0;
+
             .delete-choice {
                 display: none;
             }
@@ -769,31 +947,21 @@ input[type="checkbox"] {
 }
 
 .add_default_streams_button_container {
-    float: right;
+    display: flex;
+    flex-wrap: wrap;
+    margin-top: auto;
+    margin-bottom: 12px;
+    gap: 6px;
 
     #show-add-default-streams-modal {
-        /* We want this button to have the same height as the filter
-           button on its right. We're overriding the default vertical
-           padding of `.new-style` and setting it to 0. Having the
-           height fixed will mean that the vertical whitespace will
-           adjust itself for different font-sizes without changing the
-           height.
-           */
         padding-top: 0;
         padding-bottom: 0;
-        height: 30px;
 
         min-width: 0;
-        margin-top: 12px;
-        margin-right: 6px;
     }
 }
 
 #add-custom-emoji-modal {
-    & form {
-        margin: 0;
-    }
-
     & input[type="text"] {
         padding: 6px;
     }
@@ -817,10 +985,19 @@ input[type="checkbox"] {
     vertical-align: middle;
 }
 
-.add-new-linkifier-box,
+.emoji-override-warning {
+    vertical-align: middle;
+    margin-left: 3px;
+    opacity: 0.7;
+
+    &:hover {
+        opacity: 1;
+    }
+}
+
 .add-new-playground-box {
     & button {
-        margin-left: calc(10em + 20px) !important;
+        margin-left: calc(10em + 20px);
     }
     margin-bottom: 15px;
 
@@ -829,63 +1006,82 @@ input[type="checkbox"] {
     }
 }
 
-.grey-box .wrapper {
+.settings-highlight-box .wrapper {
     margin: 10px 0;
 }
 
 .admin_profile_fields_table,
 .edit_profile_field_choices_container,
-.profile_field_choices_table {
+.profile_field_choices_table,
+.admin_linkifiers_table,
+.admin_channel_folders_table {
     .movable-row {
-        cursor: move;
+        .move-handle {
+            cursor: move;
+            user-select: none;
+            margin-right: 5px;
+        }
 
         .fa-ellipsis-v {
             color: hsl(0deg 0% 75%);
             position: relative;
             top: 1px;
-
-            + i {
-                margin-right: 5px;
-            }
         }
     }
 }
 
 .admin_linkifiers_table {
-    .movable-row {
-        .move-handle {
-            cursor: move;
-            user-select: none;
-        }
+    th:first-child,
+    td:first-child {
+        white-space: nowrap;
+    }
 
-        .fa-ellipsis-v {
-            color: hsl(0deg 0% 75%);
-            position: relative;
-            top: 1px;
+    th.convert-url-heading {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+    }
 
-            + i {
-                margin-right: 5px;
-            }
-        }
+    td.convert-cell {
+        text-align: center;
     }
 }
 
-#admin-linkifier-pattern-status,
-#admin-linkifier-template-status {
-    margin: 20px 0 0;
+.alternative-url-template-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-bottom: 4px;
+
+    & input {
+        flex: 1;
+    }
+
+    &:last-child .delete-alternative-url-template {
+        visibility: hidden;
+    }
 }
 
 #organization-permissions {
     .dropdown-widget-button {
-        min-width: 325px;
-        width: auto;
-        color: hsl(0deg 0% 33%);
+        color: var(--color-text-default);
     }
 }
 
 #organization-settings {
     .dropdown-widget-button {
-        color: hsl(0deg 0% 33%);
+        color: var(--color-text-default);
+    }
+}
+
+.org-permissions-form .pill-container,
+.org-settings-form .pill-container {
+    /* Subtract 2 * (2px padding) + 2 * (1px border) */
+    min-width: calc(var(--modal-input-width) - 6px);
+
+    .input:first-child:empty::before {
+        opacity: 0.5;
+        content: attr(data-placeholder);
     }
 }
 
@@ -900,164 +1096,14 @@ input[type="checkbox"] {
     max-height: calc(95vh - 280px);
 }
 
-#bot-settings {
-    .add-a-new-bot {
-        margin-bottom: 2px;
+#admin-default-channels-list .pill {
+    &:hover {
+        background-color: var(--color-background-input-pill-hover);
     }
-
-    hr {
-        margin: 10px 0;
-        border-color: hsl(0deg 0% 85%);
-    }
-
-    .config-download-text {
-        margin-left: 5px;
-    }
-
-    .ind-tab {
-        width: auto;
-        min-width: 90px;
-    }
-}
-
-.bots_list {
-    list-style-type: none;
-    margin-left: 0;
-
-    .bot-card-image {
-        vertical-align: top;
-    }
-
-    .bot-card-name {
-        font-weight: 600;
-        font-size: 1.1rem;
-        margin: 7px 5px;
-
-        overflow: hidden;
-        line-height: 1.3em;
-        text-overflow: ellipsis;
-        white-space: pre;
-    }
-
-    .bot-card-regenerate-bot-api-key {
-        position: relative;
-        margin-left: 5px;
-        color: hsl(0deg 0% 67%);
-        transition: all 0.3s ease;
-
-        &:hover {
-            color: hsl(0deg 0% 27%);
-        }
-    }
-
-    .edit-bot-buttons {
-        padding-top: 5px;
-
-        & button {
-            background-color: transparent;
-        }
-
-        .btn {
-            padding: 4px;
-        }
-
-        .sea-green {
-            color: hsl(177deg 70% 46%);
-        }
-
-        .blue {
-            color: hsl(203deg 77% 56%);
-        }
-
-        .danger-red {
-            color: hsl(0deg 56% 73%);
-        }
-
-        .copy_zuliprc {
-            padding: 0 4px;
-
-            #clipboard_image {
-                margin: 0 -2px 0 0;
-
-                path {
-                    fill: hsl(51deg 90% 50%);
-                }
-            }
-        }
-
-        .purple {
-            color: hsl(278deg 62% 68%);
-        }
-
-        .steel-blue {
-            color: hsl(207deg 44% 49%);
-        }
-    }
-
-    .bot-information-box {
-        position: relative;
-        display: inline-block;
-        width: calc(50% - 10px);
-        margin: 5px;
-
-        border-radius: 4px;
-        box-sizing: border-box;
-
-        overflow: auto;
-
-        .bot-card-details {
-            display: inline-block;
-            width: calc(100% - 75px);
-        }
-    }
-
-    & img.bot-card-avatar {
-        margin: 10px 5px 0 10px;
-        height: 50px;
-        width: 50px;
-        border-radius: 4px;
-        vertical-align: top;
-        box-shadow: 0 0 4px hsl(0deg 0% 0% / 10%);
-    }
-
-    .bot-card-email,
-    .bot-card-type {
-        margin-bottom: 5px;
-    }
-
-    .bot-card-email .bot-card-value,
-    .bot-card-api-key .bot-card-api-key-value-and-button {
-        display: block;
-        margin-left: 0;
-        word-wrap: break-word;
-        word-break: break-all;
-        white-space: normal;
-    }
-
-    .bot-card-api-key .bot-card-api-key-value-and-button {
-        font-family: "Source Code Pro", monospace;
-        font-size: 0.85em;
-        display: flex;
-    }
-
-    .bot-card-info {
-        padding: 10px;
-    }
-
-    .bot-card-field {
-        text-transform: uppercase;
-        font-weight: 600;
-        color: hsl(0deg 0% 67%);
-    }
-}
-
-#inactive_bots_list .bot_info .reactivate_bot {
-    margin-top: 5px;
 }
 
 .edit_bot_form {
     font-size: 100%;
-    margin: 0;
     padding: 0;
 
     .buttons {
@@ -1123,7 +1169,7 @@ input[type="checkbox"] {
     }
 
     .alert_word_listing .value {
-        word-wrap: break-word;
+        overflow-wrap: break-word;
         word-break: break-all;
         white-space: normal;
     }
@@ -1132,12 +1178,6 @@ input[type="checkbox"] {
         position: absolute;
         right: 20px;
         top: 0;
-    }
-}
-
-#change_password_modal {
-    #change_password_container {
-        margin: 0;
     }
 }
 
@@ -1210,8 +1250,17 @@ input[type="checkbox"] {
 
                 opacity: 0.6;
 
-                &:hover {
+                &:focus {
+                    outline: none;
+                }
+
+                &:hover,
+                &:focus-visible {
                     opacity: 1;
+                }
+
+                &:focus-visible {
+                    outline: 2px solid var(--color-outline-focus);
                 }
             }
 
@@ -1258,7 +1307,7 @@ label.preferences-radio-choice-label {
             cursor: not-allowed;
         }
 
-        &:checked + span {
+        &:checked + .preferences-radio-choice-text {
             font-weight: 600;
         }
     }
@@ -1270,7 +1319,7 @@ label.preferences-radio-choice-label {
 }
 
 .emojiset_choices {
-    width: 350px;
+    width: 25em; /* 350px / 14px em */
 
     .emoji {
         height: 22px;
@@ -1278,26 +1327,63 @@ label.preferences-radio-choice-label {
     }
 }
 
-$right_sidebar_width: 170px;
-$option_title_width: 180px;
+.default_avatar_source_values {
+    width: 25em; /* 400px / 16px em */
+
+    .preferences-radio-choice-label {
+        align-items: center;
+
+        .radio-choice-controls {
+            display: flex;
+            align-items: center;
+        }
+
+        input[type="radio"] {
+            top: 0;
+            margin-right: 0.5em; /* 8px / 16px em */
+        }
+    }
+
+    .right {
+        display: flex;
+        gap: 0.5em; /* 8px / 16px em */
+    }
+
+    .avatar {
+        height: 2.625em; /* 42px / 16px em */
+        width: 2.625em; /* 42px / 16px em */
+        border-radius: 0.25em; /* 4px / 16px em */
+    }
+}
 
 .user_list_style_values {
-    max-width: calc($right_sidebar_width + $option_title_width);
+    max-width: 25em; /* 350px / 14px em */
+
+    .preferences-radio-choice-label {
+        display: grid;
+        grid-template-columns: 10.7143em auto; /* 150px / 14px em */
+        justify-content: left;
+        margin-right: 6px;
+
+        .right {
+            margin-left: unset;
+        }
+    }
 
     .preview {
-        background-color: inherit !important;
-        /* Match the 170px width of the right sidebar region for the name/status,
-           doing something reasonable if the window shrinks. */
-        width: calc(100% - $option_title_width);
-        text-align: left;
         white-space: nowrap;
-        text-overflow: ellipsis;
-        overflow: hidden visible;
-        position: relative;
+        overflow: hidden;
 
         .user-name-and-status-text {
             display: flex;
             flex-direction: column;
+        }
+
+        .user-name-and-status-emoji {
+            .user-name {
+                max-width: 100%;
+                overflow: hidden;
+            }
         }
 
         .status-text {
@@ -1315,6 +1401,23 @@ $option_title_width: 180px;
     min-width: initial !important;
 }
 
+#show_api_key {
+    .api-key-container {
+        padding-bottom: 10px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+
+        .copy-button {
+            padding: 0;
+
+            &:focus {
+                outline: none;
+            }
+        }
+    }
+}
+
 #api_key_buttons {
     display: inline-flex;
 
@@ -1324,19 +1427,25 @@ $option_title_width: 180px;
 }
 
 .right.show .emoji_alt_code {
-    font-size: 1.2em;
+    /* This better aligns the example alt code
+       with the other emoji styles. */
+    margin-right: 1px;
 }
 
-.invite-user-link .fa-user-plus {
-    text-decoration: none;
-    margin-right: 5px;
+.download_bot_zuliprc,
+.copy_zuliprc,
+.open_bots_subscribed_streams,
+.manage-bot-button,
+.deactivate-bot-button {
+    display: inline-flex;
+    align-items: center;
 }
 
 /* -- new settings overlay -- */
 #settings_page {
     height: 95vh;
     width: 97vw;
-    max-width: 1024px;
+    max-width: 73.1429em; /* 1024px at 14px em */
     margin: 2.5vh auto;
     overflow: hidden;
     border-radius: 4px;
@@ -1357,7 +1466,7 @@ $option_title_width: 180px;
     }
 
     & h5 {
-        font-size: 1.2em;
+        font-size: 1em;
         font-weight: normal;
         line-height: 1.2;
         margin: 10px 0;
@@ -1366,46 +1475,39 @@ $option_title_width: 180px;
     .sidebar-wrapper {
         float: left;
         position: relative;
-        width: $settings_sidebar_width;
+        width: var(--settings-sidebar-width);
         height: 100%;
 
         .tab-container {
             box-sizing: border-box;
-            height: $settings_header_height;
-            padding: 6px;
-            border-bottom: 1px solid hsl(0deg 0% 87%);
+            height: var(--settings-overlay-header-height);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background-color: var(--color-background-modal-bar);
+            border-bottom: 1px solid var(--color-border-modal-bar);
 
-            @media (width >= $md_min) {
-                .tab-switcher {
-                    position: absolute;
-                    display: flex;
-                    left: 10px;
-                    z-index: 1;
+            .tab-switcher {
+                display: flex;
+                justify-content: center;
 
-                    .ind-tab {
-                        width: auto;
-                        min-width: 95px;
-                    }
-                }
-            }
-
-            @media (width < $md_min) {
-                .tab-switcher {
-                    display: flex;
-                    justify-content: center;
-
-                    .ind-tab {
-                        width: auto;
-                    }
+                .ind-tab {
+                    width: auto;
+                    min-width: 6.7857em; /* 95px at 14px em */
                 }
             }
         }
     }
 
     .sidebar {
-        height: calc(100% - $settings_header_height);
+        height: calc(100% - var(--settings-overlay-header-height));
         overflow-y: auto;
-        border-right: 1px solid hsl(0deg 0% 93%);
+        border-right: 1px solid var(--color-border-modal-bar);
+
+        .your-bots-link {
+            text-decoration: none;
+            color: inherit;
+        }
 
         .header {
             height: auto;
@@ -1415,21 +1517,16 @@ $option_title_width: 180px;
             text-align: center;
             text-transform: uppercase;
 
-            background-color: hsl(180deg 6% 93%);
-            border-bottom: 1px solid hsl(0deg 0% 87%);
+            background-color: var(--color-background-modal-bar);
+            border-bottom: 1px solid var(--color-border-modal-bar);
         }
 
-        & ul {
-            list-style: none;
-            margin: 0;
-            padding: 0;
-        }
-
-        & li {
+        .sidebar-item {
             display: grid;
             /* 3.5714em is 50px at 14px/1em -- the legacy height of these rows. */
+            /* 2.8571em is 40px at 14px/1em */
             grid-template:
-                "starting-anchor-element row-content ending-anchor-element" 3.5714em / 40px minmax(
+                "starting-anchor-element row-content ending-anchor-element" 3.5714em / 2.8571em minmax(
                     0,
                     1fr
                 )
@@ -1440,18 +1537,25 @@ $option_title_width: 180px;
             transition:
                 background-color 0.2s ease,
                 border-bottom 0.2s ease;
-            border-bottom: 1px solid hsl(0deg 0% 93%);
+            border-bottom: 1px solid var(--color-border-modal-bar);
 
             &:last-of-type .text {
                 border-bottom: none;
             }
 
             &.active {
-                background-color: hsl(0deg 0% 93%);
-                border-bottom: 1px solid transparent;
+                /* TODO: Check with Vlad about highlight
+                   colors such as this. */
+                background-color: var(--color-active-row-modal);
             }
 
-            .icon {
+            &:focus-visible {
+                border-radius: 4px;
+                outline: 1px solid var(--color-outline-focus);
+                outline-offset: -2px;
+            }
+
+            .sidebar-item-icon {
                 font-size: 1.4em;
                 text-align: center;
                 color: hsl(0deg 0% 53%);
@@ -1462,14 +1566,20 @@ $option_title_width: 180px;
                 hyphens: auto;
             }
 
-            .zulip-icon-smart-toy {
-                font-size: 1.6em;
-            }
-
             .locked {
                 font-size: 1em;
                 text-align: center;
                 color: hsl(0deg 0% 62%);
+            }
+        }
+
+        .collapse-settings-button,
+        .collapse-settings-button > #toggle_collapse_chevron {
+            color: var(--color-text-url);
+
+            &:hover {
+                cursor: pointer;
+                color: var(--color-text-url-hover);
             }
         }
 
@@ -1484,21 +1594,24 @@ $option_title_width: 180px;
         .normal-settings-list,
         .org-settings-list {
             position: relative;
+            list-style: none;
+            margin: 0;
+            padding: 0;
         }
     }
 
     .settings-header {
         padding-top: 1px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
 
         &.mobile {
             display: none;
-            border-bottom: 1px solid hsl(0deg 0% 87%);
+            border-bottom: 1px solid var(--color-border-modal-bar);
 
             .fa-chevron-left {
                 float: left;
-                position: relative;
-                top: 14px;
-                left: 10px;
             }
         }
 
@@ -1506,26 +1619,19 @@ $option_title_width: 180px;
             text-align: center;
             font-size: 1.1em;
             line-height: 1;
-            margin: 15px;
             text-transform: uppercase;
         }
 
         .exit {
             font-weight: 600;
             position: absolute;
-            top: 10px;
-            right: 10px;
+            right: 0.7142em; /* 10px at 14px em */
             color: hsl(0deg 0% 67%);
             cursor: pointer;
         }
 
         .exit-sign {
-            float: right;
-            position: relative;
-            top: 1px;
-            margin-left: 3px;
-            font-size: 1.5rem;
-            line-height: 1;
+            font-size: 1.5em;
             font-weight: 600;
             cursor: pointer;
         }
@@ -1533,16 +1639,17 @@ $option_title_width: 180px;
 
     .content-wrapper {
         position: absolute;
-        left: $settings_sidebar_width;
-        width: calc(100% - $settings_sidebar_width);
+        left: var(--settings-sidebar-width);
+        width: calc(100% - var(--settings-sidebar-width));
         height: 100%;
         overflow: hidden;
 
         .settings-header {
             width: 100%;
-            height: $settings_header_height;
+            height: var(--settings-overlay-header-height);
             box-sizing: border-box;
-            border-bottom: 1px solid hsl(0deg 0% 87%);
+            border-bottom: 1px solid var(--color-border-modal-bar);
+            background-color: var(--color-background-modal-bar);
 
             & h1 .section {
                 font-weight: 400;
@@ -1554,28 +1661,29 @@ $option_title_width: 180px;
         #settings_content {
             position: relative;
             width: 100%;
-            height: calc(100% - $settings_header_height);
+            height: calc(100% - var(--settings-overlay-header-height));
 
             float: left;
             overflow: auto;
 
             background-color: hsl(0deg 0% 0% / 2%);
-        }
-    }
 
-    .preferences-settings-form select {
-        width: 245px;
+            #channel-folder-settings .zulip-icon-preview {
+                font-size: 1.25em;
+            }
+        }
     }
 }
 
 .time-limit-custom-input,
 .realm_jitsi_server_url_custom_input {
-    padding: 4px 6px;
-    color: hsl(0deg 0% 33%);
-    border: 1px solid hsl(0deg 0% 80%);
+    padding: var(--input-vertical-padding) var(--input-horizontal-padding);
+    color: var(--color-text-default);
+    border: var(--input-border-width) solid hsl(0deg 0% 80%);
     transition:
-        border linear 0.2s,
+        border-color linear 0.2s,
         box-shadow linear 0.2s;
+    font-family: inherit;
 
     &:focus {
         border-color: hsl(206deg 80% 62% / 80%);
@@ -1601,8 +1709,12 @@ $option_title_width: 180px;
     .custom_user_field {
         padding-bottom: 20px;
 
-        & textarea {
+        .settings-textarea,
+        .modal-textarea {
             height: 80px;
+            /* We set the minimum height of textarea to be enough for two lines of text. */
+            min-height: calc(2em * var(--base-line-height-unitless));
+            resize: vertical;
         }
 
         &:hover .remove_date {
@@ -1613,9 +1725,8 @@ $option_title_width: 180px;
             opacity: 0.5;
             display: none;
             cursor: pointer;
-            position: relative;
-            top: 2px;
-            left: -20px;
+            grid-area: close-button;
+            z-index: 5;
 
             &:hover {
                 opacity: 1;
@@ -1624,6 +1735,15 @@ $option_title_width: 180px;
 
         .datepicker {
             cursor: default;
+            padding-right: 1.4285em; /* 20px at 14px em */
+            /* full input width minus right padding and
+               6px left padding from .settings_text_input
+               and 1px border on each side */
+            max-width: calc(var(--modal-input-width) - 1.4285em - 8px);
+        }
+
+        & input[disabled].datepicker {
+            cursor: not-allowed;
         }
     }
 
@@ -1631,22 +1751,32 @@ $option_title_width: 180px;
         width: 100%;
         top: 20px;
         position: sticky;
-    }
 
-    #show_my_user_profile_modal i {
-        padding-left: 2px;
-        vertical-align: middle;
+        .show-user-profile-icon {
+            padding-left: 2px;
+            vertical-align: middle;
+        }
     }
 }
 
 #edit-user-form {
     .person_picker {
-        min-width: 206px;
+        /* Subtract (1px border and 2px of padding) on each side */
+        width: calc(var(--modal-input-width) - 6px);
+        max-width: calc(100% - 6px);
     }
 
-    & textarea {
-        width: max(206px, 25vw);
-        max-width: 320px;
+    .modal-textarea {
+        /* Subtract (2 * horizontal padding) + (2 * border width) */
+        box-sizing: content-box;
+        width: calc(
+            var(--modal-input-width) - 2 * var(--input-horizontal-padding) - 2 *
+                var(--input-border-width)
+        );
+        max-width: calc(
+            100% - 2 * var(--input-horizontal-padding) - 2 *
+                var(--input-border-width)
+        );
     }
 }
 
@@ -1658,9 +1788,14 @@ $option_title_width: 180px;
         }
     }
 
+    #edit-user-form-error:has(.banner),
+    #bot-edit-form-error:has(.banner) {
+        margin-bottom: 10px;
+    }
+
     & input,
     input[type="url"],
-    & textarea,
+    .modal-textarea,
     & select {
         /* Override undesired Bootstrap default. */
         margin-bottom: 0;
@@ -1691,6 +1826,38 @@ $option_title_width: 180px;
 
 .settings-field-label {
     margin-bottom: var(--margin-bottom-field-description);
+    /* Avoid having the clickable area extend to the full width of the containing element */
+    width: fit-content;
+}
+
+#realm-user-default-settings {
+    .settings-field-label,
+    .settings-checkbox-wrapper,
+    .info-density-controls {
+        .reset-user-setting-to-default {
+            display: inline-flex;
+            padding: 0.1875em; /* 3px at 16px */
+            margin-left: 0.1875em; /* 3px at 16px */
+
+            position: relative;
+            top: -0.0625em; /* 1px at 16px */
+
+            .zulip-icon {
+                width: 1em; /* 15px at 16px */
+                height: 1em; /* 15px at 16px */
+                font-size: 0.9375em; /* 15px at 16px */
+            }
+        }
+    }
+
+    .general_notifications .reset-user-setting-to-default {
+        font-size: 1.2em;
+        margin-top: 0.3125em; /* 6px at 16px */
+        /* This is needed to adjust the gap property used
+        for flex layout so that button is not too far from
+        the heading. */
+        margin-left: -0.5em; /* 9.6px at 16px */
+    }
 }
 
 .settings-profile-user-field-hint {
@@ -1706,6 +1873,10 @@ $option_title_width: 180px;
        with .settings-field-label to display text-input
        combinations uniformly throughout the settings UI. */
     margin-bottom: var(--margin-bottom-field-description);
+}
+
+.cursor-text {
+    cursor: text;
 }
 
 .profile-field-choices {
@@ -1733,12 +1904,16 @@ $option_title_width: 180px;
     }
 }
 
+.profile-field-choices-wrapper > .alphabetize-choices-button {
+    display: block;
+    margin: 12px 0 0;
+}
+
 .custom_user_field,
 .bot_owner_user_field {
     .pill-container {
         min-height: 24px;
         max-width: 206px;
-        background-color: hsl(0deg 0% 100%);
 
         &:focus-within {
             border-color: hsl(206deg 80% 62% / 80%);
@@ -1759,43 +1934,38 @@ $option_title_width: 180px;
 #attachment-stats-holder {
     position: relative;
     margin-top: 13px;
-    display: inline-block;
-}
+    display: block;
 
-.collapse-settings-btn {
-    margin: 10px 0 0 10px;
-    color: hsl(200deg 100% 40%);
-
-    &:hover {
-        cursor: pointer;
-        color: hsl(208deg 56% 38%);
+    .tip::before {
+        content: "\f135";
+        margin-right: 8px;
     }
-}
-
-#toggle_collapse {
-    margin-left: 2px;
-    display: inline-block;
 }
 
 .admin_exports_table {
     margin-bottom: 20px;
 }
 
-.settings_textarea {
-    color: hsl(0deg 0% 33%);
-    background-color: hsl(0deg 0% 100%);
+.settings-textarea,
+.modal-textarea {
+    color: var(--color-text-default);
+    background-color: var(--background-color-textarea);
     border-radius: 4px;
     vertical-align: middle;
-    border: 1px solid hsl(0deg 0% 80%);
-    padding: 4px 6px;
+    border: var(--input-border-width) solid var(--border-color-textarea);
+    padding: var(--input-vertical-padding) var(--input-horizontal-padding);
 
     box-shadow: inset 0 1px 1px hsl(0deg 0% 0% / 7.5%);
     transition:
-        border linear 0.2s,
+        border-color linear 0.2s,
         box-shadow linear 0.2s;
 
+    font-size: 1em;
+    line-height: var(--base-line-height-unitless);
+    font-family: inherit;
+
     &:focus {
-        border-color: hsl(206.5deg 80% 62% / 80%);
+        border-color: var(--focus-border-color-textarea);
         outline: 0;
 
         box-shadow:
@@ -1805,12 +1975,40 @@ $option_title_width: 180px;
 
     &:disabled {
         cursor: not-allowed;
-        background-color: hsl(0deg 0% 93%);
     }
+}
+
+.settings-textarea:disabled {
+    background-color: var(--background-color-disabled-textarea);
+    opacity: 0.5;
+}
+
+/* This nicely displays uneditable user-generated content, such as
+   rendered realm and channel descriptions. */
+.settings-view-only-textarea {
+    margin: 0;
+    /* 5px at 16px */
+    padding: 0.3125em var(--view-only-field-horizontal-padding);
+    background-color: var(--background-color-view-only-textarea);
+    border: var(--input-border-width) solid var(--border-color-textarea);
+    border-radius: 4px;
+}
+
+.modal-textarea:disabled {
+    background-color: var(--background-color-readonly-modal-input);
+    opacity: var(--opacity-readonly-modal-input);
 }
 
 @media (width < $lg_min) {
     .settings-email-column {
+        display: none;
+    }
+
+    .empty-email-col-for-user-group {
+        display: none;
+    }
+
+    .hidden-subscriber-email {
         display: none;
     }
 
@@ -1823,32 +2021,50 @@ $option_title_width: 180px;
         display: block;
     }
 
-    #settings_content .warning {
-        display: none;
-    }
-
     .subsection-failed-status p {
         margin: 5px 0 0;
     }
 }
 
-/* This value needs to match with the same in subscriptions.css, as
-   we have some shared styles declared there */
-@media (width < $md_min) {
+/* We should eventually consolidate some of these styles with the styles
+   in subscriptions.css, using shared classnames. */
+@container settings-overlay (width < $settings_overlay_sidebar_collapse_breakpoint) {
     .profile-settings-form {
         .user-avatar-section {
             flex: 100%;
         }
     }
 
-    #settings_overlay_container {
-        /* this variable allows JavaScript to detect this media query */
-        --single-column: yes;
+    #settings_content {
+        /* This variable allows JavaScript to detect whether we are showing both
+        the left sidebar and settings content for the current screen width or not. */
+        --column-count: 1;
     }
 
     #settings_page {
         .settings-header.mobile {
-            display: block;
+            display: flex;
+            justify-content: space-between;
+            height: var(--settings-overlay-header-height);
+            /* We need the height to disregard border and
+               padding values added to other instances of
+               .settings-header. */
+            box-sizing: border-box;
+
+            .fa-chevron-left {
+                transform: translate(-50px, 0);
+                opacity: 0;
+                color: hsl(0deg 0% 67%);
+                padding: 2px 10px;
+                cursor: pointer;
+                transition: 0.3s ease;
+                transition-property: opacity, transform;
+            }
+
+            .exit {
+                position: static;
+                margin-right: 10px;
+            }
 
             &:not(.slide-left) .section {
                 /* When viewing the settings list we hide the active section. */
@@ -1864,9 +2080,25 @@ $option_title_width: 180px;
             #settings_content {
                 height: 100%;
             }
+        }
 
-            &.right {
-                top: 47px;
+        .content-wrapper.right {
+            position: absolute;
+            display: block;
+            left: 101%;
+            margin: 0;
+            width: 100%;
+            height: calc(100% - var(--settings-overlay-header-height));
+
+            top: var(--settings-overlay-header-height);
+            background-color: var(--color-background-modal);
+            border: none;
+
+            transition: left 0.3s ease; /* stylelint-disable-line plugin/no-low-performance-animation-properties */
+            z-index: 10;
+
+            &.show {
+                left: 0%;
             }
         }
 
@@ -1878,19 +2110,15 @@ $option_title_width: 180px;
             position: absolute;
             width: 100%;
             border: none;
-            /* 48px is the height of settings header and 45px is the height of tab-container */
-            height: calc(100% - 93px);
-
-            & li.active {
-                /* Don't highlight the active section in the settings list. */
-                background: inherit;
-                border-bottom: 1px solid hsl(0deg 0% 93%);
-            }
+            height: calc(
+                100% - var(--settings-overlay-header-height) -
+                    var(--settings-overlay-subheader-height)
+            );
         }
     }
 }
 
-@media (width < 830px) and (width > $md_min) {
+@container (width > $settings_overlay_sidebar_collapse_breakpoint) {
     #attachments-settings .upload-file-name {
         min-width: 10em;
     }
@@ -1906,7 +2134,8 @@ $option_title_width: 180px;
     }
 
     #admin-user-list,
-    #admin-bot-list {
+    #admin-bot-list,
+    #personal-bot-list {
         .user_row {
             .user_name,
             .email {
@@ -1925,7 +2154,8 @@ $option_title_width: 180px;
 
 @media (width < $sm_min) {
     #admin-user-list,
-    #admin-bot-list {
+    #admin-bot-list,
+    #personal-bot-list {
         .user_row,
         .table-sticky-headers {
             .bot_type,
@@ -1944,19 +2174,17 @@ $option_title_width: 180px;
         margin: auto;
     }
 
-    #linkifier-settings .new-linkifier-form input,
-    #playground-settings .new-playground-form input,
-    #profile-field-settings .new-profile-field-form input {
-        width: calc(100% - 20px) !important;
+    #playground-settings .new-playground-form input {
+        width: calc(
+            100% - 2 * var(--input-horizontal-padding) - 2 *
+                var(--input-border-width)
+        );
     }
 
-    #linkifier-settings .new-linkifier-form label,
-    #playground-settings .new-playground-form label,
-    #profile-field-settings .new-profile-field-form label {
+    #playground-settings .new-playground-form label {
         display: block;
         width: 120px;
         padding: 0;
-        padding-top: 0;
         text-align: center;
         margin: auto;
         float: none;
@@ -1987,6 +2215,20 @@ $option_title_width: 180px;
             min-width: 8em;
         }
     }
+
+    .add-new-playground-box {
+        .action-button {
+            margin-left: 0;
+            width: 100%;
+            box-sizing: border-box;
+        }
+    }
+
+    .tab-switcher.org-user-settings-switcher {
+        gap: 0.5em;
+        display: flex;
+        flex-wrap: wrap;
+    }
 }
 
 @media (width < $ml_min) {
@@ -1994,12 +2236,6 @@ $option_title_width: 180px;
     #download_zuliprc {
         flex-direction: column;
         margin-top: 5px;
-    }
-
-    #edit-user-form {
-        .custom_user_field textarea {
-            width: calc(100% - 25px);
-        }
     }
 
     .topic_date_updated {
@@ -2012,24 +2248,9 @@ $option_title_width: 180px;
     }
 }
 
-@media (width < $mm_min) {
-    .deactivate_realm_button {
-        margin-top: 20px;
-    }
-}
-
-@media only screen and (width < $lg_min) {
-    /* Show bot-information-box at full width on small
-       screen sizes. Not having this media query breaks the
-       information box */
-    .bots_list .bot-information-box {
-        width: calc(100% - 10px);
-    }
-}
-
 #edit-linkifier-form {
-    #edit-linkifier-pattern,
-    #edit-linkifier-url-template {
+    #linkifier-pattern,
+    #linkifier-url-template {
         width: 400px;
     }
 
@@ -2037,8 +2258,8 @@ $option_title_width: 180px;
         margin-bottom: 4px;
     }
 
-    #edit-linkifier-pattern-status,
-    #edit-linkifier-template-status {
+    #linkifier-pattern-status,
+    #linkifier-template-status {
         margin-top: 10px;
     }
 
@@ -2049,21 +2270,91 @@ $option_title_width: 180px;
 
 .settings_panel_list_header {
     position: relative;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
 
     & h3 {
         display: inline-block;
     }
 
-    .user_filters {
+    .user_filters,
+    .bot-filters {
         display: flex;
-        float: right;
         flex-wrap: wrap;
+        margin-top: auto;
+        margin-bottom: 12px;
+        gap: 6px;
 
         & .dropdown-widget-button {
-            height: 30px;
-            max-width: 160px;
-            margin-right: 12px;
-            margin-top: 12px;
+            height: 1.4em;
+            box-sizing: content-box;
+        }
+
+        & input.search {
+            /* Margins need to be only handled by the container holding the
+            filters to keep them aligned in .settings_panel_list_header */
+            margin: 0;
+        }
+    }
+
+    .user_filters .dropdown-widget-button {
+        max-width: 11em; /* 176px at 16px */
+    }
+
+    .bot-filters .dropdown-widget-button {
+        max-width: 160px;
+    }
+
+    .add_default_streams_button_container {
+        & input.search {
+            /* Margins need to be only handled by the container holding the
+            filters to keep them aligned in .settings_panel_list_header */
+            margin: 0;
+        }
+    }
+
+    .alert-notification {
+        margin-left: 10px;
+        margin-right: auto;
+    }
+
+    & .search-container {
+        display: grid;
+        grid-template: "search-input clear-search" auto / minmax(0, 1fr) 30px;
+
+        & input.search {
+            grid-column: search-input-start / clear-search-end;
+            grid-row: search-input;
+            padding-right: 23px;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+            overflow: hidden;
+            margin: 0;
+        }
+
+        & .clear-filter {
+            grid-area: clear-search;
+            padding: 0;
+            background: none;
+            color: var(--color-text-clear-search-button);
+            border: none;
+            outline: none;
+            display: grid;
+            font-size: inherit;
+
+            &:hover {
+                color: var(--color-text-clear-search-button-hover);
+            }
+
+            .zulip-icon-close {
+                align-self: center;
+            }
+        }
+
+        input.search:placeholder-shown + .clear-filter {
+            display: none;
         }
     }
 
@@ -2073,11 +2364,12 @@ $option_title_width: 180px;
         .dropdown-widget-button, we need to explicitly set the height here.
         We could set the height inside .user_filters but that would make
         the height a tiny bit inconsistent on pages without .user_filters. */
-        height: 20px;
+        height: 1.4em;
         float: right;
         font-size: 1em;
         max-width: 160px;
-        margin-top: 12px;
+        margin-top: auto;
+        margin-bottom: 12px;
     }
 }
 
@@ -2087,9 +2379,15 @@ $option_title_width: 180px;
         cursor: default;
         opacity: 0.7;
     }
+
+    /* Needed for settings_checkbox partial. */
+    .inline {
+        display: inline;
+    }
 }
 
 #admin_users_table .deactivated_user,
+#admin_imported_users_table .deactivated_user,
 #admin_deactivated_users_table .active-user {
     color: hsl(0deg 0% 64%);
 
@@ -2098,21 +2396,28 @@ $option_title_width: 180px;
     }
 }
 
+.deactivate-user-container {
+    width: fit-content;
+}
+
 .settings_url_input,
 .settings_text_input {
-    padding: 4px 6px;
-    color: hsl(0deg 0% 33%);
+    padding: var(--input-vertical-padding) var(--input-horizontal-padding);
+    color: var(--color-text-default);
     border-radius: 4px;
-    border: 1px solid hsl(0deg 0% 80%);
+    border: var(--input-border-width) solid hsl(0deg 0% 80%);
     box-shadow: inset 0 1px 1px hsl(0deg 0% 0% / 7.5%);
     transition:
-        border linear 0.2s,
+        border-color linear 0.2s,
         box-shadow linear 0.2s;
     margin-bottom: 10px;
 
-    /* 311px + 2 * 6px (padding) + 2 * 1px (border) = 325px (min width of select
-    elements in settings) */
-    width: 311px;
+    /* Subtract (2 * horizontal padding) + (2 * border width) */
+    width: calc(
+        var(--modal-input-width) - 2 * var(--input-horizontal-padding) - 2 *
+            var(--input-border-width)
+    );
+    font-family: inherit;
 
     &:focus {
         border-color: hsl(206deg 80% 62% / 80%);
@@ -2129,9 +2434,9 @@ $option_title_width: 180px;
 
     .settings_url_input,
     .settings_text_input,
-    .settings_textarea,
+    .settings-textarea,
+    .modal-textarea,
     .pill-container {
-        border-color: hsl(0deg 0% 100%);
         margin-bottom: 0;
 
         &:focus {
@@ -2147,6 +2452,7 @@ $option_title_width: 180px;
 
     .integration-url {
         font-family: "Source Code Pro", monospace;
+        background-color: var(--color-background-integration-url);
         padding: 10px;
         font-size: 0.85rem;
         border: 1px solid hsl(0deg 0% 87%);
@@ -2159,6 +2465,7 @@ $option_title_width: 180px;
         width: 50%;
     }
 
+    .topic-to-use-wrapper .dropdown_widget_value,
     .integration-url-name-wrapper .dropdown_widget_value,
     .integration-url-stream-wrapper .dropdown_widget_value {
         white-space: nowrap;
@@ -2166,8 +2473,28 @@ $option_title_width: 180px;
         text-overflow: ellipsis;
     }
 
+    .topic-to-use-wrapper .dropdown-widget-button,
     .integration-url-stream-wrapper .dropdown-widget-button {
         width: 75%;
+    }
+
+    .integration-url-topic {
+        position: relative;
+    }
+
+    #integration-url-topic-placeholder {
+        position: absolute;
+        left: 8px;
+        top: 50%;
+        pointer-events: none;
+        visibility: hidden;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+
+        &.visible {
+            visibility: visible;
+        }
     }
 
     #stream-not-specified-notice {
@@ -2180,5 +2507,33 @@ $option_title_width: 180px;
 }
 
 #admin-user-list .tab-switcher .ind-tab {
-    width: 110px;
+    width: auto;
+    min-width: 110px;
+}
+
+#admin-user-list .tab-switcher {
+    margin-left: 0;
+}
+
+#data-exports .tab-switcher .ind-tab {
+    width: auto;
+    min-width: 160px;
+}
+
+#admin-bot-list .tab-switcher .ind-tab,
+#personal-bot-list .tab-switcher .ind-tab {
+    width: auto;
+    min-width: 90px;
+}
+
+#admin_invites_table {
+    .check:disabled {
+        opacity: 1;
+    }
+
+    .check {
+        &.hide {
+            display: none;
+        }
+    }
 }

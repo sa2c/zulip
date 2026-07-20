@@ -1,23 +1,34 @@
+import asyncio
 import base64
+import email.parser
 import email.policy
 import os
-import subprocess
-from collections.abc import Callable, Mapping
-from email import message_from_string
+from contextlib import suppress
+from datetime import timedelta
 from email.headerregistry import Address
 from email.message import EmailMessage, MIMEPart
-from typing import TYPE_CHECKING, Any
+from smtplib import SMTPException, SMTPSenderRefused
 from unittest import mock
 
 import orjson
+import time_machine
+from aiosmtpd.smtp import SMTP
+from asgiref.sync import sync_to_async
 from django.conf import settings
+from django.core import mail
+from django.core.mail.backends.locmem import EmailBackend
+from django.test import override_settings
+from django.utils.timezone import now as timezone_now
 
 from zerver.actions.realm_settings import do_deactivate_realm
-from zerver.actions.streams import do_change_stream_post_policy
+from zerver.actions.streams import do_change_stream_group_based_setting, do_deactivate_stream
 from zerver.actions.users import do_deactivate_user
 from zerver.lib.email_mirror import (
+    RateLimitedRealmMirror,
     create_missed_message_address,
     filter_footer,
+    generate_missed_message_token,
+    get_message_part_by_type,
     get_missed_message_token_from_address,
     is_forwarded,
     is_missed_message_address,
@@ -31,21 +42,24 @@ from zerver.lib.email_mirror_helpers import (
     ZulipEmailForwardError,
     decode_email_address,
     encode_email_address,
+    get_channel_email_token,
     get_email_gateway_message_string_from_address,
 )
-from zerver.lib.email_notifications import convert_html_to_markdown
+from zerver.lib.email_mirror_server import ZulipMessageHandler, send_to_postmaster
+from zerver.lib.markdown.from_html import convert_html_to_markdown
+from zerver.lib.message import truncate_topic
 from zerver.lib.send_email import FromAddress
 from zerver.lib.streams import ensure_stream
 from zerver.lib.test_classes import ZulipTestCase
-from zerver.lib.test_helpers import mock_queue_publish, most_recent_message, most_recent_usermessage
+from zerver.lib.test_helpers import most_recent_message, most_recent_usermessage
 from zerver.models import Attachment, Recipient, Stream, UserProfile
+from zerver.models.constants import MAX_TOPIC_NAME_LENGTH
+from zerver.models.groups import NamedUserGroup, SystemGroups
+from zerver.models.messages import Message
 from zerver.models.realms import get_realm
-from zerver.models.streams import get_stream
+from zerver.models.recipients import get_or_create_direct_message_group
+from zerver.models.streams import StreamTopicsPolicyEnum, get_stream
 from zerver.models.users import get_system_bot
-from zerver.worker.email_mirror import MirrorWorker
-
-if TYPE_CHECKING:
-    from django.test.client import _MonkeyPatchedWSGIResponse as TestHttpResponse
 
 logger_name = "zerver.lib.email_mirror"
 
@@ -72,36 +86,34 @@ class TestEncodeDecode(ZulipTestCase):
         realm = get_realm("zulip")
         stream_name = "dev. help"
         stream = ensure_stream(realm, stream_name, acting_user=None)
-        email_address = encode_email_address(stream)
-        self.assertEqual(email_address, f"dev-help.{stream.email_token}@testserver")
+        hamlet = self.example_user("hamlet")
+        email_token = get_channel_email_token(stream, creator=hamlet, sender=hamlet)
+        email_address = encode_email_address(stream.name, email_token)
+        self.assertEqual(email_address, f"dev-help.{email_token}@testserver")
 
         # The default form of the email address (with an option - "include-footer"):
-        token, options = decode_email_address(
-            f"dev-help.{stream.email_token}.include-footer@testserver",
-        )
+        token, options = decode_email_address(f"dev-help.{email_token}.include-footer@testserver")
         self._assert_options(options, include_footer=True)
-        self.assertEqual(token, stream.email_token)
+        self.assertEqual(token, email_token)
 
         # Using + instead of . as the separator is also supported for backwards compatibility,
         # since that was the original form of addresses that we used:
-        token, options = decode_email_address(
-            f"dev-help+{stream.email_token}+include-footer@testserver",
-        )
+        token, options = decode_email_address(f"dev-help+{email_token}+include-footer@testserver")
         self._assert_options(options, include_footer=True)
-        self.assertEqual(token, stream.email_token)
+        self.assertEqual(token, email_token)
 
         token, options = decode_email_address(email_address)
         self._assert_options(options)
-        self.assertEqual(token, stream.email_token)
+        self.assertEqual(token, email_token)
 
         # We also handle mixing + and . but it shouldn't be recommended to users.
         email_address_all_options = (
             "dev-help.{}+include-footer.show-sender+include-quotes@testserver"
         )
-        email_address_all_options = email_address_all_options.format(stream.email_token)
+        email_address_all_options = email_address_all_options.format(email_token)
         token, options = decode_email_address(email_address_all_options)
         self._assert_options(options, show_sender=True, include_footer=True, include_quotes=True)
-        self.assertEqual(token, stream.email_token)
+        self.assertEqual(token, email_token)
 
         email_address = email_address.replace("@testserver", "@zulip.org")
         email_address_all_options = email_address_all_options.replace("@testserver", "@zulip.org")
@@ -114,13 +126,13 @@ class TestEncodeDecode(ZulipTestCase):
         with self.settings(EMAIL_GATEWAY_EXTRA_PATTERN_HACK="@zulip.org"):
             token, options = decode_email_address(email_address)
             self._assert_options(options)
-            self.assertEqual(token, stream.email_token)
+            self.assertEqual(token, email_token)
 
             token, options = decode_email_address(email_address_all_options)
             self._assert_options(
                 options, show_sender=True, include_footer=True, include_quotes=True
             )
-            self.assertEqual(token, stream.email_token)
+            self.assertEqual(token, email_token)
 
         with self.assertRaises(ZulipEmailForwardError):
             decode_email_address("bogus")
@@ -131,7 +143,9 @@ class TestEncodeDecode(ZulipTestCase):
         realm = get_realm("zulip")
         stream_name = "Тестовы some ascii letters"
         stream = ensure_stream(realm, stream_name, acting_user=None)
-        email_address = encode_email_address(stream)
+        hamlet = self.example_user("hamlet")
+        email_token = get_channel_email_token(stream, creator=hamlet, sender=hamlet)
+        email_address = encode_email_address(stream.name, email_token)
 
         msg_string = get_email_gateway_message_string_from_address(email_address)
         parts = msg_string.split("+")
@@ -142,39 +156,47 @@ class TestEncodeDecode(ZulipTestCase):
         # Correctly decode the resulting address that doesn't have the stream name:
         token, show_sender = decode_email_address(email_address)
         self.assertFalse(show_sender)
-        self.assertEqual(token, stream.email_token)
+        self.assertEqual(token, email_token)
 
         asciiable_stream_name = "ąężć"
         stream = ensure_stream(realm, asciiable_stream_name, acting_user=None)
-        email_address = encode_email_address(stream)
+        email_token = get_channel_email_token(stream, creator=hamlet, sender=hamlet)
+        email_address = encode_email_address(stream.name, email_token)
         self.assertTrue(email_address.startswith("aezc."))
 
     def test_decode_ignores_stream_name(self) -> None:
         stream = get_stream("Denmark", get_realm("zulip"))
-        stream_to_address = encode_email_address(stream)
+        hamlet = self.example_user("hamlet")
+        email_token = get_channel_email_token(stream, creator=hamlet, sender=hamlet)
+        stream_to_address = encode_email_address(stream.name, email_token)
         stream_to_address = stream_to_address.replace("denmark", "Some_name")
 
         # get the email_token:
         token = decode_email_address(stream_to_address)[0]
-        self.assertEqual(token, stream.email_token)
+        self.assertEqual(token, email_token)
 
     def test_encode_with_show_sender(self) -> None:
         stream = get_stream("Denmark", get_realm("zulip"))
-        stream_to_address = encode_email_address(stream, show_sender=True)
+        hamlet = self.example_user("hamlet")
+        email_token = get_channel_email_token(stream, creator=hamlet, sender=hamlet)
+        stream_to_address = encode_email_address(stream.name, email_token, show_sender=True)
 
         token, options = decode_email_address(stream_to_address)
         self._assert_options(options, show_sender=True)
-        self.assertEqual(token, stream.email_token)
+        self.assertEqual(token, email_token)
 
     def test_decode_prefer_text_options(self) -> None:
         stream = get_stream("Denmark", get_realm("zulip"))
-        address_prefer_text = f"Denmark.{stream.email_token}.prefer-text@testserver"
-        address_prefer_html = f"Denmark.{stream.email_token}.prefer-html@testserver"
+        hamlet = self.example_user("hamlet")
+        email_token = get_channel_email_token(stream, creator=hamlet, sender=hamlet)
+        encode_email_address(stream.name, email_token)
+        address_prefer_text = f"Denmark.{email_token}.prefer-text@testserver"
+        address_prefer_html = f"Denmark.{email_token}.prefer-html@testserver"
 
-        token, options = decode_email_address(address_prefer_text)
+        _token, options = decode_email_address(address_prefer_text)
         self._assert_options(options, prefer_text=True)
 
-        token, options = decode_email_address(address_prefer_html)
+        _token, options = decode_email_address(address_prefer_html)
         self._assert_options(options, prefer_text=False)
 
 
@@ -228,11 +250,13 @@ class TestFilterFooter(ZulipTestCase):
         self.assertEqual(result, text)
 
 
-class TestStreamEmailMessagesSuccess(ZulipTestCase):
+class TestStreamEmailMessages(ZulipTestCase):
     def create_incoming_valid_message(
         self, msgtext: str, stream: Stream, include_quotes: bool
     ) -> EmailMessage:
-        address = Address(addr_spec=encode_email_address(stream))
+        hamlet = self.example_user("hamlet")
+        email_token = get_channel_email_token(stream, creator=hamlet, sender=hamlet)
+        address = Address(addr_spec=encode_email_address(stream.name, email_token))
         email_username = address.username + "+show-sender"
         if include_quotes:
             email_username += "+include-quotes"
@@ -254,7 +278,8 @@ class TestStreamEmailMessagesSuccess(ZulipTestCase):
         self.subscribe(user_profile, "Denmark")
         stream = get_stream("Denmark", user_profile.realm)
 
-        stream_to_address = encode_email_address(stream)
+        email_token = get_channel_email_token(stream, creator=user_profile, sender=user_profile)
+        stream_to_address = encode_email_address(stream.name, email_token)
 
         incoming_valid_message = EmailMessage()
         incoming_valid_message.set_content("TestStreamEmailMessages body")
@@ -282,26 +307,30 @@ class TestStreamEmailMessagesSuccess(ZulipTestCase):
         self.subscribe(user_profile, "Denmark")
         stream = get_stream("Denmark", user_profile.realm)
 
-        stream_to_address = encode_email_address(stream)
+        email_token = get_channel_email_token(stream, creator=user_profile, sender=user_profile)
+        stream_to_address = encode_email_address(stream.name, email_token)
 
-        incoming_valid_message = EmailMessage()
-        incoming_valid_message.set_content("TestStreamEmailMessages body")
+        for header_name, header_value in [
+            ("Delivered-To", stream_to_address),
+            ("Envelope-To", f"<{stream_to_address}>"),
+        ]:
+            with self.subTest(header_name):
+                incoming_valid_message = EmailMessage()
+                incoming_valid_message.set_content(f"{header_name} body")
 
-        incoming_valid_message["Subject"] = "TestStreamEmailMessages subject"
-        incoming_valid_message["From"] = self.example_email("hamlet")
-        # Simulate a mailing list
-        incoming_valid_message["To"] = "foo-mailinglist@example.com"
-        incoming_valid_message["Envelope-To"] = stream_to_address
-        incoming_valid_message["Reply-to"] = self.example_email("othello")
+                incoming_valid_message["Subject"] = f"{header_name} subject"
+                incoming_valid_message["From"] = self.example_email("hamlet")
+                incoming_valid_message["To"] = "foo-mailinglist@example.com"
+                incoming_valid_message["Reply-to"] = self.example_email("othello")
+                incoming_valid_message[header_name] = header_value
 
-        process_message(incoming_valid_message)
+                process_message(incoming_valid_message)
 
-        # Hamlet is subscribed to this stream so should see the email message from Othello.
-        message = most_recent_message(user_profile)
-
-        self.assertEqual(message.content, "TestStreamEmailMessages body")
-        self.assert_message_stream_name(message, stream.name)
-        self.assertEqual(message.topic_name(), incoming_valid_message["Subject"])
+                # Hamlet is subscribed to this stream so should see the email message from Othello.
+                message = most_recent_message(user_profile)
+                self.assertEqual(message.content, f"{header_name} body")
+                self.assert_message_stream_name(message, stream.name)
+                self.assertEqual(message.topic_name(), incoming_valid_message["Subject"])
 
     def test_receive_stream_email_messages_blank_subject_success(self) -> None:
         user_profile = self.example_user("hamlet")
@@ -309,7 +338,8 @@ class TestStreamEmailMessagesSuccess(ZulipTestCase):
         self.subscribe(user_profile, "Denmark")
         stream = get_stream("Denmark", user_profile.realm)
 
-        stream_to_address = encode_email_address(stream)
+        email_token = get_channel_email_token(stream, creator=user_profile, sender=user_profile)
+        stream_to_address = encode_email_address(stream.name, email_token)
 
         incoming_valid_message = EmailMessage()
         incoming_valid_message.set_content("TestStreamEmailMessages body")
@@ -336,7 +366,8 @@ class TestStreamEmailMessagesSuccess(ZulipTestCase):
         self.subscribe(user_profile, "Denmark")
         stream = get_stream("Denmark", user_profile.realm)
 
-        stream_to_address = encode_email_address(stream)
+        email_token = get_channel_email_token(stream, creator=user_profile, sender=user_profile)
+        stream_to_address = encode_email_address(stream.name, email_token)
 
         incoming_valid_message = EmailMessage()
         incoming_valid_message.set_content("TestStreamEmailMessages body")
@@ -360,6 +391,36 @@ class TestStreamEmailMessagesSuccess(ZulipTestCase):
 
         self.assertEqual(message.topic_name(), "Email with no subject")
 
+    def test_receive_stream_email_messages_subject_channel_no_topics(
+        self,
+    ) -> None:
+        user_profile = self.example_user("hamlet")
+        self.login_user(user_profile)
+        self.subscribe(user_profile, "Denmark")
+        stream = get_stream("Denmark", user_profile.realm)
+        stream.topics_policy = StreamTopicsPolicyEnum.empty_topic_only.value
+        stream.save()
+
+        email_token = get_channel_email_token(stream, creator=user_profile, sender=user_profile)
+        stream_to_address = encode_email_address(stream.name, email_token)
+
+        incoming_valid_message = EmailMessage()
+        incoming_valid_message.set_content("TestStreamEmailMessages body")
+
+        incoming_valid_message["Subject"] = "Test subject"
+        incoming_valid_message["From"] = self.example_email("hamlet")
+        incoming_valid_message["To"] = stream_to_address
+        incoming_valid_message["Reply-to"] = self.example_email("othello")
+
+        process_message(incoming_valid_message)
+
+        message = most_recent_message(user_profile)
+
+        self.assertEqual(message.topic_name(), "")
+        self.assertEqual(
+            message.content, "**Subject:** Test subject\n\nTestStreamEmailMessages body"
+        )
+
     def test_receive_private_stream_email_messages_success(self) -> None:
         user_profile = self.example_user("hamlet")
         self.login_user(user_profile)
@@ -367,7 +428,8 @@ class TestStreamEmailMessagesSuccess(ZulipTestCase):
         self.subscribe(user_profile, "private_stream")
         stream = get_stream("private_stream", user_profile.realm)
 
-        stream_to_address = encode_email_address(stream)
+        email_token = get_channel_email_token(stream, creator=user_profile, sender=user_profile)
+        stream_to_address = encode_email_address(stream.name, email_token)
 
         incoming_valid_message = EmailMessage()
         incoming_valid_message.set_content("TestStreamEmailMessages body")
@@ -393,9 +455,10 @@ class TestStreamEmailMessagesSuccess(ZulipTestCase):
         stream = get_stream("Denmark", user_profile.realm)
 
         # stream address is angle-addr within multiple addresses
+        email_token = get_channel_email_token(stream, creator=user_profile, sender=user_profile)
         stream_to_addresses = [
             "A.N. Other <another@example.org>",
-            f"Denmark <{encode_email_address(stream)}>",
+            f"Denmark <{encode_email_address(stream.name, email_token)}>",
         ]
 
         incoming_valid_message = EmailMessage()
@@ -415,6 +478,31 @@ class TestStreamEmailMessagesSuccess(ZulipTestCase):
         self.assert_message_stream_name(message, stream.name)
         self.assertEqual(message.topic_name(), incoming_valid_message["Subject"])
 
+    def test_receive_stream_email_deactivated_stream(self) -> None:
+        user_profile = self.example_user("hamlet")
+        self.login_user(user_profile)
+        self.subscribe(user_profile, "Denmark")
+        stream = get_stream("Denmark", user_profile.realm)
+
+        msgtext = "TestStreamEmailMessages Body"
+        incoming_valid_message = self.create_incoming_valid_message(
+            msgtext, stream, include_quotes=False
+        )
+
+        do_deactivate_stream(stream, acting_user=None)
+        last_message_id = Message.objects.latest("id").id
+
+        with self.assertLogs(logger_name, level="INFO") as m:
+            process_message(incoming_valid_message)
+        self.assertEqual(
+            m.output,
+            [
+                f"INFO:{logger_name}:Failed to process email to {stream.name} ({stream.realm.string_id}): "
+                f"Not authorized to send to channel '{stream.name}'",
+            ],
+        )
+        self.assertEqual(Message.objects.latest("id").id, last_message_id)
+
     def test_receive_stream_email_show_sender_success(self) -> None:
         user_profile = self.example_user("hamlet")
         self.login_user(user_profile)
@@ -430,7 +518,7 @@ class TestStreamEmailMessagesSuccess(ZulipTestCase):
 
         self.assertEqual(
             message.content,
-            "From: {}\n{}".format(self.example_email("hamlet"), msgtext),
+            "**From:** {}\n\n{}".format(self.example_email("hamlet"), msgtext),
         )
         self.assert_message_stream_name(message, stream.name)
         self.assertEqual(message.topic_name(), incoming_valid_message["Subject"])
@@ -462,7 +550,7 @@ and other things
             )
             process_message(incoming_valid_message)
             message = most_recent_message(user_profile)
-            expected = "From: {}\n{}".format(self.example_email("hamlet"), expected_body)
+            expected = "**From:** {}\n\n{}".format(self.example_email("hamlet"), expected_body)
             self.assertEqual(message.content, expected.strip())
             self.assert_message_stream_name(message, stream.name)
             self.assertEqual(message.topic_name(), incoming_valid_message["Subject"])
@@ -484,7 +572,8 @@ and other things
         self.subscribe(user_profile, "Denmark")
         stream = get_stream("Denmark", user_profile.realm)
 
-        address = Address(addr_spec=encode_email_address(stream))
+        email_token = get_channel_email_token(stream, creator=user_profile, sender=user_profile)
+        address = Address(addr_spec=encode_email_address(stream.name, email_token))
         email_username = address.username + "+show-sender"
         stream_to_address = Address(username=email_username, domain=address.domain).addr_spec
 
@@ -502,7 +591,7 @@ and other things
 
         self.assertEqual(
             message.content,
-            "From: {}\n{}".format(
+            "**From:** {}\n\n{}".format(
                 "Test Useróąę <hamlet_ę@zulip.com>", "TestStreamEmailMessages body"
             ),
         )
@@ -515,7 +604,8 @@ and other things
         self.subscribe(user_profile, "Denmark")
         stream = get_stream("Denmark", user_profile.realm)
 
-        address = Address(addr_spec=encode_email_address(stream))
+        email_token = get_channel_email_token(stream, creator=user_profile, sender=user_profile)
+        address = Address(addr_spec=encode_email_address(stream.name, email_token))
         email_username = address.username + "+include-footer"
         stream_to_address = Address(username=email_username, domain=address.domain).addr_spec
 
@@ -543,7 +633,8 @@ and other things
         self.subscribe(user_profile, "Denmark")
         stream = get_stream("Denmark", user_profile.realm)
 
-        address = Address(addr_spec=encode_email_address(stream))
+        email_token = get_channel_email_token(stream, creator=user_profile, sender=user_profile)
+        address = Address(addr_spec=encode_email_address(stream.name, email_token))
         email_username = address.username + "+include-quotes"
         stream_to_address = Address(username=email_username, domain=address.domain).addr_spec
 
@@ -568,13 +659,200 @@ and other things
         self.assertEqual(message.topic_name(), incoming_valid_message["Subject"])
 
 
+class TestChannelEmailMessagesPermissions(ZulipTestCase):
+    def create_incoming_valid_message(self, channel_email_address: str) -> EmailMessage:
+        incoming_valid_message = EmailMessage()
+        incoming_valid_message.set_content("message body")
+        incoming_valid_message["Subject"] = "test subject"
+        incoming_valid_message["To"] = channel_email_address
+        return incoming_valid_message
+
+    def test_valid_sender_id(self) -> None:
+        hamlet = self.example_user("hamlet")
+        realm = get_realm("zulip")
+        channel = get_stream("Denmark", realm)
+        self.login("hamlet")
+
+        # Sender is the current user itself.
+        result = self.client_get(
+            f"/json/streams/{channel.id}/email_address", {"sender_id": hamlet.id}
+        )
+        self.assert_json_success(result)
+
+        # Sender is the Email gateway bot.
+        email_gateway_bot = get_system_bot(settings.EMAIL_GATEWAY_BOT, realm.id)
+        result = self.client_get(
+            f"/json/streams/{channel.id}/email_address", {"sender_id": email_gateway_bot.id}
+        )
+        self.assert_json_success(result)
+
+        # Sender is a bot owned by the current user.
+        bot = self.create_test_bot("test2", hamlet, full_name="Test bot")
+        assert bot.bot_owner is not None
+        self.assertEqual(bot.bot_owner.id, hamlet.id)
+        result = self.client_get(f"/json/streams/{channel.id}/email_address", {"sender_id": bot.id})
+        self.assert_json_success(result)
+
+        # Sender is a random user ID. (None of the above three cases)
+        othello = self.example_user("othello")
+        result = self.client_get(
+            f"/json/streams/{channel.id}/email_address", {"sender_id": othello.id}
+        )
+        self.assert_json_error(result, "No such bot")
+
+    def test_creator_with_send_message_permission(self) -> None:
+        hamlet = self.example_user("hamlet")
+        realm = get_realm("zulip")
+        channel = get_stream("Denmark", realm)
+
+        self.set_user_role(hamlet, UserProfile.ROLE_MODERATOR)
+        moderators_group = NamedUserGroup.objects.get(
+            name=SystemGroups.MODERATORS, realm_for_sharding=realm, is_system_group=True
+        )
+        do_change_stream_group_based_setting(
+            channel, "can_send_message_group", moderators_group, acting_user=hamlet
+        )
+
+        # Sender is the current user itself.
+        email_token = get_channel_email_token(channel, creator=hamlet, sender=hamlet)
+        channel_email_address = encode_email_address(channel.name, email_token)
+        incoming_valid_message = self.create_incoming_valid_message(channel_email_address)
+
+        with self.assertLogs(logger_name, level="INFO") as m:
+            process_message(incoming_valid_message)
+        self.assertEqual(
+            m.output,
+            [
+                f"INFO:{logger_name}:Successfully processed email to {channel.name} ({realm.string_id})"
+            ],
+        )
+
+        # Sender is the Email gateway bot.
+        email_gateway_bot = get_system_bot(settings.EMAIL_GATEWAY_BOT, realm.id)
+        email_token = get_channel_email_token(channel, creator=hamlet, sender=email_gateway_bot)
+        channel_email_address = encode_email_address(channel.name, email_token)
+        incoming_valid_message = self.create_incoming_valid_message(channel_email_address)
+
+        with self.assertLogs(logger_name, level="INFO") as m:
+            process_message(incoming_valid_message)
+        self.assertEqual(
+            m.output,
+            [
+                f"INFO:{logger_name}:Successfully processed email to {channel.name} ({realm.string_id})"
+            ],
+        )
+
+        # Sender is a bot owned by the current user + has NO post permission.
+        bot = self.create_test_bot("test2", hamlet, full_name="Test bot")
+        assert bot.bot_owner is not None
+        self.assertEqual(bot.bot_owner.id, hamlet.id)
+        email_token = get_channel_email_token(channel, creator=hamlet, sender=bot)
+        channel_email_address = encode_email_address(channel.name, email_token)
+        incoming_valid_message = self.create_incoming_valid_message(channel_email_address)
+
+        with self.assertLogs(logger_name, level="INFO") as m:
+            process_message(incoming_valid_message)
+        self.assertEqual(
+            m.output,
+            [
+                f"INFO:{logger_name}:Successfully processed email to {channel.name} ({realm.string_id})"
+            ],
+        )
+
+        # Sender is a bot owned by the current user + has the post permission.
+        self.set_user_role(bot, UserProfile.ROLE_MODERATOR)
+        incoming_valid_message = self.create_incoming_valid_message(channel_email_address)
+
+        with self.assertLogs(logger_name, level="INFO") as m:
+            process_message(incoming_valid_message)
+        self.assertEqual(
+            m.output,
+            [
+                f"INFO:{logger_name}:Successfully processed email to {channel.name} ({realm.string_id})"
+            ],
+        )
+
+    def test_creator_without_send_message_permission(self) -> None:
+        hamlet = self.example_user("hamlet")
+        realm = get_realm("zulip")
+        channel = get_stream("Denmark", realm)
+
+        self.set_user_role(hamlet, UserProfile.ROLE_MODERATOR)
+        admins_group = NamedUserGroup.objects.get(
+            name=SystemGroups.ADMINISTRATORS, realm_for_sharding=realm, is_system_group=True
+        )
+        do_change_stream_group_based_setting(
+            channel, "can_send_message_group", admins_group, acting_user=hamlet
+        )
+
+        # Sender is the current user itself.
+        email_token = get_channel_email_token(channel, creator=hamlet, sender=hamlet)
+        channel_email_address = encode_email_address(channel.name, email_token)
+        incoming_valid_message = self.create_incoming_valid_message(channel_email_address)
+
+        with self.assertLogs(logger_name, level="INFO") as m:
+            process_message(incoming_valid_message)
+        self.assertEqual(
+            m.output,
+            [
+                f"INFO:{logger_name}:Failed to process email to {channel.name} ({realm.string_id}): You do not have permission to post in this channel."
+            ],
+        )
+
+        # Sender is the Email gateway bot.
+        email_gateway_bot = get_system_bot(settings.EMAIL_GATEWAY_BOT, realm.id)
+        email_token = get_channel_email_token(channel, creator=hamlet, sender=email_gateway_bot)
+        channel_email_address = encode_email_address(channel.name, email_token)
+        incoming_valid_message = self.create_incoming_valid_message(channel_email_address)
+
+        with self.assertLogs(logger_name, level="INFO") as m:
+            process_message(incoming_valid_message)
+        self.assertEqual(
+            m.output,
+            [
+                f"INFO:{logger_name}:Failed to process email to {channel.name} ({realm.string_id}): You do not have permission to post in this channel."
+            ],
+        )
+
+        # Sender is a bot owned by the current user + has NO post permission.
+        bot = self.create_test_bot("test2", hamlet, full_name="Test bot")
+        assert bot.bot_owner is not None
+        self.assertEqual(bot.bot_owner.id, hamlet.id)
+        email_token = get_channel_email_token(channel, creator=hamlet, sender=bot)
+        channel_email_address = encode_email_address(channel.name, email_token)
+        incoming_valid_message = self.create_incoming_valid_message(channel_email_address)
+
+        with self.assertLogs(logger_name, level="INFO") as m:
+            process_message(incoming_valid_message)
+        self.assertEqual(
+            m.output,
+            [
+                f"INFO:{logger_name}:Failed to process email to {channel.name} ({realm.string_id}): You do not have permission to post in this channel."
+            ],
+        )
+
+        # Sender is a bot owned by the current user + has the post permission.
+        self.set_user_role(bot, UserProfile.ROLE_REALM_ADMINISTRATOR)
+        incoming_valid_message = self.create_incoming_valid_message(channel_email_address)
+
+        with self.assertLogs(logger_name, level="INFO") as m:
+            process_message(incoming_valid_message)
+        self.assertEqual(
+            m.output,
+            [
+                f"INFO:{logger_name}:Successfully processed email to {channel.name} ({realm.string_id})"
+            ],
+        )
+
+
 class TestEmailMirrorMessagesWithAttachments(ZulipTestCase):
     def test_message_with_valid_attachment(self) -> None:
         user_profile = self.example_user("hamlet")
         self.login_user(user_profile)
         self.subscribe(user_profile, "Denmark")
         stream = get_stream("Denmark", user_profile.realm)
-        stream_to_address = encode_email_address(stream)
+        email_token = get_channel_email_token(stream, creator=user_profile, sender=user_profile)
+        stream_to_address = encode_email_address(stream.name, email_token)
 
         incoming_valid_message = EmailMessage()
         incoming_valid_message.set_content("Test body")
@@ -597,14 +875,14 @@ class TestEmailMirrorMessagesWithAttachments(ZulipTestCase):
 
         with mock.patch(
             "zerver.lib.email_mirror.upload_message_attachment",
-            return_value="https://test_url",
+            return_value=("https://test_url", "image.png"),
         ) as upload_message_attachment:
             process_message(incoming_valid_message)
             upload_message_attachment.assert_called_with(
                 "image.png",
                 "image/png",
                 image_bytes,
-                get_system_bot(settings.EMAIL_GATEWAY_BOT, stream.realm_id),
+                user_profile,
                 target_realm=user_profile.realm,
             )
 
@@ -619,7 +897,8 @@ class TestEmailMirrorMessagesWithAttachments(ZulipTestCase):
         self.login_user(user_profile)
         self.subscribe(user_profile, "Denmark")
         stream = get_stream("Denmark", user_profile.realm)
-        stream_to_address = encode_email_address(stream)
+        email_token = get_channel_email_token(stream, creator=user_profile, sender=user_profile)
+        stream_to_address = encode_email_address(stream.name, email_token)
 
         incoming_valid_message = EmailMessage()
         incoming_valid_message.set_content("Test body")
@@ -646,9 +925,7 @@ class TestEmailMirrorMessagesWithAttachments(ZulipTestCase):
         attachment = Attachment.objects.last()
         assert attachment is not None
         self.assertEqual(list(attachment.messages.values_list("id", flat=True)), [message.id])
-        self.assertEqual(
-            message.sender, get_system_bot(settings.EMAIL_GATEWAY_BOT, stream.realm_id)
-        )
+        self.assertEqual(message.sender, user_profile)
         self.assertEqual(attachment.realm, stream.realm)
         self.assertEqual(attachment.is_realm_public, True)
 
@@ -657,7 +934,8 @@ class TestEmailMirrorMessagesWithAttachments(ZulipTestCase):
         self.login_user(user_profile)
         self.subscribe(user_profile, "Denmark")
         stream = get_stream("Denmark", user_profile.realm)
-        stream_to_address = encode_email_address(stream)
+        email_token = get_channel_email_token(stream, creator=user_profile, sender=user_profile)
+        stream_to_address = encode_email_address(stream.name, email_token)
 
         incoming_valid_message = EmailMessage()
         incoming_valid_message.set_content("a" * settings.MAX_MESSAGE_LENGTH)
@@ -684,9 +962,7 @@ class TestEmailMirrorMessagesWithAttachments(ZulipTestCase):
         attachment = Attachment.objects.last()
         assert attachment is not None
         self.assertEqual(list(attachment.messages.values_list("id", flat=True)), [message.id])
-        self.assertEqual(
-            message.sender, get_system_bot(settings.EMAIL_GATEWAY_BOT, stream.realm_id)
-        )
+        self.assertEqual(message.sender, user_profile)
         self.assertEqual(attachment.realm, stream.realm)
         self.assertEqual(attachment.is_realm_public, True)
 
@@ -699,7 +975,8 @@ class TestEmailMirrorMessagesWithAttachments(ZulipTestCase):
         self.login_user(user_profile)
         self.subscribe(user_profile, "Denmark")
         stream = get_stream("Denmark", user_profile.realm)
-        stream_to_address = encode_email_address(stream)
+        email_token = get_channel_email_token(stream, creator=user_profile, sender=user_profile)
+        stream_to_address = encode_email_address(stream.name, email_token)
 
         incoming_valid_message = EmailMessage()
         incoming_valid_message.set_content("Test body")
@@ -723,14 +1000,14 @@ class TestEmailMirrorMessagesWithAttachments(ZulipTestCase):
 
         with mock.patch(
             "zerver.lib.email_mirror.upload_message_attachment",
-            return_value="https://test_url",
+            return_value=("https://test_url", utf8_filename),
         ) as upload_message_attachment:
             process_message(incoming_valid_message)
             upload_message_attachment.assert_called_with(
                 utf8_filename,
                 "image/png",
                 image_bytes,
-                get_system_bot(settings.EMAIL_GATEWAY_BOT, stream.realm_id),
+                user_profile,
                 target_realm=user_profile.realm,
             )
 
@@ -742,7 +1019,8 @@ class TestEmailMirrorMessagesWithAttachments(ZulipTestCase):
         self.login_user(user_profile)
         self.subscribe(user_profile, "Denmark")
         stream = get_stream("Denmark", user_profile.realm)
-        stream_to_address = encode_email_address(stream)
+        email_token = get_channel_email_token(stream, creator=user_profile, sender=user_profile)
+        stream_to_address = encode_email_address(stream.name, email_token)
 
         incoming_valid_message = EmailMessage()
         incoming_valid_message.set_content("Test body")
@@ -769,14 +1047,14 @@ class TestEmailMirrorMessagesWithAttachments(ZulipTestCase):
 
         with mock.patch(
             "zerver.lib.email_mirror.upload_message_attachment",
-            return_value="https://test_url",
+            return_value=("https://test_url", "image.png"),
         ) as upload_message_attachment:
             process_message(incoming_valid_message)
             upload_message_attachment.assert_called_with(
                 "image.png",
                 "image/png",
                 image_bytes,
-                get_system_bot(settings.EMAIL_GATEWAY_BOT, stream.realm_id),
+                user_profile,
                 target_realm=user_profile.realm,
             )
 
@@ -788,7 +1066,8 @@ class TestEmailMirrorMessagesWithAttachments(ZulipTestCase):
         self.login_user(user_profile)
         self.subscribe(user_profile, "Denmark")
         stream = get_stream("Denmark", user_profile.realm)
-        stream_to_address = encode_email_address(stream)
+        email_token = get_channel_email_token(stream, creator=user_profile, sender=user_profile)
+        stream_to_address = encode_email_address(stream.name, email_token)
 
         incoming_valid_message = EmailMessage()
         incoming_valid_message.set_content("Test body")
@@ -818,8 +1097,10 @@ class TestEmailMirrorMessagesWithAttachments(ZulipTestCase):
         self.login_user(user_profile)
         self.subscribe(user_profile, "Denmark")
         stream = get_stream("Denmark", user_profile.realm)
-        stream_address = f"Denmark.{stream.email_token}@testserver"
-        stream_address_prefer_html = f"Denmark.{stream.email_token}.prefer-html@testserver"
+        email_token = get_channel_email_token(stream, creator=user_profile, sender=user_profile)
+        encode_email_address(stream.name, email_token)
+        stream_address = f"Denmark.{email_token}@testserver"
+        stream_address_prefer_html = f"Denmark.{email_token}.prefer-html@testserver"
 
         text = "Test message"
         html = "<html><body><b>Test html message</b></body></html>"
@@ -851,7 +1132,9 @@ class TestEmailMirrorMessagesWithAttachments(ZulipTestCase):
         self.login_user(user_profile)
         self.subscribe(user_profile, "Denmark")
         stream = get_stream("Denmark", user_profile.realm)
-        stream_address_prefer_html = f"Denmark.{stream.email_token}.prefer-html@testserver"
+        email_token = get_channel_email_token(stream, creator=user_profile, sender=user_profile)
+        encode_email_address(stream.name, email_token)
+        stream_address_prefer_html = f"Denmark.{email_token}.prefer-html@testserver"
 
         text = "Test message"
         # This should be correctly identified as empty html body:
@@ -918,7 +1201,8 @@ class TestStreamEmailMessagesEmptyBody(ZulipTestCase):
         self.login_user(user_profile)
         self.subscribe(user_profile, "Denmark")
         stream = get_stream("Denmark", user_profile.realm)
-        stream_to_address = encode_email_address(stream)
+        email_token = get_channel_email_token(stream, creator=user_profile, sender=user_profile)
+        stream_to_address = encode_email_address(stream.name, email_token)
 
         # empty body
         incoming_valid_message = EmailMessage()
@@ -941,7 +1225,8 @@ class TestStreamEmailMessagesEmptyBody(ZulipTestCase):
         self.login_user(user_profile)
         self.subscribe(user_profile, "Denmark")
         stream = get_stream("Denmark", user_profile.realm)
-        stream_to_address = encode_email_address(stream)
+        email_token = get_channel_email_token(stream, creator=user_profile, sender=user_profile)
+        stream_to_address = encode_email_address(stream.name, email_token)
         # No textual body
         incoming_valid_message = EmailMessage()
         with open(
@@ -974,7 +1259,8 @@ class TestStreamEmailMessagesEmptyBody(ZulipTestCase):
         self.subscribe(user_profile, "Denmark")
         stream = get_stream("Denmark", user_profile.realm)
 
-        stream_to_address = encode_email_address(stream)
+        email_token = get_channel_email_token(stream, creator=user_profile, sender=user_profile)
+        stream_to_address = encode_email_address(stream.name, email_token)
         headers = {}
         headers["Reply-To"] = self.example_email("othello")
 
@@ -1010,12 +1296,13 @@ class TestMissedMessageEmailMessages(ZulipTestCase):
         )
         self.assert_json_success(result)
 
-        user_profile = self.example_user("othello")
-        usermessage = most_recent_usermessage(user_profile)
+        othello = self.example_user("othello")
+        hamlet = self.example_user("hamlet")
+        usermessage = most_recent_usermessage(othello)
 
         # we don't want to send actual emails but we do need to create and store the
         # token for looking up who did reply.
-        mm_address = create_missed_message_address(user_profile, usermessage.message)
+        mm_address = create_missed_message_address(othello, usermessage.message)
 
         incoming_valid_message = EmailMessage()
         incoming_valid_message.set_content("TestMissedMessageEmailMessages body")
@@ -1025,17 +1312,17 @@ class TestMissedMessageEmailMessages(ZulipTestCase):
         incoming_valid_message["To"] = mm_address
         incoming_valid_message["Reply-to"] = self.example_email("othello")
 
-        with self.assert_database_query_count(16):
+        with self.assert_database_query_count(22):
             process_message(incoming_valid_message)
 
         # confirm that Hamlet got the message
-        user_profile = self.example_user("hamlet")
-        message = most_recent_message(user_profile)
+        message = most_recent_message(hamlet)
 
+        direct_group_message = get_or_create_direct_message_group(id_list=[hamlet.id, othello.id])
         self.assertEqual(message.content, "TestMissedMessageEmailMessages body")
         self.assertEqual(message.sender, self.example_user("othello"))
-        self.assertEqual(message.recipient.type_id, user_profile.id)
-        self.assertEqual(message.recipient.type, Recipient.PERSONAL)
+        self.assertEqual(message.recipient.type_id, direct_group_message.id)
+        self.assertEqual(message.recipient.type, Recipient.DIRECT_MESSAGE_GROUP)
 
     def test_receive_missed_group_direct_message_email_messages(self) -> None:
         # Build dummy messages for message notification email reply.
@@ -1070,7 +1357,7 @@ class TestMissedMessageEmailMessages(ZulipTestCase):
         incoming_valid_message["To"] = mm_address
         incoming_valid_message["Reply-to"] = self.example_email("cordelia")
 
-        with self.assert_database_query_count(21):
+        with self.assert_database_query_count(22):
             process_message(incoming_valid_message)
 
         # Confirm Iago received the message.
@@ -1122,7 +1409,7 @@ class TestMissedMessageEmailMessages(ZulipTestCase):
         incoming_valid_message["To"] = mm_address
         incoming_valid_message["Reply-to"] = user_profile.delivery_email
 
-        with self.assert_database_query_count(17):
+        with self.assert_database_query_count(18):
             process_message(incoming_valid_message)
 
         # confirm that Hamlet got the message
@@ -1150,8 +1437,13 @@ class TestMissedMessageEmailMessages(ZulipTestCase):
         self.assert_json_success(result)
 
         stream = get_stream("announce", user_profile.realm)
-        do_change_stream_post_policy(
-            stream, Stream.STREAM_POST_POLICY_ADMINS, acting_user=user_profile
+        admins_group = NamedUserGroup.objects.get(
+            name=SystemGroups.ADMINISTRATORS,
+            realm_for_sharding=user_profile.realm,
+            is_system_group=True,
+        )
+        do_change_stream_group_based_setting(
+            stream, "can_send_message_group", admins_group, acting_user=user_profile
         )
 
         usermessage = most_recent_usermessage(user_profile)
@@ -1172,7 +1464,7 @@ class TestMissedMessageEmailMessages(ZulipTestCase):
 
         self.assertEqual(
             message.content,
-            "Error sending message to channel announce via message notification email reply:\nOnly organization administrators can send to this channel.",
+            "Error sending message to channel announce via message notification email reply:\nYou do not have permission to post in this channel.",
         )
         self.assertEqual(
             message.sender,
@@ -1333,6 +1625,43 @@ class TestMissedMessageEmailMessages(ZulipTestCase):
         for i in range(5):
             process_missed_message(mm_address, incoming_valid_message)
 
+    def test_autoreply(self) -> None:
+        self.login("hamlet")
+        othello = self.example_user("othello")
+        result = self.client_post(
+            "/json/messages",
+            {
+                "type": "private",
+                "content": "test_receive_missed_message_email_messages",
+                "to": orjson.dumps([othello.id]).decode(),
+            },
+        )
+        self.assert_json_success(result)
+
+        usermessage = most_recent_usermessage(othello)
+
+        mm_address = create_missed_message_address(othello, usermessage.message)
+
+        incoming_autoreply = EmailMessage()
+        incoming_autoreply.set_content("An auto-reply")
+        incoming_autoreply["Subject"] = "TestMissedMessageEmailMessages subject"
+        incoming_autoreply["From"] = self.example_email("othello")
+        incoming_autoreply["To"] = mm_address
+        incoming_autoreply["Reply-to"] = self.example_email("othello")
+        incoming_autoreply["Auto-Submitted"] = "auto-replied"
+
+        hamlet = self.example_user("hamlet")
+        message = most_recent_message(hamlet)
+        with self.assert_database_query_count(0), self.assertLogs(logger_name, level="INFO") as m:
+            process_message(incoming_autoreply)
+        self.assertEqual(
+            m.output,
+            [f"INFO:{logger_name}:Dropping auto-replied message from othello@zulip.com"],
+        )
+
+        # It should get dropped, so the most recent message is unchanged
+        self.assertEqual(message, most_recent_message(hamlet))
+
 
 class TestEmptyGatewaySetting(ZulipTestCase):
     def test_missed_message(self) -> None:
@@ -1354,10 +1683,12 @@ class TestEmptyGatewaySetting(ZulipTestCase):
             self.assertEqual(mm_address, FromAddress.NOREPLY)
 
     def test_encode_email_addr(self) -> None:
+        user_profile = self.example_user("hamlet")
         stream = get_stream("Denmark", get_realm("zulip"))
 
         with self.settings(EMAIL_GATEWAY_PATTERN=""):
-            test_address = encode_email_address(stream)
+            email_token = get_channel_email_token(stream, creator=user_profile, sender=user_profile)
+            test_address = encode_email_address(stream.name, email_token)
             self.assertEqual(test_address, "")
 
 
@@ -1373,6 +1704,7 @@ class TestReplyExtraction(ZulipTestCase):
         self.assertFalse(is_forwarded("subject"))
         self.assertFalse(is_forwarded("RE: FWD: hi"))
         self.assertFalse(is_forwarded("AW: FWD: hi"))
+        self.assertFalse(is_forwarded("SV: FWD: hi"))
 
     def test_reply_is_extracted_from_plain(self) -> None:
         # build dummy messages for stream
@@ -1382,7 +1714,8 @@ class TestReplyExtraction(ZulipTestCase):
         self.subscribe(user_profile, "Denmark")
         stream = get_stream("Denmark", user_profile.realm)
 
-        stream_to_address = encode_email_address(stream)
+        email_token = get_channel_email_token(stream, creator=user_profile, sender=user_profile)
+        stream_to_address = encode_email_address(stream.name, email_token)
         text = """Reply
 
         -----Original Message-----
@@ -1419,7 +1752,8 @@ class TestReplyExtraction(ZulipTestCase):
         self.subscribe(user_profile, "Denmark")
         stream = get_stream("Denmark", user_profile.realm)
 
-        stream_to_address = encode_email_address(stream)
+        email_token = get_channel_email_token(stream, creator=user_profile, sender=user_profile)
+        stream_to_address = encode_email_address(stream.name, email_token)
         html = """
         <html>
             <body>
@@ -1462,153 +1796,17 @@ class TestReplyExtraction(ZulipTestCase):
         self.assertEqual(message.content, convert_html_to_markdown(html))
 
 
-class TestScriptMTA(ZulipTestCase):
-    def test_success(self) -> None:
-        script = os.path.join(os.path.dirname(__file__), "../../scripts/lib/email-mirror-postfix")
-
-        sender = self.example_email("hamlet")
-        stream = get_stream("Denmark", get_realm("zulip"))
-        stream_to_address = encode_email_address(stream)
-
-        mail_template = self.fixture_data("simple.txt", type="email")
-        mail = mail_template.format(stream_to_address=stream_to_address, sender=sender)
-        subprocess.run(
-            [script, "-r", stream_to_address, "-s", settings.SHARED_SECRET, "-t"],
-            input=mail,
-            check=True,
-            text=True,
-        )
-
-    def test_error_no_recipient(self) -> None:
-        script = os.path.join(os.path.dirname(__file__), "../../scripts/lib/email-mirror-postfix")
-
-        sender = self.example_email("hamlet")
-        stream = get_stream("Denmark", get_realm("zulip"))
-        stream_to_address = encode_email_address(stream)
-        mail_template = self.fixture_data("simple.txt", type="email")
-        mail = mail_template.format(stream_to_address=stream_to_address, sender=sender)
-        p = subprocess.run(
-            [script, "-s", settings.SHARED_SECRET, "-t"],
-            input=mail,
-            stdout=subprocess.PIPE,
-            text=True,
-            check=False,
-        )
-        self.assertEqual(
-            p.stdout,
-            "5.1.1 Bad destination mailbox address: No missed message email address.\n",
-        )
-        self.assertEqual(p.returncode, 67)
-
-
-class TestEmailMirrorTornadoView(ZulipTestCase):
-    def send_private_message(self) -> str:
-        self.login("othello")
-        cordelia = self.example_user("cordelia")
-        iago = self.example_user("iago")
-        result = self.client_post(
-            "/json/messages",
-            {
-                "type": "private",
-                "content": "test_receive_missed_message_email_messages",
-                "to": orjson.dumps([cordelia.id, iago.id]).decode(),
-            },
-        )
-        self.assert_json_success(result)
-
-        user_profile = self.example_user("cordelia")
-        user_message = most_recent_usermessage(user_profile)
-        return create_missed_message_address(user_profile, user_message.message)
-
-    def send_offline_message(self, to_address: str, sender: UserProfile) -> "TestHttpResponse":
-        mail_template = self.fixture_data("simple.txt", type="email")
-        mail = mail_template.format(stream_to_address=to_address, sender=sender.delivery_email)
-        msg_base64 = base64.b64encode(mail.encode()).decode()
-
-        def check_queue_json_publish(
-            queue_name: str,
-            event: Mapping[str, Any],
-            processor: Callable[[Any], None] | None = None,
-        ) -> None:
-            self.assertEqual(queue_name, "email_mirror")
-            self.assertEqual(event, {"rcpt_to": to_address, "msg_base64": msg_base64})
-            MirrorWorker().consume(event)
-
-            self.assertEqual(
-                self.get_last_message().content,
-                "This is a plain-text message for testing Zulip.",
-            )
-
-        post_data = {
-            "rcpt_to": to_address,
-            "msg_base64": msg_base64,
-            "secret": settings.SHARED_SECRET,
-        }
-
-        with mock_queue_publish("zerver.lib.email_mirror.queue_json_publish") as m:
-            m.side_effect = check_queue_json_publish
-            return self.client_post("/api/internal/email_mirror_message", post_data)
-
-    def test_success_stream(self) -> None:
-        stream = get_stream("Denmark", get_realm("zulip"))
-        stream_to_address = encode_email_address(stream)
-        result = self.send_offline_message(stream_to_address, self.example_user("hamlet"))
-        self.assert_json_success(result)
-
-    def test_error_to_stream_with_wrong_address(self) -> None:
-        stream = get_stream("Denmark", get_realm("zulip"))
-        stream_to_address = encode_email_address(stream)
-        # get the email_token:
-        token = decode_email_address(stream_to_address)[0]
-        stream_to_address = stream_to_address.replace(token, "Wrong_token")
-
-        result = self.send_offline_message(stream_to_address, self.example_user("hamlet"))
-        self.assert_json_error(
-            result,
-            "5.1.1 Bad destination mailbox address: "
-            "Bad stream token from email recipient " + stream_to_address,
-        )
-
-    def test_success_to_stream_with_good_token_wrong_stream_name(self) -> None:
-        stream = get_stream("Denmark", get_realm("zulip"))
-        stream_to_address = encode_email_address(stream)
-        stream_to_address = stream_to_address.replace("denmark", "Wrong_name")
-
-        result = self.send_offline_message(stream_to_address, self.example_user("hamlet"))
-        self.assert_json_success(result)
-
-    def test_success_to_private(self) -> None:
-        mm_address = self.send_private_message()
-        result = self.send_offline_message(mm_address, self.example_user("cordelia"))
-        self.assert_json_success(result)
-
-    def test_using_mm_address_multiple_times(self) -> None:
-        mm_address = self.send_private_message()
-        # there is no longer a usage limit.  Ensure we can send multiple times.
-        for i in range(5):
-            result = self.send_offline_message(mm_address, self.example_user("cordelia"))
-            self.assert_json_success(result)
-
-    def test_wrong_missed_email_private_message(self) -> None:
-        self.send_private_message()
-        mm_address = "mm" + ("x" * 32) + "@testserver"
-        result = self.send_offline_message(mm_address, self.example_user("cordelia"))
-        self.assert_json_error(
-            result,
-            "5.1.1 Bad destination mailbox address: Zulip notification reply address is invalid.",
-        )
-
-
 class TestStreamEmailMessagesSubjectStripping(ZulipTestCase):
     def test_process_message_strips_subject(self) -> None:
         user_profile = self.example_user("hamlet")
         self.login_user(user_profile)
         self.subscribe(user_profile, "Denmark")
         stream = get_stream("Denmark", user_profile.realm)
-        stream_to_address = encode_email_address(stream)
+        email_token = get_channel_email_token(stream, creator=user_profile, sender=user_profile)
+        stream_to_address = encode_email_address(stream.name, email_token)
         incoming_valid_message = EmailMessage()
         incoming_valid_message.set_content("TestStreamEmailMessages body")
-        incoming_valid_message["Subject"] = "Re: Fwd: Re: AW: Test"
+        incoming_valid_message["Subject"] = "Re: Fwd: Re: AW: SV: Re[12]: Test"
         incoming_valid_message["From"] = self.example_email("hamlet")
         incoming_valid_message["To"] = stream_to_address
         incoming_valid_message["Reply-to"] = self.example_email("othello")
@@ -1630,6 +1828,59 @@ class TestStreamEmailMessagesSubjectStripping(ZulipTestCase):
             stripped = strip_from_subject(subject["original_subject"])
             self.assertEqual(stripped, subject["stripped_subject"])
 
+    def test_subject_added_for_every_message(self) -> None:
+        hamlet = self.example_user("hamlet")
+        self.login_user(hamlet)
+        stream = self.subscribe(hamlet, "Denmark")
+
+        long_subject = "S" * (MAX_TOPIC_NAME_LENGTH + 10)
+        email_body = "TestStreamEmailMessages body"
+        email_token = get_channel_email_token(stream, creator=hamlet, sender=hamlet)
+        stream_to_address = encode_email_address(stream.name, email_token)
+        stream_to_address_with_sender = encode_email_address(
+            stream.name, email_token, show_sender=True
+        )
+
+        def get_incoming_valid_message(to: str, subject: str = long_subject) -> EmailMessage:
+            message = EmailMessage()
+            message.set_content(email_body)
+            message["Subject"] = subject
+            message["From"] = self.example_email("hamlet")
+            message["To"] = to
+            message["Reply-to"] = self.example_email("othello")
+            return message
+
+        process_message(get_incoming_valid_message(stream_to_address))
+        message = most_recent_message(hamlet)
+        self.assertEqual(truncate_topic(long_subject), message.topic_name())
+        self.assertEqual(
+            f"**Subject:** {long_subject}\n\n{email_body}",
+            message.content,
+        )
+
+        process_message(get_incoming_valid_message(stream_to_address_with_sender))
+        message = most_recent_message(hamlet)
+        self.assertEqual(truncate_topic(long_subject), message.topic_name())
+        self.assertEqual(
+            f"**From:** {hamlet.delivery_email}\n**Subject:** {long_subject}\n\n{email_body}",
+            message.content,
+        )
+
+        # Two different long subjects that truncate to the same topic name
+        # should each still show their full subject in the body.
+        subject_a = "S" * MAX_TOPIC_NAME_LENGTH + "AAAA"
+        subject_b = "S" * MAX_TOPIC_NAME_LENGTH + "BBBB"
+        self.assertEqual(truncate_topic(subject_a), truncate_topic(subject_b))
+
+        for full_subject in (subject_a, subject_b):
+            process_message(get_incoming_valid_message(stream_to_address, subject=full_subject))
+            message = most_recent_message(hamlet)
+            self.assertEqual(truncate_topic(full_subject), message.topic_name())
+            self.assertEqual(
+                f"**Subject:** {full_subject}\n\n{email_body}",
+                message.content,
+            )
+
 
 # If the Content-Type header didn't specify a charset, the text content
 # of the email used to not be properly found. Test that this is fixed:
@@ -1639,15 +1890,16 @@ class TestContentTypeUnspecifiedCharset(ZulipTestCase):
         message_as_string = message_as_string.replace(
             'Content-Type: text/plain; charset="us-ascii"', "Content-Type: text/plain"
         )
-        incoming_message = message_from_string(message_as_string, policy=email.policy.default)
-        # https://github.com/python/typeshed/issues/2417
-        assert isinstance(incoming_message, EmailMessage)
+        incoming_message = email.parser.Parser(
+            _class=EmailMessage, policy=email.policy.default
+        ).parsestr(message_as_string)
 
         user_profile = self.example_user("hamlet")
         self.login_user(user_profile)
         self.subscribe(user_profile, "Denmark")
         stream = get_stream("Denmark", user_profile.realm)
-        stream_to_address = encode_email_address(stream)
+        email_token = get_channel_email_token(stream, creator=user_profile, sender=user_profile)
+        stream_to_address = encode_email_address(stream.name, email_token)
 
         del incoming_message["To"]
         incoming_message["To"] = stream_to_address
@@ -1664,15 +1916,16 @@ class TestContentTypeInvalidCharset(ZulipTestCase):
             'Content-Type: text/plain; charset="us-ascii"',
             'Content-Type: text/plain; charset="bogus"',
         )
-        incoming_message = message_from_string(message_as_string, policy=email.policy.default)
-        # https://github.com/python/typeshed/issues/2417
-        assert isinstance(incoming_message, EmailMessage)
+        incoming_message = email.parser.Parser(
+            _class=EmailMessage, policy=email.policy.default
+        ).parsestr(message_as_string)
 
         user_profile = self.example_user("hamlet")
         self.login_user(user_profile)
         self.subscribe(user_profile, "Denmark")
         stream = get_stream("Denmark", user_profile.realm)
-        stream_to_address = encode_email_address(stream)
+        email_token = get_channel_email_token(stream, creator=user_profile, sender=user_profile)
+        stream_to_address = encode_email_address(stream.name, email_token)
 
         del incoming_message["To"]
         incoming_message["To"] = stream_to_address
@@ -1680,6 +1933,21 @@ class TestContentTypeInvalidCharset(ZulipTestCase):
         message = most_recent_message(user_profile)
 
         self.assertEqual(message.content, "Email fixture 1.txt body")
+
+    def test_israel_encoding_alias(self) -> None:
+        # in hebrew: shalom (שלום)
+        hebrew_text_bytes = b"\xf9\xec\xe5\xed"
+
+        message = EmailMessage()
+        message.set_payload(hebrew_text_bytes)
+
+        # testing exact string
+        message["Content-Type"] = 'text/plain; charset="iso-8859-8-i"'
+
+        # return the decoded string
+        decoded_body = get_message_part_by_type(message, "text/plain")
+
+        self.assertEqual(decoded_body, "שלום")
 
 
 class TestEmailMirrorProcessMessageNoValidRecipient(ZulipTestCase):
@@ -1704,7 +1972,8 @@ class TestEmailMirrorLogAndReport(ZulipTestCase):
         self.login_user(user_profile)
         self.subscribe(user_profile, "errors")
         stream = get_stream("Denmark", user_profile.realm)
-        stream_to_address = encode_email_address(stream)
+        email_token = get_channel_email_token(stream, creator=user_profile, sender=user_profile)
+        stream_to_address = encode_email_address(stream.name, email_token)
 
         incoming_valid_message = EmailMessage()
         incoming_valid_message.set_content("Test body")
@@ -1736,7 +2005,8 @@ class TestEmailMirrorLogAndReport(ZulipTestCase):
         stream = get_stream("Denmark", user_profile.realm)
 
         # Test for a stream address:
-        stream_to_address = encode_email_address(stream)
+        email_token = get_channel_email_token(stream, creator=user_profile, sender=user_profile)
+        stream_to_address = encode_email_address(stream.name, email_token)
         address = Address(addr_spec=stream_to_address)
         scrubbed_stream_address = Address(
             username="X" * len(address.username), domain=address.domain
@@ -1808,3 +2078,471 @@ class TestEmailMirrorLogAndReport(ZulipTestCase):
 
             redacted_message = redact_email_address(error_message)
             self.assertEqual(redacted_message, expected_message)
+
+
+class TestEmailMirrorServer(ZulipTestCase):
+    def test_send_postmaster(self) -> None:
+        email = EmailMessage()
+        email.set_content("Hello postmaster!")
+        email["Subject"] = "This goes to the postmaster"
+        email["From"] = "bogus@example.com"
+        email["To"] = "postmaster"
+        send_to_postmaster(email)
+
+        self.assert_length(mail.outbox, 1)
+        self.assertEqual(mail.outbox[0].subject, "Mail to postmaster: This goes to the postmaster")
+        self.assertEqual(mail.outbox[0].body, "")
+        self.assert_length(mail.outbox[0].attachments, 1)
+
+    def test_send_postmaster_failure(self) -> None:
+        email = EmailMessage()
+        email.set_content("Hello postmaster!")
+        email["Subject"] = "This goes to the postmaster"
+        email["From"] = "bogus@example.com"
+        email["To"] = "postmaster"
+        with (
+            mock.patch.object(EmailBackend, "send_messages", side_effect=SMTPException("moose")),
+            self.assertLogs("zerver.lib.email_mirror", "ERROR") as error_log,
+        ):
+            send_to_postmaster(email)
+            self.assert_length(error_log.output, 1)
+            self.assertEqual(
+                error_log.output[0].splitlines()[0],
+                "ERROR:zerver.lib.email_mirror:Error sending bounce email to ['desdemona+admin@zulip.com']: moose",
+            )
+
+        with (
+            mock.patch.object(
+                EmailBackend,
+                "send_messages",
+                side_effect=SMTPSenderRefused(
+                    530, b"5.5.1 Authentication required", "noreply@testserver"
+                ),
+            ),
+            self.assertLogs("zerver.lib.email_mirror", "ERROR") as error_log,
+        ):
+            send_to_postmaster(email)
+            self.assert_length(error_log.output, 1)
+            self.assertEqual(
+                error_log.output[0].splitlines()[0],
+                (
+                    "ERROR:zerver.lib.email_mirror:Error sending bounce email to ['desdemona+admin@zulip.com']"
+                    " with error code 530: b'5.5.1 Authentication required'"
+                ),
+            )
+
+    async def handler_response(self, commands: list[str]) -> list[str]:
+        responses: list[bytes] = []
+        transport = mock.Mock()
+        transport.get_extra_info.return_value = "other-host:1234"
+        transport.write = responses.append
+
+        protocol = SMTP(
+            handler=ZulipMessageHandler(),
+            hostname="testhost",
+            ident="Zulip 1.2.3",
+        )
+        protocol.connection_made(transport)
+
+        protocol.data_received(b"".join([c.encode() + b"\r\n" for c in commands]))
+
+        with suppress(asyncio.CancelledError):
+            assert protocol._handler_coroutine
+            await protocol._handler_coroutine
+
+        return [r.decode() for r in responses]
+
+    @override_settings(EMAIL_GATEWAY_PATTERN="")
+    async def test_unconfigured(self) -> None:
+        self.assertEqual(
+            await self.handler_response(
+                [
+                    "HELO localhost",
+                    "MAIL FROM: <test@example.com>",
+                    "RCPT TO: <bogus@other.example.com>",
+                    "QUIT",
+                ]
+            ),
+            [
+                "220 testhost Zulip 1.2.3\r\n",
+                "250 testhost\r\n",
+                "250 OK\r\n",
+                "550 5.1.1 Bad destination mailbox address: This server is not configured for incoming email.\r\n",
+                "221 Bye\r\n",
+            ],
+        )
+
+    @override_settings(EMAIL_GATEWAY_PATTERN="%s@zulip.example.com")
+    async def test_handler_error(self) -> None:
+        with (
+            mock.patch.object(
+                ZulipMessageHandler, "handle_RCPT", side_effect=Exception("Some bug")
+            ) as m,
+            self.assertLogs("zerver.lib.email_mirror", level="WARNING") as error_logs,
+        ):
+            self.assertEqual(
+                await self.handler_response(
+                    [
+                        "HELO localhost",
+                        "MAIL FROM: <test@example.com>",
+                        "RCPT TO: <bogus@other.example.com>",
+                        "QUIT",
+                    ]
+                ),
+                [
+                    "220 testhost Zulip 1.2.3\r\n",
+                    "250 testhost\r\n",
+                    "250 OK\r\n",
+                    "500 Server error\r\n",
+                    "221 Bye\r\n",
+                ],
+            )
+            m.assert_called_once()
+            self.assert_length(error_logs.output, 1)
+            self.assertTrue("Exception: Some bug" in error_logs.output[0])
+
+    @override_settings(EMAIL_GATEWAY_PATTERN="%s@zulip.example.com")
+    async def test_handler_invalid_domain(self) -> None:
+        self.assertEqual(
+            await self.handler_response(
+                [
+                    "HELO localhost",
+                    "MAIL FROM: <test@example.com>",
+                    "RCPT TO: <bogus@other.example.com>",
+                    "QUIT",
+                ]
+            ),
+            [
+                "220 testhost Zulip 1.2.3\r\n",
+                "250 testhost\r\n",
+                "250 OK\r\n",
+                "550 5.1.1 Bad destination mailbox address: Address not recognized by gateway.\r\n",
+                "221 Bye\r\n",
+            ],
+        )
+
+    @override_settings(EMAIL_GATEWAY_PATTERN="%s@zulip.example.com")
+    async def test_handler_invalid_recipient(self) -> None:
+        self.assertEqual(
+            await self.handler_response(
+                [
+                    "HELO localhost",
+                    "MAIL FROM: <test@example.com>",
+                    "RCPT TO: <bogus@zulip.example.com>",
+                    "QUIT",
+                ]
+            ),
+            [
+                "220 testhost Zulip 1.2.3\r\n",
+                "250 testhost\r\n",
+                "250 OK\r\n",
+                "550 5.1.1 Bad destination mailbox address: Bad stream token from email recipient bogus@zulip.example.com\r\n",
+                "221 Bye\r\n",
+            ],
+        )
+
+    @override_settings(EMAIL_GATEWAY_PATTERN="%s@zulip.example.com")
+    async def test_handler_postmaster(self) -> None:
+        for postmaster_email in ("postmaster", "postmaster@zulip.example.com"):
+            self.assertEqual(
+                await self.handler_response(
+                    [
+                        "HELO localhost",
+                        "MAIL FROM: <test@example.com>",
+                        f"RCPT TO: <{postmaster_email}>",
+                        "DATA",
+                        "From: test@example.com",
+                        f"To: {postmaster_email}",
+                        "Subject: Email the postmaster",
+                        "",
+                        "Some body!",
+                        ".",
+                        "QUIT",
+                    ]
+                ),
+                [
+                    "220 testhost Zulip 1.2.3\r\n",
+                    "250 testhost\r\n",
+                    "250 OK\r\n",
+                    "250 Continue\r\n",
+                    "354 End data with <CR><LF>.<CR><LF>\r\n",
+                    "250 OK\r\n",
+                    "221 Bye\r\n",
+                ],
+            )
+
+            self.assert_length(mail.outbox, 1)
+            mail.outbox = []
+
+    @override_settings(
+        EMAIL_GATEWAY_PATTERN="%s@zulip.example.com", RATE_LIMITING_MIRROR_REALM_RULES=[(10, 2)]
+    )
+    async def test_handler_stream_rate_limiting(self) -> None:
+        stream_name = "some str"
+        realm = await sync_to_async(lambda: get_realm("zulip"))()
+        stream = await sync_to_async(lambda: ensure_stream(realm, stream_name, acting_user=None))()
+        hamlet = await sync_to_async(lambda: self.example_user("hamlet"))()
+        email_token = await sync_to_async(
+            lambda: get_channel_email_token(stream, creator=hamlet, sender=hamlet)
+        )()
+        email_address = encode_email_address(stream.name, email_token)
+        RateLimitedRealmMirror(realm).clear_history()
+        now = timezone_now()
+        with time_machine.travel(now, tick=False):
+            for i in (1, 2):
+                with mock.patch(
+                    "zerver.lib.email_mirror_server.queue_json_publish_rollback_unsafe"
+                ) as m:
+                    await self.handler_response(
+                        [
+                            "HELO localhost",
+                            "MAIL FROM: <test@example.com>",
+                            f"RCPT TO: <{email_address}>",
+                            "DATA",
+                            f"From: {hamlet.delivery_email}",
+                            f"To: {email_address}",
+                            "Subject: Stream message",
+                            "",
+                            "Some body!",
+                            ".",
+                            "QUIT",
+                        ]
+                    )
+                    m.assert_called_once()
+            self.assertEqual(
+                await self.handler_response(
+                    [
+                        "HELO localhost",
+                        "MAIL FROM: <test@example.com>",
+                        f"RCPT TO: <{email_address}>",
+                        "QUIT",
+                    ]
+                ),
+                [
+                    "220 testhost Zulip 1.2.3\r\n",
+                    "250 testhost\r\n",
+                    "250 OK\r\n",
+                    "550 4.7.0 Rate-limited due to too many emails on this realm.\r\n",
+                    "221 Bye\r\n",
+                ],
+            )
+        with (
+            time_machine.travel(now + timedelta(hours=1), tick=False),
+            mock.patch("zerver.lib.email_mirror_server.queue_json_publish_rollback_unsafe") as m,
+        ):
+            await self.handler_response(
+                [
+                    "HELO localhost",
+                    "MAIL FROM: <test@example.com>",
+                    f"RCPT TO: <{email_address}>",
+                    "DATA",
+                    f"From: {hamlet.delivery_email}",
+                    f"To: {email_address}",
+                    "Subject: Stream message",
+                    "",
+                    "Some body!",
+                    ".",
+                    "QUIT",
+                ]
+            )
+            m.assert_called_once()
+
+    @override_settings(EMAIL_GATEWAY_PATTERN="%s@zulip.example.com")
+    async def test_handler_invalid_missedmessage(self) -> None:
+        email_address = settings.EMAIL_GATEWAY_PATTERN % (generate_missed_message_token(),)
+        self.assertEqual(
+            await self.handler_response(
+                [
+                    "HELO localhost",
+                    "MAIL FROM: <test@example.com>",
+                    f"RCPT TO: <{email_address}>",
+                    "QUIT",
+                ]
+            ),
+            [
+                "220 testhost Zulip 1.2.3\r\n",
+                "250 testhost\r\n",
+                "250 OK\r\n",
+                "550 5.1.1 Bad destination mailbox address: Zulip notification reply address is invalid.\r\n",
+                "221 Bye\r\n",
+            ],
+        )
+
+    @override_settings(EMAIL_GATEWAY_PATTERN="%s@zulip.example.com")
+    async def test_handler_missedmessage_denied(self) -> None:
+        hamlet = await sync_to_async(lambda: self.example_user("hamlet"))()
+        othello = await sync_to_async(lambda: self.example_user("othello"))()
+        await sync_to_async(lambda: self.send_stream_message(hamlet, "Denmark", "Some message"))()
+        mm_address = await sync_to_async(
+            lambda: create_missed_message_address(othello, most_recent_message(othello))
+        )()
+        # Deactivate the stream so the mail bounces
+        await sync_to_async(
+            lambda: do_deactivate_stream(get_stream("Denmark", othello.realm), acting_user=None)
+        )()
+        self.assertEqual(
+            await self.handler_response(
+                [
+                    "HELO localhost",
+                    "MAIL FROM: <test@example.com>",
+                    f"RCPT TO: <{mm_address}>",
+                    "QUIT",
+                ]
+            ),
+            [
+                "220 testhost Zulip 1.2.3\r\n",
+                "250 testhost\r\n",
+                "250 OK\r\n",
+                "550 5.7.1 Permission denied: Not authorized to send to channel 'Denmark'\r\n",
+                "221 Bye\r\n",
+            ],
+        )
+
+    @override_settings(EMAIL_GATEWAY_PATTERN="%s@zulip.example.com")
+    async def test_handler_missedmessage(self) -> None:
+        othello = await sync_to_async(lambda: self.example_user("othello"))()
+        usermessage = await sync_to_async(lambda: most_recent_usermessage(othello))()
+        mm_address = await sync_to_async(
+            lambda: create_missed_message_address(othello, usermessage.message)
+        )()
+        with mock.patch("zerver.lib.email_mirror_server.queue_json_publish_rollback_unsafe") as m:
+            self.assertEqual(
+                await self.handler_response(
+                    [
+                        "HELO localhost",
+                        "MAIL FROM: <test@example.com>",
+                        f"RCPT TO: <{mm_address}>",
+                        "DATA",
+                        f"From: {othello.delivery_email}",
+                        f"To: {mm_address}",
+                        "Subject: Missed-message reply",
+                        "",
+                        "Some body!",
+                        ".",
+                        "QUIT",
+                    ]
+                ),
+                [
+                    "220 testhost Zulip 1.2.3\r\n",
+                    "250 testhost\r\n",
+                    "250 OK\r\n",
+                    "250 Continue\r\n",
+                    "354 End data with <CR><LF>.<CR><LF>\r\n",
+                    "250 OK\r\n",
+                    "221 Bye\r\n",
+                ],
+            )
+            message_lines = (
+                f"From: {othello.delivery_email}",
+                f"To: {mm_address}",
+                "Subject: Missed-message reply",
+                "X-Peer: other-host:1234",
+                "X-MailFrom: test@example.com",
+                f"X-RcptTo: {mm_address}",
+                "",
+                "Some body!",
+            )
+            m.assert_called_once_with(
+                "email_mirror",
+                {
+                    "rcpt_to": mm_address,
+                    "msg_base64": base64.b64encode(
+                        b"".join([line.encode() + b"\n" for line in message_lines])
+                    ).decode(),
+                },
+            )
+
+    @override_settings(EMAIL_GATEWAY_PATTERN="%s@zulip.example.com")
+    async def test_handler_stream(self) -> None:
+        stream_name = "some str"
+        realm = await sync_to_async(lambda: get_realm("zulip"))()
+        stream = await sync_to_async(lambda: ensure_stream(realm, stream_name, acting_user=None))()
+        hamlet = await sync_to_async(lambda: self.example_user("hamlet"))()
+        email_gateway_bot = await sync_to_async(
+            lambda: get_system_bot(settings.EMAIL_GATEWAY_BOT, realm.id)
+        )()
+        for sender in (hamlet, email_gateway_bot):
+            email_token = await sync_to_async(
+                lambda sender: get_channel_email_token(stream, creator=hamlet, sender=sender)
+            )(sender)
+            email_address = encode_email_address(stream.name, email_token)
+            with mock.patch(
+                "zerver.lib.email_mirror_server.queue_json_publish_rollback_unsafe"
+            ) as m:
+                self.assertEqual(
+                    await self.handler_response(
+                        [
+                            "HELO localhost",
+                            "MAIL FROM: <test@example.com>",
+                            f"RCPT TO: <{email_address}>",
+                            "DATA",
+                            f"From: {hamlet.delivery_email}",
+                            f"To: {email_address}",
+                            "Subject: Stream message",
+                            "",
+                            "Some body!",
+                            ".",
+                            "QUIT",
+                        ]
+                    ),
+                    [
+                        "220 testhost Zulip 1.2.3\r\n",
+                        "250 testhost\r\n",
+                        "250 OK\r\n",
+                        "250 Continue\r\n",
+                        "354 End data with <CR><LF>.<CR><LF>\r\n",
+                        "250 OK\r\n",
+                        "221 Bye\r\n",
+                    ],
+                )
+                message_lines = (
+                    f"From: {hamlet.delivery_email}",
+                    f"To: {email_address}",
+                    "Subject: Stream message",
+                    "X-Peer: other-host:1234",
+                    "X-MailFrom: test@example.com",
+                    f"X-RcptTo: {email_address}",
+                    "",
+                    "Some body!",
+                )
+                m.assert_called_once_with(
+                    "email_mirror",
+                    {
+                        "rcpt_to": email_address,
+                        "msg_base64": base64.b64encode(
+                            b"".join([line.encode() + b"\n" for line in message_lines])
+                        ).decode(),
+                    },
+                )
+
+    @override_settings(EMAIL_GATEWAY_PATTERN="%s@zulip.example.com")
+    async def test_handler_stream_deactivated(self) -> None:
+        stream_name = "some str"
+        realm = await sync_to_async(lambda: get_realm("zulip"))()
+        stream = await sync_to_async(lambda: ensure_stream(realm, stream_name, acting_user=None))()
+        hamlet = await sync_to_async(lambda: self.example_user("hamlet"))()
+        email_token = await sync_to_async(
+            lambda: get_channel_email_token(stream, creator=hamlet, sender=hamlet)
+        )()
+        email_address = encode_email_address(stream.name, email_token)
+
+        # Deactivate the stream so the mail bounces
+        await sync_to_async(lambda: do_deactivate_stream(stream, acting_user=None))()
+
+        self.assertEqual(
+            await self.handler_response(
+                [
+                    "HELO localhost",
+                    "MAIL FROM: <test@example.com>",
+                    f"RCPT TO: <{email_address}>",
+                    "QUIT",
+                ]
+            ),
+            [
+                "220 testhost Zulip 1.2.3\r\n",
+                "250 testhost\r\n",
+                "250 OK\r\n",
+                "550 5.7.1 Permission denied: Not authorized to send to channel 'some str'\r\n",
+                "221 Bye\r\n",
+            ],
+        )

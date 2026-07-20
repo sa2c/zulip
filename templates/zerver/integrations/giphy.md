@@ -1,14 +1,14 @@
-# GIPHY GIF integration
+# Zulip GIPHY GIF integration
 
-Send animated GIFs with your message using GIPHY integration.
+Send animated GIFs with your message using GIPHY.
 
-![](/static/images/integrations/giphy/GIPHY_zulip.png)
+GIPHY is enabled by default in Zulip Cloud. Follow
+[these instructions][configure-giphy] to configure GIPHY on a
+**self-hosted** Zulip server.
 
-GIPHY is enabled by default in Zulip Cloud. If the you're on a
-self-hosted server where the [GIPHY integration][help-center-giphy]
-isn't already configured, see the [configuration
-instructions][configure-giphy] to enable it.
+### Related documentation
 
+* [Using GIFs in Zulip][help-center-gifs]
 
-[help-center-giphy]: /help/animated-gifs-from-giphy
-[configure-giphy]: https://zulip.readthedocs.io/en/latest/production/giphy-gif-integration.html
+[help-center-gifs]: /help/animated-gifs
+[configure-giphy]: https://zulip.readthedocs.io/en/latest/production/gif-picker-integrations.html#giphy

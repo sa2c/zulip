@@ -1,10 +1,9 @@
-import {z} from "zod";
+import * as z from "zod/mini";
 
-import * as blueslip from "./blueslip";
-import * as common from "./common";
-import * as dialog_widget from "./dialog_widget";
-import {$t_html} from "./i18n";
-import {localstorage} from "./localstorage";
+import * as blueslip from "./blueslip.ts";
+import * as dialog_widget from "./dialog_widget.ts";
+import {$t, $t_html} from "./i18n.ts";
+import {localstorage} from "./localstorage.ts";
 
 export function get_hotkey_deprecation_notice(
     originalHotkey: string,
@@ -23,13 +22,9 @@ let shown_deprecation_notices: string[] = [];
 
 export function maybe_show_deprecation_notice(key: string): void {
     let message;
-    const isCmdOrCtrl = common.has_mac_keyboard() ? "Cmd" : "Ctrl";
     switch (key) {
         case "Shift + C":
             message = get_hotkey_deprecation_notice("Shift + C", "X");
-            break;
-        case "*":
-            message = get_hotkey_deprecation_notice("*", isCmdOrCtrl + " + S");
             break;
         case "Shift + S":
             message = get_hotkey_deprecation_notice("Shift + S", "S");
@@ -56,9 +51,10 @@ export function maybe_show_deprecation_notice(key: string): void {
 
     if (!shown_deprecation_notices.includes(key)) {
         dialog_widget.launch({
-            html_heading: $t_html({defaultMessage: "Deprecation notice"}),
-            html_body: message,
-            html_submit_button: $t_html({defaultMessage: "Got it"}),
+            modal_title_html: $t_html({defaultMessage: "Deprecation notice"}),
+            modal_content_html: message,
+            modal_submit_button_text: $t({defaultMessage: "Got it"}),
+            is_compact: true,
             on_click() {
                 return;
             },

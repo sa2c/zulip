@@ -37,6 +37,8 @@ class zulip::profile::base {
         'apt-transport-https',
         # Needed for the cron jobs installed by Puppet
         'cron',
+        # Applies log rotation config installed by Puppet
+        'logrotate',
       ]
     }
     'RedHat': {
@@ -81,26 +83,26 @@ class zulip::profile::base {
     links  => follow,
   }
   file { ['/etc/zulip/zulip.conf', '/etc/zulip/settings.py']:
-    ensure  => file,
+    ensure  => present,
     require => File['/etc/zulip'],
     mode    => '0644',
     owner   => 'zulip',
     group   => 'zulip',
   }
   file { '/etc/zulip/zulip-secrets.conf':
-    ensure  => file,
+    ensure  => present,
     require => File['/etc/zulip'],
     mode    => '0640',
     owner   => 'zulip',
     group   => 'zulip',
   }
 
-  file { '/etc/security/limits.conf':
+  file { '/etc/security/limits.d/zulip.conf':
     ensure => file,
     mode   => '0640',
     owner  => 'root',
     group  => 'root',
-    source => 'puppet:///modules/zulip/security/limits.conf',
+    source => 'puppet:///modules/zulip/limits.d/zulip.conf',
   }
   file { '/etc/systemd/system.conf.d/':
     ensure => directory,
@@ -136,13 +138,5 @@ class zulip::profile::base {
     mode   => '0750',
   }
 
-  file { "${zulip::common::nagios_plugins_dir}/zulip_base":
-    require => Package[$zulip::common::nagios_plugins],
-    recurse => true,
-    purge   => true,
-    owner   => 'root',
-    group   => 'root',
-    mode    => '0755',
-    source  => 'puppet:///modules/zulip/nagios_plugins/zulip_base',
-  }
+  zulip::nagios_plugins { 'zulip_base': }
 }

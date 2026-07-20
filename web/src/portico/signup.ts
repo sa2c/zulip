@@ -1,15 +1,25 @@
 import $ from "jquery";
+import _ from "lodash";
 import assert from "minimalistic-assert";
-import {z} from "zod";
+import * as z from "zod/mini";
 
-import * as common from "../common";
-import {$t} from "../i18n";
-import {password_quality, password_warning} from "../password_quality";
-import * as settings_config from "../settings_config";
+import {page_params as base_page_params} from "../base_page_params.ts";
+import * as common from "../common.ts";
+import * as emojisets from "../emojisets.ts";
+import {$t} from "../i18n.ts";
+import {password_quality, password_warning} from "../password_quality.ts";
+import * as settings_config from "../settings_config.ts";
 
-import * as portico_modals from "./portico_modals";
+import * as portico_modals from "./portico_modals.ts";
+
+/* global AltchaWidgetMethods, AltchaStateChangeEvent */
+import "altcha";
 
 $(() => {
+    // Initialize emoji rendering for login/signup pages
+    if (base_page_params.page_type === "login" && "realm_default_emojiset" in base_page_params) {
+        emojisets.initialize(base_page_params.realm_default_emojiset);
+    }
     // NB: this file is included on multiple pages.  In each context,
     // some of the jQuery selectors below will return empty lists.
 
@@ -24,10 +34,19 @@ $(() => {
         // was just reloaded due to a validation failure on the backend.
         password_quality($password_field.val()!, $("#pw_strength .bar"), $password_field);
 
+        const debounced_password_quality = _.debounce((password_value: string, $field: JQuery) => {
+            password_quality(password_value, $("#pw_strength .bar"), $field);
+        }, 300);
+
         $password_field.on("input", function () {
-            // Update the password strength bar even if we aren't validating
-            // the field yet.
-            password_quality($(this).val()!, $("#pw_strength .bar"), $(this));
+            const password_value = $(this).val()!;
+
+            if (password_value.length > 30) {
+                debounced_password_quality(password_value, $(this));
+            } else {
+                debounced_password_quality.cancel();
+                password_quality(password_value, $("#pw_strength .bar"), $(this));
+            }
         });
     }
 
@@ -48,9 +67,18 @@ $(() => {
         "#id_new_password2 ~ .password_visibility_toggle",
     );
 
-    $("#registration, #password_reset, #create_realm").validate({
+    $("#registration, #password_reset, #create_realm, #create_demo_realm").validate({
         rules: {
-            password: "password_strength",
+            password: {
+                password_strength: {
+                    depends(element: HTMLElement): boolean {
+                        // In the registration flow where the user is required to
+                        // enter their LDAP password, we don't check password strength,
+                        // and the validator method is not even set up.
+                        return element.id !== "ldap-password";
+                    },
+                },
+            },
             new_password1: "password_strength",
         },
         errorElement: "p",
@@ -74,7 +102,7 @@ $(() => {
         if ($(".help-inline:not(:empty)").length === 0) {
             // Find the first input field present in the form that is
             // not hidden and disabled and store it in a variable.
-            const $firstInputElement = $("input:not(:hidden, :disabled)").first();
+            const $firstInputElement = $("input:not([type=hidden], :disabled)").first();
             // Focus on the first input field in the form.
             $firstInputElement.trigger("focus");
             // Override the automatic scroll to the focused
@@ -100,6 +128,10 @@ $(() => {
         }
 
         $("#timezone").val(new Intl.DateTimeFormat().resolvedOptions().timeZone);
+    }
+
+    if ($("#demo-realm-creation").length > 0) {
+        $("#demo-creator-timezone").val(new Intl.DateTimeFormat().resolvedOptions().timeZone);
     }
 
     $("#registration").on("submit", () => {
@@ -153,8 +185,8 @@ $(() => {
     $<HTMLInputElement>(".register-page input#email, .login-page-container input#id_username").on(
         "focusout keydown",
         function (e) {
-            // check if it is the "focusout" or if it is a keydown, then check if
-            // the keycode was the one for "Enter".
+            // check if it is the "focusout" or if it is a keydown, then check
+            // if the key was "Enter"
             if (e.type === "focusout" || e.key === "Enter") {
                 $(this).val($(this).val()!.trim());
             }
@@ -185,10 +217,10 @@ $(() => {
             $("#login_form .alert.alert-error").remove();
         },
         showErrors(error_map) {
-            if (error_map.password) {
+            if (error_map["password"]) {
                 $("#login_form .alert.alert-error").remove();
             }
-            this.defaultShowErrors!();
+            this.defaultShowErrors();
         },
     });
 
@@ -197,14 +229,14 @@ $(() => {
         void $.get(url, (response) => {
             const {msg} = z.object({msg: z.string()}).parse(response);
             if (msg !== "available") {
-                $("#id_team_subdomain_error_client").html(msg);
+                $("#id_team_subdomain_error_client").text(msg);
                 $("#id_team_subdomain_error_client").show();
             }
         });
     }
 
     function update_full_name_section(): void {
-        if ($("#source_realm_select").length && $("#source_realm_select").val() !== "") {
+        if ($("#source_realm_select").length > 0 && $("#source_realm_select").val() !== "") {
             $("#full_name_input_section").hide();
             $("#profile_info_section").show();
             const avatar_url = $($("#source_realm_select").prop("selectedOptions")).attr(
@@ -256,7 +288,7 @@ $(() => {
         let selected_option_text;
 
         // These strings should be consistent with those defined for the same element in
-        // 'templates/zerver/register.html'.
+        // 'templates/zerver/create_user/new_user_email_address_visibility.html'.
         switch (selected_val) {
             case settings_config.email_address_visibility_values.admins_only.code: {
                 selected_option_text = $t({
@@ -292,8 +324,8 @@ $(() => {
         $("#new-user-email-address-visibility .current-selected-option").text(selected_option_text);
     });
 
-    $("#registration").on("click keypress", ".edit-realm-details", (e) => {
-        if (e.type === "keypress" && e.key !== "Enter") {
+    $("#registration").on("click keydown", ".edit-realm-details", (e) => {
+        if (e.type === "keydown" && e.key !== "Enter") {
             return;
         }
 
@@ -307,39 +339,103 @@ $(() => {
         $(e.target).hide();
     });
 
-    $("#how-realm-creator-found-zulip select").on("change", function () {
-        const elements: Record<string, string> = {
-            Other: "how-realm-creator-found-zulip-other",
-            Advertisement: "how-realm-creator-found-zulip-where-ad",
-            "At an organization that's using it":
-                "how-realm-creator-found-zulip-which-organization",
-        };
+    $("form.select-email-form").on("keydown", function (e) {
+        if (e.key === "Enter") {
+            e.preventDefault();
+            $(this).trigger("submit");
+        }
+    });
+
+    $<HTMLSelectElement>("#how-realm-creator-found-zulip select").on("change", function () {
+        const elements = new Map([
+            ["other", "how-realm-creator-found-zulip-other"],
+            ["ad", "how-realm-creator-found-zulip-where-ad"],
+            ["existing_user", "how-realm-creator-found-zulip-which-organization"],
+            ["review_site", "how-realm-creator-found-zulip-review-site"],
+            ["ai_chatbot", "how-realm-creator-found-zulip-which-ai-chatbot"],
+        ]);
 
         const hideElement = (element: string): void => {
-            const $element = $(`#${element}`);
+            const $element = $(`#${CSS.escape(element)}`);
             $element.hide();
             $element.removeAttr("required");
-            $(`#${element}-error`).hide();
+            $(`#${CSS.escape(element)}-error`).hide();
         };
 
         const showElement = (element: string): void => {
-            const $element = $(`#${element}`);
+            const $element = $(`#${CSS.escape(element)}`);
             $element.show();
             $element.attr("required", "required");
         };
 
         // Reset state
-        for (const element of Object.values(elements)) {
+        for (const element of elements.values()) {
             if (element) {
                 hideElement(element);
             }
         }
 
         // Show the additional input box if needed.
-        const selected_option = $("option:selected", this).text();
-        const selected_element = elements[selected_option];
-        if (selected_element) {
+        const selected_element = elements.get(this.value);
+        if (selected_element !== undefined) {
             showElement(selected_element);
         }
     });
+
+    // Configure altcha
+    const altcha = document.querySelector<AltchaWidgetMethods & HTMLElement>("altcha-widget");
+    if (altcha) {
+        altcha.configure({
+            auto: "onload",
+            async customfetch(url: string, init?: RequestInit) {
+                return fetch(url, {...init, credentials: "include"});
+            },
+        });
+        const $submit = $(altcha).closest("form").find("button[type=submit]");
+        $submit.prop("disabled", true);
+        // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
+        altcha.addEventListener("statechange", ((ev: AltchaStateChangeEvent) => {
+            if (ev.detail.state === "verified") {
+                $submit.prop("disabled", false);
+                // Hide checkbox on successful verification.
+                altcha.querySelector(".altcha")!.classList.add("altcha-checkbox-hidden");
+                altcha.style.opacity = "1";
+                // Animate hiding the altcha after a delay.
+                setTimeout(() => {
+                    altcha.style.transition = "opacity 1s ease-in-out";
+                    altcha.style.opacity = "0";
+                    altcha.style.pointerEvents = "none";
+                }, 1000);
+            }
+        }) as EventListener);
+    }
+
+    if ($("a#deactivated-org-auto-redirect").length > 0) {
+        // Update the href of the deactivated organization auto-redirect link
+        // to include the current URL hash, if it exists.
+        const $deactivated_org_auto_redirect = $("a#deactivated-org-auto-redirect");
+        let new_org_url = $deactivated_org_auto_redirect.attr("href")!;
+        const url_hash = window.location.hash;
+        if (url_hash.startsWith("#")) {
+            // Ensure we don't double-add hashes and handle query parameters properly
+            const url = new URL(new_org_url);
+            url.hash = url_hash;
+            new_org_url = url.toString();
+        }
+        $deactivated_org_auto_redirect.attr("href", new_org_url);
+
+        // This is a special case for the deactivated organization page,
+        // where we want to redirect to the login page after 5 seconds.
+        const interval_id = setInterval(() => {
+            const $countdown_elt = $("#deactivated-org-auto-redirect-countdown");
+            const current_countdown = Number($countdown_elt.text());
+            if (current_countdown > 0) {
+                $countdown_elt.text((current_countdown - 1).toString());
+            } else {
+                const new_org_url = $deactivated_org_auto_redirect.attr("href")!;
+                window.location.href = new_org_url;
+                clearInterval(interval_id);
+            }
+        }, 1000);
+    }
 });

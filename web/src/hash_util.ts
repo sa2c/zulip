@@ -1,81 +1,129 @@
-import * as internal_url from "../shared/src/internal_url";
+// See the Zulip URL spec at https://zulip.com/api/zulip-urls
 
-import * as blueslip from "./blueslip";
-import type {Message} from "./message_store";
-import {page_params} from "./page_params";
-import * as people from "./people";
-import * as settings_data from "./settings_data";
-import type {NarrowTerm} from "./state_data";
-import * as stream_data from "./stream_data";
-import * as sub_store from "./sub_store";
-import type {StreamSubscription} from "./sub_store";
-import * as user_groups from "./user_groups";
-import type {UserGroup} from "./user_groups";
-import * as util from "./util";
+import assert from "minimalistic-assert";
+import * as z from "zod/mini";
 
-export function build_reload_url(): string {
+import * as blueslip from "./blueslip.ts";
+import * as channel_folders from "./channel_folders.ts";
+import * as filter_util from "./filter_util.ts";
+import * as hash_parser from "./hash_parser.ts";
+import * as internal_url from "./internal_url.ts";
+import type {Message} from "./message_store.ts";
+import * as people from "./people.ts";
+import {web_channel_default_view_values} from "./settings_config.ts";
+import * as settings_data from "./settings_data.ts";
+import type {SettingsPanelMenu} from "./settings_panel_menu.ts";
+import {
+    current_user,
+    narrow_canonical_term_schema,
+    narrow_operator_schema,
+    realm,
+} from "./state_data.ts";
+import type {NarrowCanonicalOperator, NarrowCanonicalTerm, NarrowTerm} from "./state_data.ts";
+import * as stream_data from "./stream_data.ts";
+import * as sub_store from "./sub_store.ts";
+import type {StreamSubscription} from "./sub_store.ts";
+import * as user_groups from "./user_groups.ts";
+import type {UserGroup} from "./user_groups.ts";
+import {user_settings} from "./user_settings.ts";
+import * as util from "./util.ts";
+
+export function get_reload_hash(): string {
     let hash = window.location.hash;
-    if (hash.length !== 0 && hash.startsWith("#")) {
+    if (hash.startsWith("#")) {
         hash = hash.slice(1);
     }
-    return "+oldhash=" + encodeURIComponent(hash);
+    return hash;
 }
 
-export function encode_operand(operator: string, operand: string): string {
-    if (
-        operator === "group-pm-with" ||
-        operator === "dm-including" ||
-        operator === "dm" ||
-        operator === "sender" ||
-        operator === "pm-with"
-    ) {
-        const slug = people.emails_to_slug(operand);
-        if (slug) {
-            return slug;
-        }
+export function encode_operand(term: NarrowCanonicalTerm): string {
+    let slug: string | undefined;
+    switch (term.operator) {
+        case "dm-including":
+        case "dm":
+            slug = people.user_ids_to_slug(term.operand);
+            break;
+        case "sender":
+        case "mentions":
+            slug = people.user_ids_to_slug([term.operand]);
+            break;
+        case "channel":
+            return encode_stream_id(Number.parseInt(term.operand, 10));
     }
 
-    if (operator === "stream") {
-        return encode_stream_name(operand);
-    }
-
-    return internal_url.encodeHashComponent(operand);
+    return slug ?? internal_url.encodeHashComponent(String(term.operand));
 }
 
-export function encode_stream_name(operand: string): string {
-    // stream_data prefixes the stream id, but it does not do the
+export function encode_stream_id(stream_id: number): string {
+    // stream_data postfixes the stream name, but it does not do the
     // URI encoding piece
-    operand = stream_data.name_to_slug(operand);
+    const slug = stream_data.id_to_slug(stream_id);
 
-    return internal_url.encodeHashComponent(operand);
+    return internal_url.encode_slug(stream_id, slug);
 }
 
-export function decode_operand(operator: string, operand: string): string {
-    if (
-        operator === "group-pm-with" ||
-        operator === "dm-including" ||
-        operator === "dm" ||
-        operator === "sender" ||
-        operator === "pm-with"
-    ) {
-        const emails = people.slug_to_emails(operand);
-        if (emails) {
-            return emails;
+export function decode_operand(
+    operator: NarrowCanonicalOperator,
+    operand: string,
+): NarrowTerm["operand"] {
+    if (operand === "me") {
+        switch (operator) {
+            case "sender":
+                return people.my_current_user_id();
+            case "dm":
+                return [people.my_current_user_id()];
         }
+    }
+
+    if (operator === "dm-including" || operator === "dm") {
+        const user_ids = people.slug_to_user_ids(operand);
+        if (user_ids) {
+            return user_ids;
+        }
+    }
+
+    if (operator === "sender" || operator === "mentions") {
+        const user_ids = people.slug_to_user_ids(operand);
+        if (user_ids?.length !== 1) {
+            // User mistyped the URL since we don't support
+            // group operand for `sender` or `mentions` narrow.
+            // Returning -1 will lead to us showing a proper
+            // user doesn't exist message in the UI.
+            // Other options is to throw an error which will
+            // lead to us showing a "Invalid URL" banner which
+            // is not very nice looking.
+            return -1;
+        }
+        return util.the(user_ids);
     }
 
     operand = internal_url.decodeHashComponent(operand);
 
-    if (util.canonicalize_stream_synonyms(operator) === "stream") {
-        return stream_data.slug_to_name(operand);
+    if (operator === "channel") {
+        return stream_data.slug_to_stream_id(operand)?.toString() ?? "";
     }
 
     return operand;
 }
 
+export function by_channel_topic_list_url(channel_id: number): string {
+    return internal_url.by_channel_topic_list_url(channel_id, sub_store.maybe_get_stream_name);
+}
+
 export function by_stream_url(stream_id: number): string {
     // Wrapper for web use of internal_url.by_stream_url
     return internal_url.by_stream_url(stream_id, sub_store.maybe_get_stream_name);
+}
+
+export function channel_url_by_user_setting(channel_id: number): string {
+    if (
+        user_settings.web_channel_default_view ===
+            web_channel_default_view_values.list_of_topics.code &&
+        !stream_data.is_empty_topic_only_channel(channel_id)
+    ) {
+        return by_channel_topic_list_url(channel_id);
+    }
+    return by_stream_url(channel_id);
 }
 
 export function by_stream_topic_url(stream_id: number, topic: string): string {
@@ -86,7 +134,7 @@ export function by_stream_topic_url(stream_id: number, topic: string): string {
 // Encodes a term list into the
 // corresponding hash: the # component
 // of the narrow URL
-export function search_terms_to_hash(terms?: NarrowTerm[]): string {
+export function search_terms_to_hash(terms?: NarrowCanonicalTerm[]): string {
     // Note: This does not return the correct hash for combined feed, recent and inbox view.
     // These views can have multiple hashes that lead to them, so this function cannot support them.
     let hash = "#";
@@ -95,29 +143,25 @@ export function search_terms_to_hash(terms?: NarrowTerm[]): string {
         hash = "#narrow";
 
         for (const term of terms) {
-            // Support legacy tuples.
-            const operator = util.canonicalize_stream_synonyms(term.operator);
-            const operand = term.operand;
-
             const sign = term.negated ? "-" : "";
             hash +=
                 "/" +
                 sign +
-                internal_url.encodeHashComponent(operator) +
+                internal_url.encodeHashComponent(term.operator) +
                 "/" +
-                encode_operand(operator, operand);
+                encode_operand(term);
         }
     }
 
     return hash;
 }
 
-export function by_sender_url(reply_to: string): string {
-    return search_terms_to_hash([{operator: "sender", operand: reply_to}]);
+export function by_sender_url(user_id: number): string {
+    return search_terms_to_hash([{operator: "sender", operand: user_id}]);
 }
 
-export function pm_with_url(reply_to: string): string {
-    const slug = people.emails_to_slug(reply_to);
+export function pm_with_url(user_ids_string: string): string {
+    const slug = people.user_ids_string_to_slug(user_ids_string);
     return "#narrow/dm/" + slug;
 }
 
@@ -151,12 +195,15 @@ export function group_edit_url(group: UserGroup, right_side_tab: string): string
     return hash;
 }
 
-export function search_public_streams_notice_url(terms: NarrowTerm[]): string {
-    const public_operator = {operator: "channels", operand: "public"};
+export function search_public_streams_notice_url(terms: NarrowCanonicalTerm[]): string {
+    const public_operator: NarrowCanonicalTerm = {operator: "channels", operand: "public"};
     return search_terms_to_hash([public_operator, ...terms]);
 }
 
-export function parse_narrow(hash: string[]): NarrowTerm[] | undefined {
+export function parse_narrow(hash: string[]): NarrowCanonicalTerm[] | undefined {
+    // There's a Python copy of this function in `zerver/lib/url_decoding.py`
+    // called `parse_narrow_url`, the two should be kept roughly in sync.
+
     // This will throw an exception when passed an invalid hash
     // at the decodeHashComponent call, handle appropriately.
     let i;
@@ -172,7 +219,7 @@ export function parse_narrow(hash: string[]): NarrowTerm[] | undefined {
 
         const raw_operand = hash[i + 1];
 
-        if (!raw_operand) {
+        if (raw_operand === undefined) {
             return undefined;
         }
 
@@ -182,10 +229,30 @@ export function parse_narrow(hash: string[]): NarrowTerm[] | undefined {
             operator = operator.slice(1);
         }
 
-        const operand = decode_operand(operator, raw_operand);
-        terms.push({negated, operator, operand});
+        // We allow the empty string as a topic name.
+        // Any other operand being empty string is invalid.
+        if (operator !== "topic" && raw_operand === "") {
+            return undefined;
+        }
+
+        let canonical_operator = filter_util.canonicalize_operator(
+            narrow_operator_schema.parse(operator),
+        );
+        let operand = decode_operand(canonical_operator, raw_operand);
+
+        // mentions:me is equivalent to is:mentioned.
+        if (canonical_operator === "mentions" && raw_operand === "me") {
+            canonical_operator = "is";
+            operand = "mentioned";
+        }
+
+        terms.push({
+            negated,
+            operator: canonical_operator,
+            operand,
+        });
     }
-    return terms;
+    return z.array(narrow_canonical_term_schema).parse(terms);
 }
 
 export function channels_settings_edit_url(
@@ -198,7 +265,7 @@ export function channels_settings_edit_url(
 }
 
 export function channels_settings_section_url(section = "subscribed"): string {
-    const valid_section_values = new Set(["new", "subscribed", "all", "notsubscribed"]);
+    const valid_section_values = new Set(["new", "subscribed", "all", "available"]);
     if (!valid_section_values.has(section)) {
         blueslip.warn("invalid section for channels settings: " + section);
         return "#channels/subscribed";
@@ -206,8 +273,30 @@ export function channels_settings_section_url(section = "subscribed"): string {
     return `#channels/${section}`;
 }
 
+// For folders we only support #channels/folders/{folder_id}/new
+// In the future we'd like to support #channels/folder/{folder_id}
+// for displaying the channels in a folder.
+function channels_settings_folder_url(hash: string): string {
+    const hash_components = hash.slice(1).split(/\//);
+    assert(hash_components[1] === "folders");
+    if (hash_components.length !== 4 || hash_components[3] !== "new") {
+        blueslip.warn("invalid hash for channels settings with folders: " + hash);
+        return "#channels/subscribed";
+    }
+    const folder_id = Number.parseInt(hash_components[2]!, 10);
+    if (!channel_folders.is_valid_folder_id(folder_id)) {
+        blueslip.warn("invalid folder id: " + folder_id);
+        return "#channels/new";
+    }
+    return hash;
+}
+
 export function validate_channels_settings_hash(hash: string): string {
     const hash_components = hash.slice(1).split(/\//);
+    if (hash_components[1] === "folders") {
+        return channels_settings_folder_url(hash);
+    }
+
     const section = hash_components[1];
 
     const can_create_streams =
@@ -222,19 +311,23 @@ export function validate_channels_settings_hash(hash: string): string {
         const stream_id = Number.parseInt(section, 10);
         const sub = sub_store.get(stream_id);
         // There are a few situations where we can't display stream settings:
-        // 1. This is a stream that's been archived. (sub=undefined)
-        // 2. The stream ID is invalid. (sub=undefined)
-        // 3. The current user is a guest, and was unsubscribed from the stream
+        // 1. The stream ID is invalid. (sub=undefined)
+        // 2. The current user is a guest, and was unsubscribed from the stream
         //    stream in the current session. (In future sessions, the stream will
         //    not be in sub_store).
         //
-        // In all these cases we redirect the user to 'subscribed' tab.
-        if (sub === undefined || (page_params.is_guest && !stream_data.is_subscribed(stream_id))) {
+        // In both cases we redirect the user to 'subscribed' tab.
+        if (sub === undefined || (current_user.is_guest && !stream_data.is_subscribed(stream_id))) {
             return channels_settings_section_url();
         }
 
         let right_side_tab = hash_components[3];
-        const valid_right_side_tab_values = new Set(["general", "personal", "subscribers"]);
+        const valid_right_side_tab_values = new Set([
+            "general",
+            "personal",
+            "subscribers",
+            "permissions",
+        ]);
         if (right_side_tab === undefined || !valid_right_side_tab_values.has(right_side_tab)) {
             right_side_tab = "general";
         }
@@ -248,7 +341,8 @@ export function validate_group_settings_hash(hash: string): string {
     const hash_components = hash.slice(1).split(/\//);
     const section = hash_components[1];
 
-    const can_create_groups = settings_data.user_can_edit_user_groups();
+    const can_create_groups =
+        settings_data.user_can_create_user_groups() && realm.zulip_plan_is_not_limited;
     if (section === "new" && !can_create_groups) {
         return "#groups/your";
     }
@@ -264,7 +358,7 @@ export function validate_group_settings_hash(hash: string): string {
 
         const group_name = hash_components[2];
         let right_side_tab = hash_components[3];
-        const valid_right_side_tab_values = new Set(["general", "members"]);
+        const valid_right_side_tab_values = new Set(["general", "members", "permissions"]);
         if (
             group.name === group_name &&
             right_side_tab !== undefined &&
@@ -278,7 +372,7 @@ export function validate_group_settings_hash(hash: string): string {
         return group_edit_url(group, right_side_tab);
     }
 
-    const valid_section_values = ["new", "your", "all"];
+    const valid_section_values = ["new", "your", "all", "roles"];
     if (section === undefined || !valid_section_values.includes(section)) {
         blueslip.info("invalid section for groups: " + section);
         return "#groups/your";
@@ -286,11 +380,158 @@ export function validate_group_settings_hash(hash: string): string {
     return hash;
 }
 
+function handle_invalid_settings_tab(
+    base: string,
+    section: "bots" | "users",
+    settings_tab: string,
+): string {
+    const valid_tab_values = {
+        users: new Set(["active", "imported", "deactivated", "invitations"]),
+        bots: new Set(["all-bots", "your-bots"]),
+    };
+
+    if (!valid_tab_values[section].has(settings_tab)) {
+        let default_tab = [...valid_tab_values[section]][0]!;
+        if (section === "bots" && base === "settings") {
+            // For bots panel in "Personal" tab we open "Your bots"
+            // tab by default.
+            default_tab = "your-bots";
+        }
+        return default_tab;
+    }
+    return settings_tab;
+}
+
+function get_settings_tab(base: string, section: string): string | undefined {
+    if (section === "users" || section === "bots") {
+        const current_settings_tab = hash_parser.get_current_nth_hash_section(2);
+        return handle_invalid_settings_tab(base, section, current_settings_tab);
+    }
+    return undefined;
+}
+
+export function validate_settings_hash(
+    hash: string,
+    settings_panel_object: SettingsPanelMenu,
+): string {
+    const hash_components = hash.slice(1).split(/\//);
+    const base = hash_components[0]!;
+    let section = hash_components[1];
+
+    if (!section) {
+        const settings_tab = settings_panel_object.get_settings_tab(
+            settings_panel_object.current_tab,
+        );
+        if (settings_tab) {
+            return `#${base}/${settings_panel_object.current_tab}/${settings_tab}`;
+        }
+        return `#${base}/${settings_panel_object.current_tab}`;
+    }
+
+    let settings_tab = get_settings_tab(base, section);
+
+    if (base === "settings" && section === "display-settings") {
+        // Since display-settings was deprecated and replaced with preferences
+        // #settings/display-settings is being redirected to #settings/preferences.
+        section = "preferences";
+    }
+    if (base === "organization" && section === "bot-list-admin") {
+        // #organization/bot-list-admin is being redirected to #organization/bots/all-bots.
+        section = "bots";
+        settings_tab = "all-bots";
+    }
+    if (base === "organization" && section === "user-list-admin") {
+        // #organization/user-list-admin is being redirected to #organization/users/active
+        // after it was renamed.
+        section = "users";
+        settings_tab = "active";
+    }
+    if (base === "settings" && section === "your-bots") {
+        // #settings/your-bots is being redirected to #settings/bots/your-bots.
+        section = "bots";
+        settings_tab = "your-bots";
+    }
+
+    const valid_personal_section_values = new Set([
+        "profile",
+        "account-and-privacy",
+        "preferences",
+        "notifications",
+        "bots",
+        "alert-words",
+        "uploaded-files",
+        "topics",
+        "muted-users",
+    ]);
+    const valid_organization_section_values = new Set([
+        "organization-profile",
+        "organization-settings",
+        "organization-permissions",
+        "emoji-settings",
+        "linkifier-settings",
+        "playground-settings",
+        "users",
+        "bots",
+        "profile-field-settings",
+        "organization-level-user-defaults",
+        "channel-folders",
+        "default-channels-list",
+        "auth-methods",
+        "data-exports-admin",
+    ]);
+
+    if (base === "settings" && !valid_personal_section_values.has(section)) {
+        return "#settings/profile";
+    }
+    if (base === "organization" && !valid_organization_section_values.has(section)) {
+        return "#organization/organization-profile";
+    }
+
+    if (settings_tab) {
+        return `#${base}/${section}/${settings_tab}`;
+    }
+    return `#${base}/${section}`;
+}
+
+export function decode_dm_recipient_user_ids_from_narrow_url(narrow_url: string): number[] | null {
+    try {
+        const url = new URL(narrow_url, window.location.origin);
+        if (url.origin !== window.location.origin || !url.hash.startsWith("#narrow")) {
+            return null;
+        }
+        const terms = parse_narrow(url.hash.split(/\//));
+        if (!terms?.[0]) {
+            return null;
+        }
+        if (terms.length > 2) {
+            return null;
+        }
+        // Help Typescript understand that first_term.operator can only be
+        // of `DM` type.
+        const first_term = terms[0];
+        if (first_term.operator !== "dm") {
+            return null;
+        }
+
+        if (terms[1]?.operator !== "with" && terms[1]?.operator !== "near") {
+            return null;
+        }
+
+        const user_ids = first_term.operand;
+        if (people.is_valid_bulk_user_ids_for_compose(user_ids, true)) {
+            return user_ids;
+        }
+        return null;
+    } catch {
+        return null;
+    }
+}
+
 export function decode_stream_topic_from_url(
     url_str: string,
-): {stream_name: string; topic_name?: string} | null {
+): {stream_id: number; topic_name?: string; message_id?: string} | null {
     try {
-        const url = new URL(url_str);
+        const url = new URL(url_str, window.location.origin);
         if (url.origin !== window.location.origin || !url.hash.startsWith("#narrow")) {
             return null;
         }
@@ -298,24 +539,46 @@ export function decode_stream_topic_from_url(
         if (terms === undefined) {
             return null;
         }
-        if (terms.length > 2) {
+        if (terms.length > 3) {
             // The link should only contain stream and topic,
-            // near/ links are not transformed.
             return null;
         }
         // This check is important as a malformed url
         // may have `stream` / `channel`, `topic` or `near:` in a wrong order
-        if (terms[0]?.operator !== "stream" && terms[0]?.operator !== "channel") {
+        if (terms[0]?.operator !== "channel") {
+            return null;
+        }
+        const stream_id = Number.parseInt(terms[0].operand, 10);
+        // This can happen if we don't recognize the stream operand as a valid id.
+        if (Number.isNaN(stream_id)) {
             return null;
         }
         if (terms.length === 1) {
-            return {stream_name: terms[0].operand};
+            return {stream_id};
         }
         if (terms[1]?.operator !== "topic") {
             return null;
         }
-        return {stream_name: terms[0].operand, topic_name: terms[1].operand};
+        if (terms.length === 2) {
+            return {stream_id, topic_name: terms[1].operand};
+        }
+        if (terms[2]?.operator === "with") {
+            // For with operators, we currently discard the message ID.
+            return {stream_id, topic_name: terms[1].operand};
+        }
+        if (terms[2]?.operator !== "near") {
+            return null;
+        }
+        return {stream_id, topic_name: terms[1].operand, message_id: terms[2].operand};
     } catch {
         return null;
+    }
+}
+
+export function get_link_hash(link: string): string {
+    try {
+        return new URL(link, window.location.origin).hash;
+    } catch {
+        return "";
     }
 }

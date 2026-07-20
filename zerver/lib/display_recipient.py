@@ -1,6 +1,6 @@
 from typing import TYPE_CHECKING, Optional, TypedDict
 
-from django_stubs_ext import ValuesQuerySet
+from django.db.models import QuerySet
 
 from zerver.lib.cache import (
     bulk_cached_fetch,
@@ -9,7 +9,7 @@ from zerver.lib.cache import (
     generic_bulk_cached_fetch,
     single_user_display_recipient_cache_key,
 )
-from zerver.lib.per_request_cache import return_same_value_during_entire_request
+from zerver.lib.per_request_cache import cache_for_current_request
 from zerver.lib.types import DisplayRecipientT, UserDisplayRecipient
 
 if TYPE_CHECKING:
@@ -34,6 +34,9 @@ def get_display_recipient_cache_key(
     return display_recipient_cache_key(recipient_id)
 
 
+# Note that the _same_ cache key is used for streams, which contain a
+# string, not a list[UserDisplayRecipient]!  This works because the
+# recipient space is distinct between the two.
 @cache_with_key(get_display_recipient_cache_key, timeout=3600 * 24 * 7)
 def get_display_recipient_remote_cache(
     recipient_id: int, recipient_type: int, recipient_type_id: int | None
@@ -102,7 +105,7 @@ def bulk_fetch_stream_names(
 
     def get_tiny_stream_rows(
         recipient_ids: list[int],
-    ) -> ValuesQuerySet[Stream, TinyStreamResult]:
+    ) -> QuerySet[Stream, TinyStreamResult]:
         stream_ids = [recipient_id_to_stream_id[recipient_id] for recipient_id in recipient_ids]
         return Stream.objects.filter(id__in=stream_ids).values("recipient_id", "name")
 
@@ -121,6 +124,7 @@ def bulk_fetch_stream_names(
         cache_transformer=get_name,
         setter=lambda obj: obj,
         extractor=lambda obj: obj,
+        pickled_tupled=False,
     )
 
     return stream_display_recipients
@@ -134,34 +138,23 @@ def bulk_fetch_user_display_recipients(
     Returns dict mapping recipient_id to corresponding display_recipient
     """
 
-    from zerver.models import Recipient
     from zerver.models.recipients import bulk_get_direct_message_group_user_ids
 
     if len(recipient_tuples) == 0:
         return {}
 
     get_recipient_id = lambda tup: tup[0]
-    get_type = lambda tup: tup[1]
 
-    personal_tuples = [tup for tup in recipient_tuples if get_type(tup) == Recipient.PERSONAL]
-    direct_message_group_tuples = [
-        tup for tup in recipient_tuples if get_type(tup) == Recipient.DIRECT_MESSAGE_GROUP
-    ]
-
-    direct_message_group_recipient_ids = [
-        get_recipient_id(tup) for tup in direct_message_group_tuples
-    ]
-    huddle_recipient_id_to_user_ids = bulk_get_direct_message_group_user_ids(
+    direct_message_group_recipient_ids = [get_recipient_id(tup) for tup in recipient_tuples]
+    user_ids_in_direct_message_groups = bulk_get_direct_message_group_user_ids(
         direct_message_group_recipient_ids
     )
 
     # Find all user ids whose UserProfiles we will need to fetch:
-    user_ids_to_fetch = {
-        user_id for ignore_recipient_id, ignore_recipient_type, user_id in personal_tuples
-    }
+    user_ids_to_fetch: set[int] = set()
 
     for recipient_id in direct_message_group_recipient_ids:
-        direct_message_group_user_ids = huddle_recipient_id_to_user_ids[recipient_id]
+        direct_message_group_user_ids = user_ids_in_direct_message_groups[recipient_id]
         user_ids_to_fetch |= direct_message_group_user_ids
 
     # Fetch the needed user dictionaries.
@@ -169,12 +162,8 @@ def bulk_fetch_user_display_recipients(
 
     result = {}
 
-    for recipient_id, ignore_recipient_type, user_id in personal_tuples:
-        display_recipients = [user_display_recipients[user_id]]
-        result[recipient_id] = display_recipients
-
     for recipient_id in direct_message_group_recipient_ids:
-        user_ids = sorted(huddle_recipient_id_to_user_ids[recipient_id])
+        user_ids = sorted(user_ids_in_direct_message_groups[recipient_id])
         display_recipients = [user_display_recipients[user_id] for user_id in user_ids]
         result[recipient_id] = display_recipients
 
@@ -205,7 +194,7 @@ def bulk_fetch_display_recipients(
     return {**stream_display_recipients, **direct_message_display_recipients}
 
 
-@return_same_value_during_entire_request
+@cache_for_current_request
 def get_display_recipient_by_id(
     recipient_id: int, recipient_type: int, recipient_type_id: int | None
 ) -> list[UserDisplayRecipient]:
@@ -214,9 +203,6 @@ def get_display_recipient_by_id(
     If the type is a stream, the type_id must be an int; a string is returned.
     Otherwise, type_id may be None; an array of recipient dicts is returned.
     """
-    # Have to import here, to avoid circular dependency.
-    from zerver.lib.display_recipient import get_display_recipient_remote_cache
-
     return get_display_recipient_remote_cache(recipient_id, recipient_type, recipient_type_id)
 
 
@@ -240,13 +226,14 @@ def get_recipient_ids(
         recipient_type_str = "stream"
         to = [recipient.type_id]
     else:
+        # We're somewhat weirdly using the display recipient cache,
+        # for the fact that it is a probably-cached lookup which knows
+        # the user-ids which are members of a group DM.
         recipient_type_str = "private"
-        if recipient.type == Recipient.PERSONAL:
-            to = [recipient.type_id]
-        else:
-            to = []
-            for r in get_display_recipient(recipient):
-                assert not isinstance(r, str)  # It will only be a string for streams
-                if r["id"] != user_profile_id:
-                    to.append(r["id"])
+        to = []
+        recipients = get_display_recipient(recipient)
+        for r in recipients:
+            assert not isinstance(r, str)  # It will only be a string for streams
+            if r["id"] != user_profile_id or len(recipients) == 1:
+                to.append(r["id"])
     return to, recipient_type_str

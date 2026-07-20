@@ -1,8 +1,10 @@
-"use strict";
+// @ts-check
 
-module.exports = {
+/** @type {import("prettier").Config} */
+export default {
     bracketSpacing: false,
     trailingComma: "all",
+    plugins: ["prettier-plugin-astro"],
     overrides: [
         {
             files: ["tsconfig.json"],
@@ -15,6 +17,12 @@ module.exports = {
             files: ["*.md"],
             options: {
                 embeddedLanguageFormatting: "off",
+            },
+        },
+        {
+            files: "*.astro",
+            options: {
+                parser: "astro",
             },
         },
     ],

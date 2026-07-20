@@ -1,29 +1,30 @@
 import $ from "jquery";
-import {z} from "zod";
+import * as z from "zod/mini";
 
 import render_settings_resend_invite_modal from "../templates/confirm_dialog/confirm_resend_invite.hbs";
 import render_settings_revoke_invite_modal from "../templates/confirm_dialog/confirm_revoke_invite.hbs";
 import render_admin_invites_list from "../templates/settings/admin_invites_list.hbs";
 
-import * as blueslip from "./blueslip";
-import * as channel from "./channel";
-import * as confirm_dialog from "./confirm_dialog";
-import {$t, $t_html} from "./i18n";
-import * as ListWidget from "./list_widget";
-import * as loading from "./loading";
-import * as people from "./people";
-import * as settings_config from "./settings_config";
-import * as settings_data from "./settings_data";
-import {current_user, realm} from "./state_data";
-import * as timerender from "./timerender";
-import * as ui_report from "./ui_report";
-import * as util from "./util";
+import * as blueslip from "./blueslip.ts";
+import * as channel from "./channel.ts";
+import * as confirm_dialog from "./confirm_dialog.ts";
+import * as dialog_widget from "./dialog_widget.ts";
+import {$t_html} from "./i18n.ts";
+import * as ListWidget from "./list_widget.ts";
+import * as loading from "./loading.ts";
+import * as people from "./people.ts";
+import * as settings_config from "./settings_config.ts";
+import * as settings_data from "./settings_data.ts";
+import {current_user} from "./state_data.ts";
+import * as timerender from "./timerender.ts";
+import * as ui_report from "./ui_report.ts";
+import * as util from "./util.ts";
 
 export const invite_schema = z.intersection(
     z.object({
         invited_by_user_id: z.number(),
         invited: z.number(),
-        expiry_date: z.number().nullable(),
+        expiry_date: z.nullable(z.number()),
         id: z.number(),
         invited_as: z.number(),
     }),
@@ -103,15 +104,13 @@ function populate_invites(invites_data: {invites: Invite[]}): void {
             item.disable_buttons =
                 item.invited_as === settings_config.user_role_values.owner.code &&
                 !current_user.is_owner;
-            item.referrer_name = people.get_by_user_id(item.invited_by_user_id).full_name;
-            item.img_src = people.small_avatar_url_for_person(
-                people.get_by_user_id(item.invited_by_user_id),
-            );
+            item.referrer_name = people.get_full_name(item.invited_by_user_id);
+            item.img_src = people.small_avatar_url_for_user_id(item.invited_by_user_id);
             return render_admin_invites_list({invite: item});
         },
         filter: {
             $element: $invites_table
-                .closest(".settings-section")
+                .closest(".user-settings-section")
                 .find<HTMLInputElement>("input.search"),
             predicate(item, value) {
                 const referrer = people.get_by_user_id(item.invited_by_user_id);
@@ -154,19 +153,19 @@ function do_revoke_invite({
 }): void {
     const modal_invite_id = $(".dialog_submit_button").attr("data-invite-id");
     const modal_is_multiuse = $(".dialog_submit_button").attr("data-is-multiuse");
-    const $revoke_button = $row.find("button.revoke");
 
     if (modal_invite_id !== invite_id || modal_is_multiuse !== is_multiuse) {
         blueslip.error("Invite revoking canceled due to non-matching fields.");
         ui_report.client_error(
             $t_html({
-                defaultMessage: "Resending encountered an error. Please reload and try again.",
+                defaultMessage: "Error: Could not revoke invitation.",
             }),
-            $("#home-error"),
+            $("#revoke_invite_modal #dialog_error"),
         );
+        dialog_widget.hide_dialog_spinner();
+        return;
     }
 
-    $revoke_button.prop("disabled", true).text($t({defaultMessage: "Working…"}));
     let url = "/json/invites/" + invite_id;
 
     if (modal_is_multiuse === "true") {
@@ -175,9 +174,18 @@ function do_revoke_invite({
     void channel.del({
         url,
         error(xhr) {
-            ui_report.generic_row_button_error(xhr, $revoke_button);
+            dialog_widget.hide_dialog_spinner();
+            ui_report.error(
+                $t_html({
+                    defaultMessage: "Failed",
+                }),
+                xhr,
+                $("#dialog_error"),
+            );
         },
         success() {
+            dialog_widget.hide_dialog_spinner();
+            dialog_widget.close();
             $row.remove();
         },
     });
@@ -186,26 +194,44 @@ function do_revoke_invite({
 function do_resend_invite({$row, invite_id}: {$row: JQuery; invite_id: string}): void {
     const modal_invite_id = $(".dialog_submit_button").attr("data-invite-id");
     const $resend_button = $row.find("button.resend");
+    const $check_button = $row.find("button.check");
 
     if (modal_invite_id !== invite_id) {
         blueslip.error("Invite resending canceled due to non-matching fields.");
         ui_report.client_error(
             $t_html({
-                defaultMessage: "Resending encountered an error. Please reload and try again.",
+                defaultMessage: "Error: Could not resend invitation.",
             }),
-            $("#home-error"),
+            $("#resend_invite_modal #dialog_error"),
         );
+        dialog_widget.hide_dialog_spinner();
+        return;
     }
 
-    $resend_button.prop("disabled", true).text($t({defaultMessage: "Working…"}));
     void channel.post({
         url: "/json/invites/" + invite_id + "/resend",
         error(xhr) {
-            ui_report.generic_row_button_error(xhr, $resend_button);
+            dialog_widget.hide_dialog_spinner();
+            ui_report.error(
+                $t_html({
+                    defaultMessage: "Failed",
+                }),
+                xhr,
+                $("#dialog_error"),
+            );
         },
         success() {
-            $resend_button.text($t({defaultMessage: "Sent!"}));
-            $resend_button.removeClass("resend btn-warning").addClass("sea-green");
+            dialog_widget.hide_dialog_spinner();
+            dialog_widget.close();
+
+            $resend_button.hide();
+            $check_button.removeClass("hide");
+
+            // Showing a success checkmark for a short time (3 seconds).
+            setTimeout(() => {
+                $resend_button.show();
+                $check_button.addClass("hide");
+            }, 3000);
         },
     });
 }
@@ -239,26 +265,30 @@ export function on_load_success(
     }
     $(".admin_invites_table").on("click", ".revoke", function (this: HTMLElement, e) {
         // This click event must not get propagated to parent container otherwise the modal
-        // will not show up because of a call to `close_active` in `settings.js`.
+        // will not show up because of a call to `close_active` in `settings.ts`.
         e.preventDefault();
         e.stopPropagation();
         const $row = $(this).closest(".invite_row");
         const email = $row.find(".email").text();
         const referred_by = $row.find(".referred_by").text();
-        const invite_id = $(this).attr("data-invite-id")!;
-        const is_multiuse = $(this).attr("data-is-multiuse")!;
+        const invite_id = $(this).closest("tr").attr("data-invite-id")!;
+        const is_multiuse = $(this).closest("tr").attr("data-is-multiuse")!;
         const ctx = {
             is_multiuse: is_multiuse === "true",
             email,
             referred_by,
         };
-        const html_body = render_settings_revoke_invite_modal(ctx);
+        const modal_content_html = render_settings_revoke_invite_modal(ctx);
 
         confirm_dialog.launch({
-            html_heading: ctx.is_multiuse
+            modal_title_html: ctx.is_multiuse
                 ? $t_html({defaultMessage: "Revoke invitation link"})
                 : $t_html({defaultMessage: "Revoke invitation to {email}"}, {email}),
-            html_body,
+            modal_content_html,
+            is_compact: true,
+            id: "revoke_invite_modal",
+            close_on_submit: false,
+            loading_spinner: true,
             on_click() {
                 do_revoke_invite({$row, invite_id, is_multiuse});
             },
@@ -270,18 +300,21 @@ export function on_load_success(
 
     $(".admin_invites_table").on("click", ".resend", function (this: HTMLElement, e) {
         // This click event must not get propagated to parent container otherwise the modal
-        // will not show up because of a call to `close_active` in `settings.js`.
+        // will not show up because of a call to `close_active` in `settings.ts`.
         e.preventDefault();
         e.stopPropagation();
 
         const $row = $(this).closest(".invite_row");
         const email = $row.find(".email").text();
-        const invite_id = $(this).attr("data-invite-id")!;
-        const html_body = render_settings_resend_invite_modal({email});
+        const invite_id = $(this).closest("tr").attr("data-invite-id")!;
+        const modal_content_html = render_settings_resend_invite_modal({email});
 
         confirm_dialog.launch({
-            html_heading: $t_html({defaultMessage: "Resend invitation?"}),
-            html_body,
+            modal_title_html: $t_html({defaultMessage: "Resend invitation?"}),
+            modal_content_html,
+            id: "resend_invite_modal",
+            close_on_submit: false,
+            loading_spinner: true,
             on_click() {
                 do_resend_invite({$row, invite_id});
             },
@@ -292,55 +325,12 @@ export function on_load_success(
 }
 
 export function update_invite_users_setting_tip(): void {
-    if (settings_data.user_can_invite_users_by_email() && !current_user.is_admin) {
-        $(".invite-user-settings-tip").hide();
+    if (settings_data.user_can_invite_users_by_email()) {
+        $(".invite-user-settings-banner").hide();
         return;
     }
-    const permission_type = settings_config.email_invite_to_realm_policy_values;
-    const current_permission = realm.realm_invite_to_realm_policy;
-    let tip_text;
-    switch (current_permission) {
-        case permission_type.by_admins_only.code: {
-            tip_text = $t({
-                defaultMessage:
-                    "This organization is configured so that admins can invite users to this organization.",
-            });
 
-            break;
-        }
-        case permission_type.by_moderators_only.code: {
-            tip_text = $t({
-                defaultMessage:
-                    "This organization is configured so that admins and moderators can invite users to this organization.",
-            });
-
-            break;
-        }
-        case permission_type.by_members.code: {
-            tip_text = $t({
-                defaultMessage:
-                    "This organization is configured so that admins, moderators and members can invite users to this organization.",
-            });
-
-            break;
-        }
-        case permission_type.by_full_members.code: {
-            tip_text = $t({
-                defaultMessage:
-                    "This organization is configured so that admins, moderators and full members can invite users to this organization.",
-            });
-
-            break;
-        }
-        default: {
-            tip_text = $t({
-                defaultMessage:
-                    "This organization is configured so that nobody can invite users to this organization.",
-            });
-        }
-    }
-    $(".invite-user-settings-tip").show();
-    $(".invite-user-settings-tip").text(tip_text);
+    $(".invite-user-settings-banner").show();
 }
 
 export function update_invite_user_panel(): void {

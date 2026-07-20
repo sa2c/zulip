@@ -35,14 +35,14 @@ REMAPPED_EMOJIS = {
 # Emoticons and which emoji they should become. Duplicate emoji are allowed.
 # Changes here should be mimicked in `help/configure-emoticon-translations.md`.
 EMOTICON_CONVERSIONS = {
-    ":)": ":smile:",
-    "(:": ":smile:",
+    ":)": ":slight_smile:",
+    "(:": ":slight_smile:",
     ":(": ":frown:",
     "<3": ":heart:",
     ":|": ":neutral:",
     ":/": ":confused:",
     ";)": ":wink:",
-    ":D": ":grinning:",
+    ":D": ":smile:",
     ":o": ":open_mouth:",
     ":O": ":open_mouth:",
     ":p": ":stuck_out_tongue:",
@@ -87,8 +87,8 @@ def generate_emoji_catalog(
 
     # Sort the emojis according to iamcal's sort order. This sorting determines the
     # order in which emojis will be displayed in emoji picker.
-    for category in emoji_catalog:
-        emoji_catalog[category].sort(key=lambda emoji_code: sort_order[emoji_code])
+    for emoji_codes in emoji_catalog.values():
+        emoji_codes.sort(key=lambda emoji_code: sort_order[emoji_code])
 
     return dict(emoji_catalog)
 

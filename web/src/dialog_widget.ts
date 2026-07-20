@@ -1,13 +1,15 @@
 import $ from "jquery";
 import _ from "lodash";
+import assert from "minimalistic-assert";
 
 import render_dialog_widget from "../templates/dialog_widget.hbs";
 
-import type {AjaxRequestHandler} from "./channel";
-import {$t_html} from "./i18n";
-import * as loading from "./loading";
-import * as modals from "./modals";
-import * as ui_report from "./ui_report";
+import type {AjaxRequestHandler} from "./channel.ts";
+import * as custom_profile_fields_ui from "./custom_profile_fields_ui.ts";
+import {$t, $t_html} from "./i18n.ts";
+import * as loading from "./loading.ts";
+import * as modals from "./modals.ts";
+import * as ui_report from "./ui_report.ts";
 
 // Since only one dialog widget can be active at a time
 // and we don't support reopening already closed dialog widgets,
@@ -21,13 +23,13 @@ function current_dialog_widget_id(): string {
 }
 
 function current_dialog_widget_selector(): string {
-    return `#${current_dialog_widget_id()}`;
+    return `#${CSS.escape(current_dialog_widget_id())}`;
 }
 
 /*
- *  Look for confirm_dialog in settings_user_groups
- *  to see an example of how to use this widget.  It's
- *  pretty simple to use!
+ *  Look for dialog_widget or confirm_dialog in various
+ *  'web/src/' files to see examples of how to use this widget.
+ *  It's pretty simple to use!
  *
  *  Some things to note:
  *      1) We create DOM on the fly, and we remove
@@ -36,7 +38,7 @@ function current_dialog_widget_selector(): string {
  *      2) We attach the DOM for the modal to the body element
  *         to avoid interference from other elements.
  *
- *      3) For settings, we have a click handler in settings.js
+ *      3) For settings, we have a click handler in settings.ts
  *         that will close the dialog via modals.close_active.
  *
  *      4) We assume that since this is a modal, you will
@@ -59,18 +61,23 @@ function current_dialog_widget_selector(): string {
  */
 
 export type DialogWidgetConfig = {
-    html_heading: string;
-    html_body: string;
-    on_click: (e: JQuery.ClickEvent) => void;
-    html_submit_button?: string;
-    html_exit_button?: string;
+    modal_title_html?: string;
+    modal_title_text?: string;
+    modal_content_html: string;
+    modal_subtitle_html?: string;
+    is_compact?: boolean;
+    has_tab_switcher?: boolean;
+    on_click?: (e: JQuery.ClickEvent) => void;
+    hide_footer?: boolean;
+    modal_submit_button_text?: string;
+    modal_exit_button_text?: string;
     close_on_submit?: boolean;
     focus_submit_on_open?: boolean;
     help_link?: string;
     id?: string;
     single_footer_button?: boolean;
     form_id?: string;
-    validate_input?: (e: unknown) => boolean;
+    validate_input?: (e: JQuery.ClickEvent) => boolean;
     on_show?: () => void;
     on_shown?: () => void;
     on_hide?: () => void;
@@ -79,6 +86,8 @@ export type DialogWidgetConfig = {
     loading_spinner?: boolean;
     update_submit_disabled_state_on_change?: boolean;
     always_visible_scrollbar?: boolean;
+    footer_minor_text?: string;
+    close_on_overlay_click?: boolean;
 };
 
 type RequestOpts = {
@@ -88,31 +97,21 @@ type RequestOpts = {
 };
 
 export function hide_dialog_spinner(): void {
-    $(".dialog_submit_button span").show();
     const dialog_widget_selector = current_dialog_widget_selector();
-    $(`${dialog_widget_selector} .modal__btn`).prop("disabled", false);
-
     const $spinner = $(`${dialog_widget_selector} .modal__spinner`);
-    loading.destroy_indicator($spinner);
+    $(`${dialog_widget_selector} .modal__button`).prop("disabled", false);
+
+    loading.hide_spinner($(".dialog_submit_button"), $spinner);
 }
 
 export function show_dialog_spinner(): void {
     const dialog_widget_selector = current_dialog_widget_selector();
     // Disable both the buttons.
-    $(`${dialog_widget_selector} .modal__btn`).prop("disabled", true);
+    $(`${dialog_widget_selector} .modal__button`).prop("disabled", true);
 
     const $spinner = $(`${dialog_widget_selector} .modal__spinner`);
-    const dialog_submit_button_span_width = $(".dialog_submit_button span").width();
-    const dialog_submit_button_span_height = $(".dialog_submit_button span").height();
 
-    // Hide the submit button after computing its height, since submit
-    // buttons with long text might affect the size of the button.
-    $(".dialog_submit_button span").hide();
-
-    loading.make_indicator($spinner, {
-        width: dialog_submit_button_span_width,
-        height: dialog_submit_button_span_height,
-    });
+    loading.show_spinner($(".dialog_submit_button"), $spinner);
 }
 
 // Supports a callback to be called once the modal finishes closing.
@@ -128,6 +127,9 @@ export function get_current_values($inputs: JQuery): Record<string, unknown> {
             if (this instanceof HTMLInputElement && this.type === "file" && this.files?.length) {
                 // If the input is a file input and a file has been selected, set value to file object
                 current_values[property_name] = this.files[0];
+            } else if (this instanceof HTMLInputElement && this.type === "checkbox") {
+                // If the input is a checkbox, check the inputs `checked` attribute.
+                current_values[property_name] = this.checked;
             } else if (property_name === "edit_bot_owner") {
                 current_values[property_name] = $(this).find(".dropdown_widget_value").text();
             } else if ($(this).hasClass("pill-container")) {
@@ -139,22 +141,48 @@ export function get_current_values($inputs: JQuery): Record<string, unknown> {
                 current_values[property_name] = $(this).val();
             }
         }
+
+        if ($(this).hasClass("date-field-alt-input")) {
+            // For date type custom profile fields, we convert the
+            // input to the date format passed to the API.
+            const value = $(this).val()!;
+            const name = $(this).parent().find(".custom_user_field_value").attr("name")!;
+
+            if (value === "") {
+                // This case is handled separately, because it will
+                // otherwise be parsed as an invalid date.
+                current_values[name] = value;
+                return;
+            }
+
+            assert(typeof value === "string");
+            const date_str = new Date(value);
+            current_values[name] = custom_profile_fields_ui.format_date(date_str, "Y-m-d");
+        }
     });
     return current_values;
 }
 
 export function launch(conf: DialogWidgetConfig): string {
     // Mandatory fields:
-    // * html_heading
-    // * html_body
-    // * on_click
-    // The html_ fields should be safe HTML. If callers
+    // * modal_title_html | modal_title_text
+    // * modal_content_html
+    // The _html fields should be safe HTML. If callers
     // interpolate user data into strings, they should use
     // templates.
 
     // Optional parameters:
-    // * html_submit_button: Submit button text.
-    // * html_exit_button: Exit button text.
+    // * modal_subtitle_html: Provides additional context
+    //   below the modal title.
+    // * is_compact: If true, enables the compact version where the modal
+    //   content area is not rendered, and the modal_content_html is
+    //   passed to the modal_subtitle_html to be displayed as the subtitle.
+    // * has_tab_switcher: If true, adds a container in the modal header
+    //   for implementing a tab switcher.
+    // * on_click: Callback to run when submit button is clicked and footer is enabled.
+    // * hide_footer: Whether to disable footer and hide its associated buttons.
+    // * modal_submit_button_text: Submit button text.
+    // * modal_exit_button_text: Exit button text.
     // * close_on_submit: Whether to close modal on clicking submit.
     // * focus_submit_on_open: Whether to focus submit button on open.
     // * help_link: A help link in the heading area.
@@ -174,27 +202,56 @@ export function launch(conf: DialogWidgetConfig): string {
     // * always_visible_scrollbar: Whether the scrollbar is always visible if modal body
     //   has scrollable content. Default behaviour is to hide the scrollbar when it is
     //   not in use.
+    // * close_on_overlay_click: Whether to close modal on clicking overlay.
 
     widget_id_counter += 1;
     const modal_unique_id = current_dialog_widget_id();
-    const html_submit_button = conf.html_submit_button ?? $t_html({defaultMessage: "Save changes"});
-    const html_exit_button = conf.html_exit_button ?? $t_html({defaultMessage: "Cancel"});
+    const modal_submit_button_text =
+        conf.modal_submit_button_text ?? $t({defaultMessage: "Save changes"});
+    const modal_exit_button_text = conf.modal_exit_button_text ?? $t({defaultMessage: "Cancel"});
+    if (conf.is_compact) {
+        conf.modal_subtitle_html = conf.modal_content_html;
+    }
     const html = render_dialog_widget({
         modal_unique_id,
-        heading_text: conf.html_heading,
+        modal_title_html: conf.modal_title_html,
+        modal_title_text: conf.modal_title_text,
+        modal_subtitle_html: conf.modal_subtitle_html,
+        is_compact: conf.is_compact,
+        has_tab_switcher: conf.has_tab_switcher,
         link: conf.help_link,
-        html_submit_button,
-        html_exit_button,
-        html_body: conf.html_body,
+        modal_submit_button_text,
+        modal_exit_button_text,
+        modal_content_html: conf.modal_content_html,
         id: conf.id,
         single_footer_button: conf.single_footer_button,
         always_visible_scrollbar: conf.always_visible_scrollbar,
+        footer_minor_text: conf.footer_minor_text,
+        close_on_overlay_click: conf.close_on_overlay_click ?? true,
+        hide_footer: conf.hide_footer,
     });
     const $dialog = $(html);
     $("body").append($dialog);
 
-    if (conf.post_render !== undefined) {
-        conf.post_render(modal_unique_id);
+    setTimeout(() => {
+        if (conf.post_render !== undefined) {
+            conf.post_render(modal_unique_id);
+        }
+    }, 0);
+
+    if (conf.hide_footer) {
+        modals.open(modal_unique_id, {
+            autoremove: true,
+            on_show() {
+                if (conf.on_show) {
+                    conf.on_show();
+                }
+            },
+            on_hide: conf?.on_hide,
+            on_shown: conf?.on_shown,
+            on_hidden: conf?.on_hidden,
+        });
+        return modal_unique_id;
     }
 
     const $submit_button = $dialog.find(".dialog_submit_button");
@@ -225,8 +282,9 @@ export function launch(conf: DialogWidgetConfig): string {
     }
 
     // Set up handlers.
-    $submit_button.on("click", (e) => {
+    $submit_button.on("click", (e: JQuery.ClickEvent) => {
         e.preventDefault();
+        assert(conf.on_click !== undefined);
 
         if (conf.validate_input && !conf.validate_input(e)) {
             return;
@@ -260,19 +318,25 @@ export function launch(conf: DialogWidgetConfig): string {
 export function submit_api_request(
     request_method: AjaxRequestHandler,
     url: string,
-    data: Omit<Parameters<AjaxRequestHandler>[0]["data"], "undefined">,
+    data: Record<string, unknown>,
     {
         failure_msg_html = $t_html({defaultMessage: "Failed"}),
         success_continuation,
         error_continuation,
     }: RequestOpts = {},
+    close_on_success = true,
 ): void {
     show_dialog_spinner();
     void request_method({
         url,
         data,
         success(response_data, textStatus, jqXHR) {
-            close();
+            if (close_on_success) {
+                close();
+            } else {
+                hide_dialog_spinner();
+            }
+
             if (success_continuation !== undefined) {
                 success_continuation(response_data, textStatus, jqXHR);
             }

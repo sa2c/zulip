@@ -6,12 +6,14 @@ from django.utils.translation import gettext as _
 from pydantic import AfterValidator
 
 from zerver.actions.realm_playgrounds import check_add_realm_playground, do_remove_realm_playground
+from zerver.actions.realm_settings import do_set_realm_property
 from zerver.decorator import require_realm_admin
 from zerver.lib.exceptions import JsonableError
 from zerver.lib.response import json_success
 from zerver.lib.typed_endpoint import PathOnly, typed_endpoint
 from zerver.lib.validator import check_capped_string
 from zerver.models import Realm, RealmPlayground, UserProfile
+from zerver.models.realm_playgrounds import PLAYGROUND_LANGUAGE_REGEX
 
 
 def check_pygments_language(var_name: str, val: object) -> str:
@@ -20,10 +22,14 @@ def check_pygments_language(var_name: str, val: object) -> str:
     # Pygments languages. Keeping it open would allow us to hook up a "playground"
     # for custom "languages" that aren't known to Pygments. We use a similar strategy
     # even in our fenced_code Markdown processor.
-    valid_pygments_language = re.compile(r"^[ a-zA-Z0-9_+-./#]*$")
-    matched_results = valid_pygments_language.match(s)
-    if not matched_results:
-        raise JsonableError(_("Invalid characters in pygments language"))
+    if not re.match(rf"^{PLAYGROUND_LANGUAGE_REGEX}$", s):
+        for char in s:
+            if not re.match(rf"^{PLAYGROUND_LANGUAGE_REGEX}$", char):
+                raise JsonableError(
+                    _("Invalid character in language: {character}").format(character=char)
+                )
+    if s in RealmPlayground.RESTRICTED_KEYWORDS:
+        raise JsonableError(_("Language '{language}' is not allowed.").format(language=s))
     return s
 
 
@@ -42,10 +48,10 @@ def add_realm_playground(
     user_profile: UserProfile,
     *,
     name: str,
-    url_template: str,
     pygments_language: Annotated[
         str, AfterValidator(lambda x: check_pygments_language("pygments_language", x))
     ],
+    url_template: str,
 ) -> HttpResponse:
     playground_id = check_add_realm_playground(
         realm=user_profile.realm,
@@ -63,5 +69,9 @@ def delete_realm_playground(
     request: HttpRequest, user_profile: UserProfile, *, playground_id: PathOnly[int]
 ) -> HttpResponse:
     realm_playground = access_playground_by_id(user_profile.realm, playground_id)
+    if user_profile.realm.default_code_block_language == realm_playground.pygments_language:
+        do_set_realm_property(
+            user_profile.realm, "default_code_block_language", "", acting_user=user_profile
+        )
     do_remove_realm_playground(user_profile.realm, realm_playground, acting_user=user_profile)
     return json_success(request)

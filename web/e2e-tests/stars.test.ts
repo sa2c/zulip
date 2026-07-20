@@ -1,8 +1,8 @@
-import {strict as assert} from "assert";
+import assert from "node:assert/strict";
 
 import type {Page} from "puppeteer";
 
-import * as common from "./lib/common";
+import * as common from "./lib/common.ts";
 
 const message = "test star";
 
@@ -83,4 +83,4 @@ async function stars_test(page: Page): Promise<void> {
     assert.strictEqual(await stars_count(page), 0, "Message was not unstarred correctly.");
 }
 
-common.run_test(stars_test);
+await common.run_test(stars_test);

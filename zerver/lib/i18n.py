@@ -34,7 +34,11 @@ def get_language_name(code: str) -> str:
 
 def get_available_language_codes() -> list[str]:
     language_list = get_language_list()
-    codes = [language["code"] for language in language_list]
+    codes = [
+        language["code"]
+        for language in language_list
+        if language["code"] == "en" or language["percent_translated"] >= 5
+    ]
     return codes
 
 
@@ -96,3 +100,10 @@ def get_default_language_for_new_user(realm: Realm, *, request: HttpRequest | No
     if browser_language_code is not None:
         return browser_language_code
     return realm.default_language
+
+
+def get_default_language_for_anonymous_user(request: HttpRequest) -> str:
+    browser_language_code = get_browser_language_code(request)
+    if browser_language_code is not None:
+        return browser_language_code
+    return settings.LANGUAGE_CODE

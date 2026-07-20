@@ -1,10 +1,12 @@
 from collections.abc import Mapping
-from email.headerregistry import Address
 from typing import Annotated, Any, TypeAlias
 
 from django.conf import settings
 from django.contrib.auth.models import AnonymousUser
+from django.core import validators
+from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import UploadedFile
+from django.db import transaction
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import redirect
 from django.utils.translation import gettext as _
@@ -21,10 +23,12 @@ from zerver.actions.custom_profile_fields import (
     check_remove_custom_profile_field_value,
     do_update_user_custom_profile_data_if_changed,
 )
+from zerver.actions.message_delete import DeactivateUserActions
 from zerver.actions.user_settings import (
     check_change_bot_full_name,
     check_change_full_name,
     do_change_avatar_fields,
+    do_change_user_delivery_email,
     do_regenerate_api_key,
 )
 from zerver.actions.users import (
@@ -34,23 +38,34 @@ from zerver.actions.users import (
     do_update_outgoing_webhook_service,
 )
 from zerver.context_processors import get_valid_realm_from_request
-from zerver.decorator import require_member_or_admin, require_realm_admin
+from zerver.decorator import require_human_non_guest_user, require_realm_admin
 from zerver.forms import PASSWORD_TOO_WEAK_ERROR, CreateUserForm
 from zerver.lib.avatar import avatar_url, get_avatar_for_inaccessible_user, get_gravatar_url
 from zerver.lib.bot_config import set_bot_config
-from zerver.lib.email_validation import email_allowed_for_realm
+from zerver.lib.demo_organizations import check_demo_organization_has_set_email
+from zerver.lib.email_validation import email_allowed_for_realm, validate_email_not_already_in_realm
 from zerver.lib.exceptions import (
     CannotDeactivateLastUserError,
+    EmailAlreadyInUseError,
     JsonableError,
     MissingAuthenticationError,
     OrganizationAdministratorRequiredError,
     OrganizationOwnerRequiredError,
 )
 from zerver.lib.integrations import EMBEDDED_BOTS
-from zerver.lib.rate_limiter import rate_limit_spectator_attachment_access_by_file
+from zerver.lib.rate_limiter import (
+    rate_limit_spectator_attachment_access_by_file,
+    should_rate_limit,
+)
 from zerver.lib.response import json_success
 from zerver.lib.send_email import FromAddress, send_email
-from zerver.lib.streams import access_stream_by_id, access_stream_by_name, subscribed_to_stream
+from zerver.lib.stream_subscription import get_user_subscribed_streams
+from zerver.lib.streams import (
+    access_stream_by_id,
+    access_stream_by_name,
+    get_metadata_access_streams,
+    subscribed_to_stream,
+)
 from zerver.lib.typed_endpoint import (
     ApiParamConfig,
     PathOnly,
@@ -61,23 +76,23 @@ from zerver.lib.typed_endpoint_validators import check_int_in_validator, check_u
 from zerver.lib.types import ProfileDataElementUpdateDict
 from zerver.lib.upload import upload_avatar_image
 from zerver.lib.url_encoding import append_url_query_string
+from zerver.lib.user_groups import UserGroupMembershipDetails
 from zerver.lib.users import (
     APIUserDict,
     access_bot_by_id,
     access_user_by_email,
     access_user_by_id,
     add_service,
-    check_bot_creation_policy,
     check_bot_name_available,
     check_can_access_user,
+    check_can_create_bot,
     check_full_name,
-    check_short_name,
     check_valid_bot_config,
     check_valid_bot_type,
     check_valid_interface_type,
-    get_api_key,
     get_users_for_api,
     max_message_id_for_user,
+    validate_short_name_and_construct_bot_email,
     validate_user_custom_profile_data,
 )
 from zerver.lib.utils import generate_api_key
@@ -87,6 +102,7 @@ from zerver.models.realms import (
     DomainNotAllowedForRealmError,
     EmailContainsPlusError,
     InvalidFakeEmailDomainError,
+    Realm,
 )
 from zerver.models.users import (
     get_user_by_delivery_email,
@@ -114,21 +130,33 @@ def deactivate_user_backend(
     request: HttpRequest,
     user_profile: UserProfile,
     *,
-    user_id: PathOnly[int],
+    actions: Json[DeactivateUserActions] | None = None,
     deactivation_notification_comment: Annotated[str, StringConstraints(max_length=2000)]
     | None = None,
+    user_id: PathOnly[int],
 ) -> HttpResponse:
-    target = access_user_by_id(user_profile, user_id, for_admin=True)
+    target = access_user_by_id(user_profile, user_id, allow_bots=False, for_admin=True)
     if target.is_realm_owner and not user_profile.is_realm_owner:
         raise OrganizationOwnerRequiredError
     if check_last_owner(target):
         raise JsonableError(_("Cannot deactivate the only organization owner"))
     if deactivation_notification_comment is not None:
         deactivation_notification_comment = deactivation_notification_comment.strip()
+    if (
+        actions is not None
+        and (
+            actions.delete_public_channel_messages
+            or actions.delete_private_channel_messages
+            or actions.delete_direct_messages
+        )
+        and not user_profile.has_permission("can_delete_any_message_group")
+    ):
+        raise JsonableError(_("User is not allowed to delete other user's messages."))
     return _deactivate_user_profile_backend(
         request,
         user_profile,
         target,
+        deactivate_user_actions=actions,
         deactivation_notification_comment=deactivation_notification_comment,
     )
 
@@ -157,9 +185,14 @@ def _deactivate_user_profile_backend(
     user_profile: UserProfile,
     target: UserProfile,
     *,
+    deactivate_user_actions: Json[DeactivateUserActions] | None = None,
     deactivation_notification_comment: str | None,
 ) -> HttpResponse:
-    do_deactivate_user(target, acting_user=user_profile)
+    do_deactivate_user(
+        target,
+        acting_user=user_profile,
+        deactivate_user_actions=deactivate_user_actions,
+    )
 
     # It's important that we check for None explicitly here, since ""
     # encodes sending an email without a custom administrator comment.
@@ -185,7 +218,7 @@ def reactivate_user_backend(
     )
     if target.is_bot:
         assert target.bot_type is not None
-        check_bot_creation_policy(user_profile, target.bot_type)
+        check_can_create_bot(user_profile, target.bot_type)
         check_bot_name_available(user_profile.realm_id, target.full_name, is_activation=True)
     do_reactivate_user(target, acting_user=user_profile)
     return json_success(request)
@@ -197,18 +230,71 @@ class ProfileDataElement(BaseModel):
 
 
 @typed_endpoint
-def update_user_backend(
+@transaction.atomic(durable=True)
+def update_user_by_id_api(
     request: HttpRequest,
     user_profile: UserProfile,
     *,
-    user_id: PathOnly[int],
     full_name: str | None = None,
-    role: Json[RoleParamType] | None = None,
+    new_email: str | None = None,
     profile_data: Json[list[ProfileDataElement]] | None = None,
+    role: Json[RoleParamType] | None = None,
+    user_id: PathOnly[int],
 ) -> HttpResponse:
     target = access_user_by_id(
         user_profile, user_id, allow_deactivated=True, allow_bots=True, for_admin=True
     )
+    return update_user_backend(
+        request,
+        user_profile,
+        target,
+        full_name=full_name,
+        role=role,
+        profile_data=profile_data,
+        new_email=new_email,
+    )
+
+
+@typed_endpoint
+@transaction.atomic(durable=True)
+def update_user_by_email_api(
+    request: HttpRequest,
+    user_profile: UserProfile,
+    *,
+    email: PathOnly[str],
+    full_name: str | None = None,
+    new_email: str | None = None,
+    profile_data: Json[list[ProfileDataElement]] | None = None,
+    role: Json[RoleParamType] | None = None,
+) -> HttpResponse:
+    target = access_user_by_email(
+        user_profile, email, allow_deactivated=True, allow_bots=True, for_admin=True
+    )
+    return update_user_backend(
+        request,
+        user_profile,
+        target,
+        full_name=full_name,
+        role=role,
+        profile_data=profile_data,
+        new_email=new_email,
+    )
+
+
+def update_user_backend(
+    request: HttpRequest,
+    user_profile: UserProfile,
+    target: UserProfile,
+    *,
+    full_name: str | None = None,
+    new_email: str | None = None,
+    profile_data: Json[list[ProfileDataElement]] | None = None,
+    role: Json[RoleParamType] | None = None,
+) -> HttpResponse:
+    if new_email is not None and (
+        not user_profile.can_change_user_emails or not user_profile.is_realm_admin
+    ):
+        raise JsonableError(_("User not authorized to change user emails"))
 
     if role is not None and target.role != role:
         # Require that the current user has permissions to
@@ -224,7 +310,15 @@ def update_user_backend(
             raise JsonableError(
                 _("The owner permission cannot be removed from the only organization owner.")
             )
-        do_change_user_role(target, role, acting_user=user_profile)
+
+        if settings.BILLING_ENABLED and target.is_guest:
+            from corporate.lib.registration import (
+                check_spare_license_available_for_changing_guest_user_role,
+            )
+
+            check_spare_license_available_for_changing_guest_user_role(user_profile.realm)
+
+        do_change_user_role(target, role, acting_user=user_profile, notify=True)
 
     if full_name is not None and target.full_name != full_name and full_name.strip() != "":
         # We don't respect `name_changes_disabled` here because the request
@@ -238,7 +332,9 @@ def update_user_backend(
             assert not isinstance(entry.value, int)
             if entry.value is None or not entry.value:
                 field_id = entry.id
-                check_remove_custom_profile_field_value(target, field_id)
+                check_remove_custom_profile_field_value(
+                    target, field_id, acting_user=user_profile, notify=True
+                )
             else:
                 clean_profile_data.append(
                     {
@@ -246,24 +342,41 @@ def update_user_backend(
                         "value": entry.value,
                     }
                 )
-        validate_user_custom_profile_data(target.realm.id, clean_profile_data)
-        do_update_user_custom_profile_data_if_changed(target, clean_profile_data)
+        validate_user_custom_profile_data(
+            target.realm.id, clean_profile_data, acting_user=user_profile
+        )
+        do_update_user_custom_profile_data_if_changed(
+            target, clean_profile_data, user_profile, notify=True
+        )
+
+    if new_email is not None and target.delivery_email != new_email:
+        assert user_profile.can_change_user_emails and user_profile.is_realm_admin
+        try:
+            validators.validate_email(new_email)
+        except ValidationError:
+            raise JsonableError(_("Invalid new email address."))
+        try:
+            validate_email_not_already_in_realm(
+                user_profile.realm,
+                new_email,
+                verbose=False,
+                allow_inactive_mirror_dummies=False,
+            )
+        except ValidationError as e:
+            raise JsonableError(_("New email value error: {message}").format(message=e.message))
+
+        do_change_user_delivery_email(target, new_email, acting_user=user_profile)
 
     return json_success(request)
 
 
-def avatar(
+def avatar_by_id(
     request: HttpRequest,
     maybe_user_profile: UserProfile | AnonymousUser,
-    email_or_id: str,
+    user_id: int,
     medium: bool = False,
 ) -> HttpResponse:
-    """Accepts an email address or user ID and returns the avatar"""
-    is_email = False
-    try:
-        int(email_or_id)
-    except ValueError:
-        is_email = True
+    """Accepts a user ID and returns the avatar"""
 
     if not maybe_user_profile.is_authenticated:
         # Allow anonymous access to avatars only if spectators are
@@ -272,27 +385,14 @@ def avatar(
         if not realm.allow_web_public_streams_access():
             raise MissingAuthenticationError
 
-        # We only allow the ID format for accessing a user's avatar
-        # for spectators. This is mainly for defense in depth, since
-        # email_address_visibility should mean spectators only
-        # interact with fake email addresses anyway.
-        if is_email:
-            raise MissingAuthenticationError
-
-        if settings.RATE_LIMITING:
-            unique_avatar_key = f"{realm.id}/{email_or_id}/{medium}"
+        if should_rate_limit(request):
+            unique_avatar_key = f"{realm.id}/{user_id}/{medium}"
             rate_limit_spectator_attachment_access_by_file(unique_avatar_key)
     else:
         realm = maybe_user_profile.realm
 
     try:
-        if is_email:
-            avatar_user_profile = get_user_including_cross_realm(email_or_id, realm)
-        else:
-            avatar_user_profile = get_user_by_id_in_realm_including_cross_realm(
-                int(email_or_id), realm
-            )
-
+        avatar_user_profile = get_user_by_id_in_realm_including_cross_realm(user_id, realm)
         url: str | None = None
         if maybe_user_profile.is_authenticated and not check_can_access_user(
             avatar_user_profile, maybe_user_profile
@@ -303,10 +403,44 @@ def avatar(
             url = avatar_url(avatar_user_profile, medium=medium)
         assert url is not None
     except UserProfile.DoesNotExist:
+        url = get_avatar_for_inaccessible_user()
+
+    assert url is not None
+    if request.META["QUERY_STRING"]:
+        url = append_url_query_string(url, request.META["QUERY_STRING"])
+    return redirect(url)
+
+
+def avatar_by_email(
+    request: HttpRequest,
+    maybe_user_profile: UserProfile | AnonymousUser,
+    email: str,
+    medium: bool = False,
+) -> HttpResponse:
+    """Accepts an email address and returns the avatar"""
+
+    if not maybe_user_profile.is_authenticated:
+        # We only allow the ID format for accessing a user's avatar
+        # for spectators. This is mainly for defense in depth, since
+        # email_address_visibility should mean spectators only
+        # interact with fake email addresses anyway.
+        raise MissingAuthenticationError
+
+    realm = maybe_user_profile.realm
+
+    try:
+        avatar_user_profile = get_user_including_cross_realm(email, realm)
+        url: str | None = None
+        if not check_can_access_user(avatar_user_profile, maybe_user_profile):
+            url = get_avatar_for_inaccessible_user()
+        else:
+            # If there is a valid user account passed in, use its avatar
+            url = avatar_url(avatar_user_profile, medium=medium)
+        assert url is not None
+    except UserProfile.DoesNotExist:
         # If there is no such user, treat it as a new gravatar
-        email = email_or_id
         avatar_version = 1
-        url = get_gravatar_url(email, avatar_version, medium)
+        url = get_gravatar_url(email, avatar_version, realm.id, medium)
 
     assert url is not None
     if request.META["QUERY_STRING"]:
@@ -315,9 +449,16 @@ def avatar(
 
 
 def avatar_medium(
-    request: HttpRequest, maybe_user_profile: UserProfile | AnonymousUser, email_or_id: str
+    request: HttpRequest,
+    maybe_user_profile: UserProfile | AnonymousUser,
+    email: str | None = None,
+    user_id: int | None = None,
 ) -> HttpResponse:
-    return avatar(request, maybe_user_profile, email_or_id, medium=True)
+    if email:
+        return avatar_by_email(request, maybe_user_profile, email, medium=True)
+    else:
+        assert user_id is not None
+        return avatar_by_id(request, maybe_user_profile, user_id, medium=True)
 
 
 def get_stream_name(stream: Stream | None) -> str | None:
@@ -326,24 +467,50 @@ def get_stream_name(stream: Stream | None) -> str | None:
     return None
 
 
-@require_member_or_admin
+@require_human_non_guest_user
 @typed_endpoint
 def patch_bot_backend(
     request: HttpRequest,
     user_profile: UserProfile,
     *,
     bot_id: PathOnly[int],
-    full_name: str | None = None,
-    role: Json[RoleParamType] | None = None,
     bot_owner_id: Json[int] | None = None,
     config_data: Json[dict[str, str]] | None = None,
-    service_payload_url: Json[Annotated[str, AfterValidator(check_url)]] | None = None,
-    service_interface: Json[int] = 1,
-    default_sending_stream: str | None = None,
-    default_events_register_stream: str | None = None,
     default_all_public_streams: Json[bool] | None = None,
+    default_events_register_stream: str | None = None,
+    default_sending_stream: str | None = None,
+    full_name: str | None = None,
+    role: Json[RoleParamType] | None = None,
+    service_interface: Json[int] = 1,
+    service_payload_url: Json[Annotated[str, AfterValidator(check_url)]] | None = None,
+    short_name: str | None = None,
 ) -> HttpResponse:
     bot = access_bot_by_id(user_profile, bot_id)
+
+    # Handle short_name change
+    if short_name is not None:
+        try:
+            _validated_short_name, new_email = validate_short_name_and_construct_bot_email(
+                short_name, user_profile.realm
+            )
+        except InvalidFakeEmailDomainError:
+            raise JsonableError(
+                _(
+                    "Can't change bot email until FAKE_EMAIL_DOMAIN is correctly configured.\n"
+                    "Please contact your server administrator."
+                )
+            )
+        if new_email != bot.email:
+            try:
+                validate_email_not_already_in_realm(
+                    user_profile.realm,
+                    new_email,
+                    verbose=False,
+                    allow_inactive_mirror_dummies=False,
+                )
+            except ValidationError:
+                raise JsonableError(_("Email address already in use"))
+            do_change_user_delivery_email(bot, new_email, acting_user=user_profile)
 
     if full_name is not None:
         check_change_bot_full_name(bot, full_name, user_profile)
@@ -355,7 +522,7 @@ def patch_bot_backend(
         elif not user_profile.is_realm_admin:
             raise OrganizationAdministratorRequiredError
 
-        do_change_user_role(bot, role, acting_user=user_profile)
+        do_change_user_role(bot, role, acting_user=user_profile, notify=False)
 
     if bot_owner_id is not None and bot.bot_owner_id != bot_owner_id:
         try:
@@ -375,13 +542,13 @@ def patch_bot_backend(
         if default_sending_stream == "":
             stream: Stream | None = None
         else:
-            (stream, sub) = access_stream_by_name(user_profile, default_sending_stream)
+            (stream, _sub) = access_stream_by_name(user_profile, default_sending_stream)
         do_change_default_sending_stream(bot, stream, acting_user=user_profile)
     if default_events_register_stream is not None:
         if default_events_register_stream == "":
             stream = None
         else:
-            (stream, sub) = access_stream_by_name(user_profile, default_events_register_stream)
+            (stream, _sub) = access_stream_by_name(user_profile, default_events_register_stream)
         do_change_default_events_register_stream(bot, stream, acting_user=user_profile)
     if default_all_public_streams is not None:
         do_change_default_all_public_streams(
@@ -391,7 +558,12 @@ def patch_bot_backend(
     if service_payload_url is not None:
         check_valid_interface_type(service_interface)
         assert service_interface is not None
-        do_update_outgoing_webhook_service(bot, service_interface, service_payload_url)
+        do_update_outgoing_webhook_service(
+            bot,
+            interface=service_interface,
+            base_url=service_payload_url,
+            acting_user=user_profile,
+        )
 
     if config_data is not None:
         do_update_bot_config_data(bot, config_data)
@@ -402,7 +574,7 @@ def patch_bot_backend(
         [user_file] = request.FILES.values()
         assert isinstance(user_file, UploadedFile)
         assert user_file.size is not None
-        upload_avatar_image(user_file, bot)
+        upload_avatar_image(user_file, bot, content_type=user_file.content_type)
         avatar_source = UserProfile.AVATAR_FROM_USER
         do_change_avatar_fields(bot, avatar_source, acting_user=user_profile)
     else:
@@ -427,7 +599,7 @@ def patch_bot_backend(
     return json_success(request, data=json_result)
 
 
-@require_member_or_admin
+@require_human_non_guest_user
 @typed_endpoint_without_parameters
 def regenerate_bot_api_key(
     request: HttpRequest, user_profile: UserProfile, bot_id: PathOnly[int]
@@ -441,38 +613,49 @@ def regenerate_bot_api_key(
     return json_success(request, data=json_result)
 
 
-@require_member_or_admin
+@require_human_non_guest_user
+@typed_endpoint_without_parameters
+def get_bot_api_key(
+    request: HttpRequest, user_profile: UserProfile, bot_id: PathOnly[int]
+) -> HttpResponse:
+    bot = access_bot_by_id(user_profile, bot_id)
+
+    json_result = dict(
+        api_key=bot.api_key,
+    )
+    return json_success(request, data=json_result)
+
+
+@require_human_non_guest_user
 @typed_endpoint
 def add_bot_backend(
     request: HttpRequest,
     user_profile: UserProfile,
     *,
-    full_name_raw: Annotated[str, ApiParamConfig("full_name")],
-    short_name_raw: Annotated[str, ApiParamConfig("short_name")],
     bot_type: Json[int] = UserProfile.DEFAULT_BOT,
-    payload_url: Json[Annotated[str, AfterValidator(check_url)]] = "",
-    service_name: str | None = None,
     config_data: Json[Mapping[str, str]] | None = None,
-    interface_type: Json[int] = Service.GENERIC,
-    default_sending_stream_name: Annotated[
-        str | None, ApiParamConfig("default_sending_stream")
-    ] = None,
+    default_all_public_streams: Json[bool] | None = None,
     default_events_register_stream_name: Annotated[
         str | None, ApiParamConfig("default_events_register_stream")
     ] = None,
-    default_all_public_streams: Json[bool] | None = None,
+    default_sending_stream_name: Annotated[
+        str | None, ApiParamConfig("default_sending_stream")
+    ] = None,
+    full_name_raw: Annotated[str, ApiParamConfig("full_name")],
+    interface_type: Json[int] = Service.GENERIC,
+    payload_url: Json[Annotated[str, AfterValidator(check_url)]] = "",
+    service_name: str | None = None,
+    short_name_raw: Annotated[str, ApiParamConfig("short_name")],
 ) -> HttpResponse:
+    if user_profile.realm.demo_organization_scheduled_deletion_date is not None:
+        check_demo_organization_has_set_email(user_profile.realm)
+
     if config_data is None:
         config_data = {}
-    short_name = check_short_name(short_name_raw)
-    if bot_type != UserProfile.INCOMING_WEBHOOK_BOT:
-        service_name = service_name or short_name
-    short_name += "-bot"
-    full_name = check_full_name(
-        full_name_raw=full_name_raw, user_profile=user_profile, realm=user_profile.realm
-    )
     try:
-        email = Address(username=short_name, domain=user_profile.realm.get_bot_domain()).addr_spec
+        short_name, email = validate_short_name_and_construct_bot_email(
+            short_name_raw, user_profile.realm
+        )
     except InvalidFakeEmailDomainError:
         raise JsonableError(
             _(
@@ -480,8 +663,11 @@ def add_bot_backend(
                 "Please contact your server administrator."
             )
         )
-    except ValueError:
-        raise JsonableError(_("Bad name or username"))
+    if bot_type != UserProfile.INCOMING_WEBHOOK_BOT:
+        service_name = service_name or short_name
+    full_name = check_full_name(
+        full_name_raw=full_name_raw, user_profile=None, realm=user_profile.realm
+    )
     form = CreateUserForm({"full_name": full_name, "email": email})
 
     if bot_type == UserProfile.EMBEDDED_BOT:
@@ -497,7 +683,7 @@ def add_bot_backend(
         raise JsonableError(_("Bad name or username"))
     try:
         get_user_by_delivery_email(email, user_profile.realm)
-        raise JsonableError(_("Username already in use"))
+        raise EmailAlreadyInUseError
     except UserProfile.DoesNotExist:
         pass
 
@@ -507,26 +693,25 @@ def add_bot_backend(
         is_activation=False,
     )
 
-    check_bot_creation_policy(user_profile, bot_type)
+    check_can_create_bot(user_profile, bot_type)
     check_valid_bot_type(user_profile, bot_type)
     check_valid_interface_type(interface_type)
 
-    if len(request.FILES) == 0:
-        avatar_source = UserProfile.AVATAR_FROM_GRAVATAR
-    elif len(request.FILES) != 1:
-        raise JsonableError(_("You may only upload one file at a time"))
-    else:
+    avatar_source = None
+    if len(request.FILES) == 1:
         avatar_source = UserProfile.AVATAR_FROM_USER
+    elif len(request.FILES) > 1:
+        raise JsonableError(_("You may only upload one file at a time"))
 
     default_sending_stream = None
     if default_sending_stream_name is not None:
-        (default_sending_stream, ignored_sub) = access_stream_by_name(
+        (default_sending_stream, _sub) = access_stream_by_name(
             user_profile, default_sending_stream_name
         )
 
     default_events_register_stream = None
     if default_events_register_stream_name is not None:
-        (default_events_register_stream, ignored_sub) = access_stream_by_name(
+        (default_events_register_stream, _sub) = access_stream_by_name(
             user_profile, default_events_register_stream_name
         )
 
@@ -550,7 +735,9 @@ def add_bot_backend(
         [user_file] = request.FILES.values()
         assert isinstance(user_file, UploadedFile)
         assert user_file.size is not None
-        upload_avatar_image(user_file, bot_profile, future=False)
+        upload_avatar_image(
+            user_file, bot_profile, content_type=user_file.content_type, future=False
+        )
 
     if bot_type in (UserProfile.OUTGOING_WEBHOOK_BOT, UserProfile.EMBEDDED_BOT):
         assert isinstance(service_name, str)
@@ -571,7 +758,7 @@ def add_bot_backend(
 
     notify_created_bot(bot_profile)
 
-    api_key = get_api_key(bot_profile)
+    api_key = bot_profile.api_key
 
     json_result = dict(
         user_id=bot_profile.id,
@@ -584,7 +771,7 @@ def add_bot_backend(
     return json_success(request, data=json_result)
 
 
-@require_member_or_admin
+@require_human_non_guest_user
 def get_bots_backend(request: HttpRequest, user_profile: UserProfile) -> HttpResponse:
     bot_profiles = UserProfile.objects.filter(is_bot=True, is_active=True, bot_owner=user_profile)
     bot_profiles = bot_profiles.select_related(
@@ -599,7 +786,7 @@ def get_bots_backend(request: HttpRequest, user_profile: UserProfile) -> HttpRes
         # Bots are supposed to have only one API key, at least for now.
         # Therefore we can safely assume that one and only valid API key will be
         # the first one.
-        api_key = get_api_key(bot_profile)
+        api_key = bot_profile.api_key
 
         return dict(
             username=bot_profile.email,
@@ -615,10 +802,13 @@ def get_bots_backend(request: HttpRequest, user_profile: UserProfile) -> HttpRes
 
 
 def get_user_data(
-    user_profile: UserProfile,
+    user_profile: UserProfile | None,
     include_custom_profile_fields: bool,
     client_gravatar: bool,
+    *,
+    realm: Realm | None = None,
     target_user: UserProfile | None = None,
+    user_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     """
     The client_gravatar field here is set to True by default assuming that clients
@@ -626,7 +816,9 @@ def get_user_data(
     an optimization than it might seem because gravatar URLs contain MD5 hashes that
     compress very poorly compared to other data.
     """
-    realm = user_profile.realm
+    if realm is None:
+        assert user_profile is not None
+        realm = user_profile.realm
 
     members = get_users_for_api(
         realm,
@@ -635,9 +827,11 @@ def get_user_data(
         client_gravatar=client_gravatar,
         user_avatar_url_field_optional=False,
         include_custom_profile_fields=include_custom_profile_fields,
+        user_ids=user_ids,
     )
 
     if target_user is not None:
+        assert user_ids is None
         data: dict[str, Any] = {"user": members[target_user.id]}
     else:
         data = {"members": [members[k] for k in members]}
@@ -646,22 +840,52 @@ def get_user_data(
 
 
 @typed_endpoint
-def get_members_backend(
+def get_member_backend(
     request: HttpRequest,
     user_profile: UserProfile,
-    user_id: int | None = None,
+    user_id: int,
     *,
-    include_custom_profile_fields: Json[bool] = False,
     client_gravatar: Json[bool] = True,
+    include_custom_profile_fields: Json[bool] = False,
 ) -> HttpResponse:
-    target_user = None
-    if user_id is not None:
-        target_user = access_user_by_id(
-            user_profile, user_id, allow_deactivated=True, allow_bots=True, for_admin=False
-        )
+    target_user = access_user_by_id(
+        user_profile, user_id, allow_deactivated=True, allow_bots=True, for_admin=False
+    )
+    data = get_user_data(
+        user_profile,
+        include_custom_profile_fields,
+        client_gravatar,
+        target_user=target_user,
+    )
+    return json_success(request, data)
 
-    data = get_user_data(user_profile, include_custom_profile_fields, client_gravatar, target_user)
 
+@typed_endpoint
+def get_members_backend(
+    request: HttpRequest,
+    maybe_user_profile: UserProfile | AnonymousUser,
+    *,
+    client_gravatar: Json[bool] = True,
+    include_custom_profile_fields: Json[bool] = False,
+    user_ids: Json[list[int]] | None = None,
+) -> HttpResponse:
+    if isinstance(maybe_user_profile, UserProfile):
+        user_profile = maybe_user_profile
+        realm = user_profile.realm
+    else:
+        realm = get_valid_realm_from_request(request)
+        if not realm.allow_web_public_streams_access():
+            raise MissingAuthenticationError
+
+        user_profile = None
+
+    data = get_user_data(
+        user_profile,
+        include_custom_profile_fields,
+        client_gravatar,
+        user_ids=user_ids,
+        realm=realm,
+    )
     return json_success(request, data)
 
 
@@ -679,7 +903,7 @@ def create_user_backend(
         raise JsonableError(_("User not authorized to create users"))
 
     full_name = check_full_name(
-        full_name_raw=full_name_raw, user_profile=user_profile, realm=user_profile.realm
+        full_name_raw=full_name_raw, user_profile=None, realm=user_profile.realm
     )
     form = CreateUserForm({"full_name": full_name, "email": email})
     if not form.is_valid():
@@ -704,7 +928,7 @@ def create_user_backend(
 
     try:
         get_user_by_delivery_email(email, user_profile.realm)
-        raise JsonableError(_("Email '{email}' already in use").format(email=email))
+        raise EmailAlreadyInUseError
     except UserProfile.DoesNotExist:
         pass
 
@@ -748,11 +972,11 @@ def get_subscription_backend(
     request: HttpRequest,
     user_profile: UserProfile,
     *,
-    user_id: PathOnly[Json[int]],
     stream_id: PathOnly[Json[int]],
+    user_id: PathOnly[Json[int]],
 ) -> HttpResponse:
-    target_user = access_user_by_id(user_profile, user_id, for_admin=False)
-    (stream, sub) = access_stream_by_id(user_profile, stream_id, allow_realm_admin=True)
+    target_user = access_user_by_id(user_profile, user_id, allow_bots=True, for_admin=False)
+    (_stream, _sub) = access_stream_by_id(user_profile, stream_id, require_content_access=False)
 
     subscription_status = {"is_subscribed": subscribed_to_stream(target_user, stream_id)}
 
@@ -760,17 +984,39 @@ def get_subscription_backend(
 
 
 @typed_endpoint
+def get_subscribed_channels_backend(
+    request: HttpRequest,
+    user_profile: UserProfile,
+    *,
+    user_id: PathOnly[Json[int]],
+) -> HttpResponse:
+    target_user = access_user_by_id(user_profile, user_id, allow_bots=True, for_admin=False)
+    streams = get_metadata_access_streams(
+        user_profile,
+        list(get_user_subscribed_streams(target_user)),
+        UserGroupMembershipDetails(user_recursive_group_ids=None),
+    )
+
+    return json_success(request, data={"subscribed_channel_ids": [stream.id for stream in streams]})
+
+
+@typed_endpoint
 def get_user_by_email(
     request: HttpRequest,
     user_profile: UserProfile,
     *,
+    client_gravatar: Json[bool] = True,
     email: PathOnly[str],
     include_custom_profile_fields: Json[bool] = False,
-    client_gravatar: Json[bool] = True,
 ) -> HttpResponse:
     target_user = access_user_by_email(
         user_profile, email, allow_deactivated=True, allow_bots=True, for_admin=False
     )
 
-    data = get_user_data(user_profile, include_custom_profile_fields, client_gravatar, target_user)
+    data = get_user_data(
+        user_profile,
+        include_custom_profile_fields,
+        client_gravatar,
+        target_user=target_user,
+    )
     return json_success(request, data)

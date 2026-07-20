@@ -32,7 +32,7 @@ Consumer: TypeAlias = Callable[[ChannelT, Basic.Deliver, pika.BasicProperties, b
 # RabbitMQ/Pika's queuing system; its purpose is to just provide an
 # interface for external files to put things into queues and take them
 # out from bots without having to import pika code all over our codebase.
-class QueueClient(Generic[ChannelT], ABC):
+class QueueClient(ABC, Generic[ChannelT]):
     def __init__(
         self,
         # Disable RabbitMQ heartbeats by default because BlockingConnection can't process them
@@ -434,7 +434,11 @@ def set_queue_client(queue_client: SimpleQueueClient | TornadoQueueClient) -> No
     thread_data.queue_client = queue_client
 
 
-def queue_json_publish(
+# One should generally use `queue_event_on_commit` unless there's a strong
+# reason to use `queue_json_publish_rollback_unsafe` directly, as it doesn't
+# wait for the db transaction (within which it gets called, if any) to commit
+# and sends event irrespective of commit or rollback.
+def queue_json_publish_rollback_unsafe(
     queue_name: str,
     event: dict[str, Any],
     processor: Callable[[Any], None] | None = None,
@@ -442,17 +446,31 @@ def queue_json_publish(
     if settings.USING_RABBITMQ:
         get_queue_client().json_publish(queue_name, event)
     elif processor:
-        processor(event)
+        # Round-trip through orjson to simulate what RabbitMQ does.
+        processor(orjson.loads(orjson.dumps(event)))
     else:
         # The else branch is only hit during tests, where rabbitmq is not enabled.
         # Must be imported here: A top section import leads to circular imports
         from zerver.worker.queue_processors import get_worker
 
-        get_worker(queue_name, disable_timeout=True).consume_single_event(event)
+        # As above, we round-trip the event through orjson to emulate
+        # what happens with RabbitMQ enqueueing and dequeueing the
+        # event.  This ensures that we don't rely on non-JSON'able
+        # datatypes in the events.
+        get_worker(queue_name, disable_timeout=True).consume_single_event(
+            orjson.loads(orjson.dumps(event))
+        )
 
 
 def queue_event_on_commit(queue_name: str, event: dict[str, Any]) -> None:
-    transaction.on_commit(lambda: queue_json_publish(queue_name, event))
+    transaction.on_commit(lambda: queue_json_publish_rollback_unsafe(queue_name, event))
+
+
+def mobile_notifications_queue_name(user_id: int) -> str:
+    if settings.MOBILE_NOTIFICATIONS_SHARDS > 1:
+        shard_id = user_id % settings.MOBILE_NOTIFICATIONS_SHARDS + 1
+        return f"missedmessage_mobile_notifications_shard{shard_id}"
+    return "missedmessage_mobile_notifications"
 
 
 def retry_event(
@@ -464,4 +482,4 @@ def retry_event(
     if event["failed_tries"] > MAX_REQUEST_RETRIES:
         failure_processor(event)
     else:
-        queue_json_publish(queue_name, event)
+        queue_json_publish_rollback_unsafe(queue_name, event)

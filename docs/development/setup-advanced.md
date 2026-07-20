@@ -19,10 +19,10 @@ One can install the Zulip development environment directly on a Linux
 host by following these instructions. Currently supported platforms
 are:
 
-- Ubuntu 22.04, 24.04
-- Debian 12
+- Ubuntu 22.04, 24.04, 26.04
+- Debian 12, 13
 - CentOS 7 (beta)
-- Fedora 38 (beta)
+- Fedora 43 (beta)
 - RHEL 7 (beta)
 
 **Note**: You should not use the `root` user to run the installation.
@@ -54,7 +54,7 @@ Zulip and run the following commands:
 ```bash
 # From inside a clone of zulip.git:
 ./tools/provision
-source /srv/zulip-py3-venv/bin/activate
+source .venv/bin/activate
 ./tools/run-dev  # starts the development server
 ```
 
@@ -212,8 +212,8 @@ expected.
 1. Set the `EXTERNAL_HOST` environment variable.
 
    ```console
-   (zulip-py3-venv) vagrant@ubuntu-18:/srv/zulip$ export EXTERNAL_HOST="$(hostname -I | xargs):9991"
-   (zulip-py3-venv) vagrant@ubuntu-18:/srv/zulip$ echo $EXTERNAL_HOST
+   (zulip-server) vagrant@ubuntu-18:/srv/zulip$ export EXTERNAL_HOST="$(hostname -I | xargs):9991"
+   (zulip-server) vagrant@ubuntu-18:/srv/zulip$ echo $EXTERNAL_HOST
    ```
 
    The output will be like:
@@ -234,7 +234,7 @@ expected.
 1. You should now be able to start the Zulip development server.
 
    ```console
-   (zulip-py3-venv) vagrant@ubuntu-18:/srv/zulip$ ./tools/run-dev
+   (zulip-server) vagrant@ubuntu-18:/srv/zulip$ ./tools/run-dev
    ```
 
    The output will look like:

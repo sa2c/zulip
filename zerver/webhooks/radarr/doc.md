@@ -4,8 +4,6 @@ Receive Radarr notifications in Zulip!
 
 {start_tabs}
 
-1. {!create-channel.md!}
-
 1. {!create-an-incoming-webhook.md!}
 
 1. {!generate-webhook-url-basic.md!}
@@ -19,7 +17,8 @@ Receive Radarr notifications in Zulip!
     notified about movies with specific tags.
 
 1. Set **URL** to the URL generated above, and set **Method** to
-    **POST**. Leave the **Username** and **Password** fields blank. Click **Save**, which will send a test message to Zulip.
+    **POST**. Leave the **Username** and **Password** fields blank. Click
+    **Save**, which will send a test message to Zulip.
 
 {end_tabs}
 

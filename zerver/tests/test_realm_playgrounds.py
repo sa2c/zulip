@@ -1,4 +1,5 @@
 from zerver.actions.realm_playgrounds import check_add_realm_playground
+from zerver.actions.realm_settings import do_set_realm_property
 from zerver.lib.test_classes import ZulipTestCase
 from zerver.models import RealmPlayground
 from zerver.models.realms import get_realm
@@ -59,7 +60,10 @@ class RealmPlaygroundTests(ZulipTestCase):
             "url_template": "https://template.com{code}",
         }
         resp = self.api_post(iago, "/api/v1/realm/playgrounds", payload)
-        self.assert_json_error(resp, "Invalid characters in pygments language")
+        self.assert_json_error(
+            resp,
+            "Invalid character in language: $",
+        )
 
         payload = {
             "name": "Template with an unexpected variable",
@@ -86,6 +90,30 @@ class RealmPlaygroundTests(ZulipTestCase):
         }
         resp = self.api_post(iago, "/api/v1/realm/playgrounds", payload)
         self.assert_json_error(resp, 'Missing the required variable "code" in the URL template')
+
+    def test_add_realm_playground_validation(self) -> None:
+        iago = self.example_user("iago")
+
+        # Test to check that spaces are rejected
+        payload = {
+            "name": "Bad Name",
+            "pygments_language": "rust lang",
+            "url_template": "https://example.com",
+        }
+        result = self.api_post(iago, "/api/v1/realm/playgrounds", payload)
+        self.assert_json_error(
+            result,
+            "Invalid character in language:  ",
+        )
+
+        # Test to check that restricted keywords are rejected
+        payload = {
+            "name": "Bad Keyword",
+            "pygments_language": "math",
+            "url_template": "https://example.com",
+        }
+        result = self.api_post(iago, "/api/v1/realm/playgrounds", payload)
+        self.assert_json_error(result, "Language 'math' is not allowed.")
 
     def test_create_already_existing_playground(self) -> None:
         iago = self.example_user("iago")
@@ -131,3 +159,25 @@ class RealmPlaygroundTests(ZulipTestCase):
         result = self.api_delete(iago, f"/api/v1/realm/playgrounds/{playground_id}")
         self.assert_json_success(result)
         self.assertFalse(RealmPlayground.objects.filter(name="Python").exists())
+
+    def test_delete_default_code_block_language_playground(self) -> None:
+        iago = self.example_user("iago")
+        realm = get_realm("zulip")
+
+        playground_id = check_add_realm_playground(
+            realm,
+            acting_user=iago,
+            name="Python playground",
+            pygments_language="Python",
+            url_template="https://python.example.com{code}",
+        )
+        self.assertTrue(RealmPlayground.objects.filter(name="Python playground").exists())
+
+        # Set the default code block language to the playground's language
+        do_set_realm_property(realm, "default_code_block_language", "Python", acting_user=iago)
+        self.assertEqual(realm.default_code_block_language, "Python")
+        result = self.api_delete(iago, f"/api/v1/realm/playgrounds/{playground_id}")
+        self.assert_json_success(result)
+        realm.refresh_from_db()
+        self.assertFalse(RealmPlayground.objects.filter(name="Python").exists())
+        self.assertEqual(realm.default_code_block_language, "")

@@ -2,6 +2,7 @@
 import logging
 import os
 import sys
+import time
 from argparse import ArgumentParser, BooleanOptionalAction, RawTextHelpFormatter, _ActionsContainer
 from dataclasses import dataclass
 from functools import reduce, wraps
@@ -14,6 +15,7 @@ from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.db.models import Q, QuerySet
 from typing_extensions import override
 
+from scripts.lib.zulip_tools import LOCK_DIR as DEPLOYMENT_LOCK_DIR
 from zerver.lib.context_managers import lockfile_nonblocking
 from zerver.lib.initial_password import initial_password
 from zerver.models import Client, Realm, UserProfile
@@ -26,19 +28,6 @@ def is_integer_string(val: str) -> bool:
         return True
     except ValueError:
         return False
-
-
-def check_config() -> None:
-    for setting_name, default in settings.REQUIRED_SETTINGS:
-        # if required setting is the same as default OR is not found in settings,
-        # throw error to add/set that setting in config
-        try:
-            if getattr(settings, setting_name) != default:
-                continue
-        except AttributeError:
-            pass
-
-        raise CommandError(f"Error: You must set {setting_name} in /etc/zulip/settings.py.")
 
 
 class HandleMethod(Protocol):
@@ -62,6 +51,26 @@ def abort_unless_locked(handle_func: HandleMethod) -> HandleMethod:
                 )
                 sys.exit(1)
             handle_func(self, *args, **kwargs)
+
+    return our_handle
+
+
+def abort_cron_during_deploy(handle_func: HandleMethod) -> HandleMethod:
+    @wraps(handle_func)
+    def our_handle(self: BaseCommand, *args: Any, **kwargs: Any) -> None:
+        # For safety, we only trust the lock directory if it was
+        # created within the last hour -- otherwise, a spurious
+        # deploy lock could linger and block all hourly crons.
+        if (
+            os.environ.get("RUNNING_UNDER_CRON")
+            and os.path.exists(DEPLOYMENT_LOCK_DIR)
+            and time.time() - os.path.getctime(DEPLOYMENT_LOCK_DIR) < 3600
+        ):  # nocoverage
+            self.stdout.write(
+                self.style.ERROR("Deployment in process; aborting cron management command.")
+            )
+            sys.exit(1)
+        handle_func(self, *args, **kwargs)
 
     return our_handle
 
@@ -97,7 +106,7 @@ class ZulipBaseCommand(BaseCommand):
         super().execute(*args, **options)
 
     def add_realm_args(
-        self, parser: ArgumentParser, *, required: bool = False, help: str | None = None
+        self, parser: _ActionsContainer, *, required: bool = False, help: str | None = None
     ) -> None:
         if help is None:
             help = """The numeric or string ID (subdomain) of the Zulip organization to modify.

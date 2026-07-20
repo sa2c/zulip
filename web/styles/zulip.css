@@ -1,3 +1,7 @@
+#download-mac-alt {
+    margin-top: 10px;
+}
+
 html {
     overflow: hidden scroll;
     overscroll-behavior-y: none;
@@ -6,7 +10,7 @@ html {
 
 body,
 html {
-    height: 100%;
+    height: var(--full-height-dynamic-viewport);
     touch-action: manipulation;
 }
 
@@ -39,9 +43,65 @@ body {
     .header-main,
     .app .app-main,
     #compose-container {
-        /* 1417px at 14px/1em; (14px * 20.5em) - 12px + 880 + 250px = 1417px */
-        max-width: 100.3571em;
-        max-width: calc(var(--left-sidebar-max-width) + 62.8571em + 250px);
+        max-width: calc(
+            var(--left-sidebar-max-width) + var(--message-area-max-width) +
+                var(--right-sidebar-max-width)
+        );
+    }
+
+    /* When sidebars are manually hidden, we set the max-width
+       for the layout to a different maximum width. This keeps
+       the message area predictably readable. */
+    &.hide-left-sidebar:not(.fluid_layout_width) {
+        .header-main,
+        .app .app-main,
+        #compose-container {
+            max-width: calc(
+                var(--message-area-max-width) + var(--right-sidebar-max-width)
+            );
+
+            /* When we're less than the xl_min breakpoint, we instead
+               constrain to just the message area's max-width, since
+               the right column will be hidden below that point. */
+            @container header-container (width < $cq_xl_min) {
+                max-width: var(--message-area-max-width);
+            }
+
+            @container app (width < $cq_xl_min) {
+                max-width: var(--message-area-max-width);
+            }
+        }
+    }
+
+    /* Fallback media query. */
+    @media (width < $xl_min) {
+        &.without-container-query-support.hide-left-sidebar:not(
+                .fluid_layout_width
+            ) {
+            .header-main,
+            .app .app-main,
+            #compose-container {
+                max-width: var(--message-area-max-width);
+            }
+        }
+    }
+
+    &.hide-right-sidebar:not(.fluid_layout_width) {
+        .header-main,
+        .app .app-main,
+        #compose-container {
+            max-width: calc(
+                var(--left-sidebar-max-width) + var(--message-area-max-width)
+            );
+        }
+    }
+
+    &.hide-left-sidebar.hide-right-sidebar:not(.fluid_layout_width) {
+        .header-main,
+        .app .app-main,
+        #compose-container {
+            max-width: var(--message-area-max-width);
+        }
     }
 
     &.fluid_layout_width {
@@ -54,27 +114,52 @@ body {
 }
 
 input,
-button,
-select,
-textarea {
-    font-family: "Source Sans 3 VF", sans-serif;
-    /* Disable bootstrap size CSS; we want to use our default font size on
-       body for input elements. */
-    line-height: normal;
-    font-size: inherit;
+button {
+    /* Browsers default to inline-block,
+       so preserve this value. */
+    vertical-align: middle;
+    /* Preserve normal font-weight, though
+       it appears UA stylesheets do not set
+       the weight to other values. */
+    font-weight: normal;
+    /* Likewise with zeroed margin. */
+    margin: 0;
+
+    /* Reset these values from Firefox's
+       UA stylesheet (still present in
+       April 2025) */
+    &::-moz-focus-inner {
+        padding: 0;
+        border: 0;
+    }
 }
 
 blockquote p {
     font-weight: normal;
 }
 
+/* These colors are typically overridden,
+   but referencing them as variables prevents
+   specificity wars and ugly :not() selectors,
+   especially in dark theme. */
 a {
     cursor: pointer;
     color: #7283b4;
+    text-decoration: none;
 
     &.message_label_clickable:hover {
         cursor: pointer;
         color: #d3e2f4;
+    }
+}
+
+a:hover,
+a:focus {
+    color: var(--color-text-generic-link-interactive);
+    text-decoration: underline;
+
+    & code {
+        color: var(--color-text-generic-link-interactive);
     }
 }
 
@@ -134,7 +219,6 @@ p.n-margin {
 .all-messages-search-caution {
     border-radius: 4px;
     display: none;
-    font-size: 16px;
     margin: 0 auto 12px;
     padding: 5px;
     /* Difference should be 16px to accommodate the icon. */
@@ -142,7 +226,7 @@ p.n-margin {
     padding-left: 26px;
     text-indent: -10px;
 
-    & i {
+    .all-messages-search-caution-icon {
         margin: 0 3px 0 1px;
     }
 
@@ -152,16 +236,19 @@ p.n-margin {
     }
 }
 
+.messages-logo-svg {
+    width: 1.7188em; /* 27.5px at 16px/1em */
+}
+
 .bottom-messages-logo {
     display: none;
 }
 
-.alert-zulip-logo,
 .top-messages-logo,
 .bottom-messages-logo {
-    width: 24px;
-    height: 24px;
-    margin: 0 auto 12px;
+    width: 1.7143em; /* 24px at 14px/em */
+    height: 1.7143em;
+    margin: 0 auto 0.8571em; /* 12px at 14px/em */
 
     & svg {
         & circle {
@@ -185,10 +272,6 @@ p.n-margin {
     /* Since padding under message header is not transparent
        we need to position it below the padding. */
     padding-top: var(--header-padding-bottom);
-    margin-bottom: 0;
-    /* To fit the logo inside the spinner. */
-    position: relative;
-    top: -2px;
 }
 
 /* See https://web.dev/animations-guide/#triggers before adding any funny animation properties here. */
@@ -216,17 +299,30 @@ p.n-margin {
     }
 }
 
+#feedback-container-content-wrapper {
+    position: fixed;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 400px;
+    max-width: calc(100% - 20px);
+    padding: 15px;
+    background-color: var(--color-background-modal);
+    border-radius: 5px;
+    box-shadow: 0 0 30px hsl(0deg 0% 0% / 25%);
+    box-sizing: border-box;
+}
+
 #feedback_container {
     display: none;
     position: fixed;
-    width: 400px;
-    top: 0;
-    left: calc(50vw - 220px);
-    padding: 15px;
-    background-color: hsl(0deg 0% 98%);
-    border-radius: 5px;
-    box-shadow: 0 0 30px hsl(0deg 0% 0% / 25%);
+    width: 100%;
     z-index: 110;
+
+    @container app (width < $cq_md_min) {
+        width: calc(90% - 30px);
+        left: 5%;
+        top: 5%;
+    }
 
     &.show-feedback-container {
         display: block;
@@ -243,10 +339,18 @@ p.n-margin {
     }
 
     .exit-me {
-        font-size: 20pt;
-        font-weight: 200;
-        margin: 0 0 0 10px;
-        cursor: pointer;
+        margin: 0 0 0 5px;
+    }
+
+    .float-header {
+        display: flex;
+        align-items: center;
+    }
+
+    .feedback-button-container {
+        display: flex;
+        align-items: center;
+        margin-left: auto;
     }
 }
 
@@ -280,59 +384,9 @@ p.n-margin {
     box-shadow: inset 0 -1px 0 var(--color-navbar-bottom-border);
 }
 
-#navbar_alerts_wrapper {
-    font-size: 1rem;
-    position: relative;
-
-    .alert {
-        /* Since alerts are only rendered into the DOM when they are first
-           displayed, display: block is the right default for this setting. */
-        display: block;
-        margin: 0;
-        padding-top: 12px;
-        padding-bottom: 12px;
-
-        border: none;
-        border-radius: 0;
-
-        text-align: center;
-        text-shadow: none;
-        color: hsl(0deg 0% 100%);
-
-        &.alert-info {
-            background-color: hsl(170deg 46% 54%);
-
-            &.red {
-                background-color: hsl(0deg 46% 54%);
-            }
-        }
-
-        .close {
-            line-height: 24px;
-            position: absolute;
-            right: 18px;
-            top: 50%;
-            transform: translateY(-50%);
-        }
-
-        .alert-link {
-            color: hsl(169deg 100% 88%);
-            font-weight: 600;
-        }
-
-        &.red .alert-link {
-            color: hsl(0deg 100% 88%);
-        }
-
-        .buttons .alert-link {
-            margin: 0 5px;
-        }
-    }
-}
-
 .app {
     min-width: 100%;
-    min-height: 100%;
+    min-height: var(--full-height-dynamic-viewport);
     z-index: 99;
 }
 
@@ -372,6 +426,10 @@ body.has-overlay-scrollbar {
     white-space: pre;
 }
 
+.white-space-nowrap {
+    white-space: nowrap;
+}
+
 /* Set flex display on login buttons only in the
    spectator view. We want them to display none
    otherwise. */
@@ -382,7 +440,7 @@ body.has-overlay-scrollbar {
 /* This applies to column-left both in navbar and app. */
 .column-right {
     width: var(--right-sidebar-width);
-    max-width: var(--right-sidebar-width);
+    max-width: var(--right-sidebar-max-width);
     position: absolute;
     right: 0;
     top: 0;
@@ -406,6 +464,8 @@ body.has-overlay-scrollbar {
            the same height and their boxes sit on the
            same invisible line. */
         margin-top: -1px;
+        /* Prevent collisions with the search box. */
+        margin-left: 15px;
 
         & a {
             font-size: calc(16em / 14);
@@ -432,7 +492,7 @@ body.has-overlay-scrollbar {
             text-overflow: ellipsis;
             /* Button curvature and transitions. */
             border-radius: 4px;
-            transition: all 100ms ease-out;
+            transition: transform 100ms ease-out;
 
             &:hover,
             &:focus {
@@ -448,33 +508,6 @@ body.has-overlay-scrollbar {
             }
         }
 
-        & .signup_button {
-            color: var(
-                --color-navbar-spectator-low-attention-brand-button-text
-            );
-            background-color: var(
-                --color-navbar-spectator-low-attention-brand-button-background
-            );
-
-            &:hover {
-                color: var(
-                    --color-navbar-spectator-low-attention-brand-button-text
-                );
-                background-color: var(
-                    --color-navbar-spectator-low-attention-brand-button-background-hover
-                );
-            }
-
-            &:active {
-                color: var(
-                    --color-navbar-spectator-low-attention-brand-button-text
-                );
-                background-color: var(
-                    --color-navbar-spectator-low-attention-brand-button-background-active
-                );
-            }
-        }
-
         & .login_button {
             color: var(
                 --color-navbar-spectator-medium-attention-brand-button-text
@@ -483,7 +516,8 @@ body.has-overlay-scrollbar {
                 --color-navbar-spectator-medium-attention-brand-button-background
             );
 
-            &:hover {
+            &:hover,
+            &:focus {
                 color: var(
                     --color-navbar-spectator-medium-attention-brand-button-text
                 );
@@ -500,12 +534,6 @@ body.has-overlay-scrollbar {
                     --color-navbar-spectator-medium-attention-brand-button-background-active
                 );
             }
-        }
-
-        .divider {
-            color: hsl(0deg 0% 88%);
-            font-size: 20px;
-            line-height: 1;
         }
     }
 
@@ -547,6 +575,19 @@ body.has-overlay-scrollbar {
     top: 0;
 }
 
+.app-main .column-right.expanded,
+.app-main .column-left.expanded {
+    /* We share a baseline z-index to make
+       sure overlays respect the .topmost-overlay
+       below. */
+    z-index: 10;
+}
+
+.app-main .column-right.expanded.topmost-overlay,
+.app-main .column-left.expanded.topmost-overlay {
+    z-index: 15;
+}
+
 #message_feed_container,
 .app-main .column-left .left-sidebar,
 .app-main .column-right .right-sidebar {
@@ -557,7 +598,16 @@ body.has-overlay-scrollbar {
 
 .app-main {
     height: 100%;
-    min-height: 100%;
+    min-height: var(--full-height-dynamic-viewport);
+
+    &::after {
+        /* We use `content` values to determine
+           viewport state from JavaScript; this
+           hides the values without disrupting
+           the document flow. */
+        position: absolute;
+        display: none;
+    }
 
     .column-left .left-sidebar,
     .column-right .right-sidebar {
@@ -567,17 +617,61 @@ body.has-overlay-scrollbar {
 
     .column-left .left-sidebar {
         width: var(--left-sidebar-width);
-        padding-left: var(--left-sidebar-collapse-widget-gutter);
+        padding-left: var(--left-sidebar-padding-left);
     }
 
     .column-right .right-sidebar {
-        padding-left: 10px;
-        width: 240px;
+        box-sizing: border-box;
+        padding-left: var(--right-sidebar-left-spacing);
+        width: var(--right-sidebar-width);
     }
 
     .column-middle {
-        min-height: 100%;
+        min-height: var(--full-height-dynamic-viewport);
         /* We need `overflow-y: visible` for sticky headers to work. */
+    }
+}
+
+/* We test for spec-aligned container query support
+   using these styles. */
+.container-query-test {
+    /* Keep the test div from rendering. */
+    visibility: hidden;
+    /* Establish a container. */
+    container: test-container / inline-size;
+    /* Establish a positioning context that
+       conforming browsers will ignore. */
+    position: relative;
+    top: 100px;
+
+    .container-query-test-child {
+        /* Non-spec aligned browsers will keep
+           this element to the top of the containing
+           <div>; spec-aligned browsers move it to the
+           top of the viewport. We check for this in
+           information_density.ts */
+        position: fixed;
+        top: 0;
+    }
+}
+
+.with-container-query-support {
+    /* With spec-aligned container support, we
+       can establish em-aware containers to
+       query as needed.
+       Note that container queries can only
+       act on children of the container, so
+       at least for now, we include separate
+       queries for #header-container in the
+       navbar as well as .app-main in capable
+       browsers.
+    */
+    #header-container {
+        container: header-container / inline-size;
+    }
+
+    .app {
+        container: app / inline-size;
     }
 }
 
@@ -585,7 +679,7 @@ body.has-overlay-scrollbar {
 #compose-content {
     margin-right: var(--right-sidebar-width);
     margin-left: calc(
-        var(--left-sidebar-width) + var(--left-sidebar-collapse-widget-gutter)
+        var(--left-sidebar-width) + var(--left-sidebar-padding-left)
     );
     position: relative;
 }
@@ -598,22 +692,27 @@ body.has-overlay-scrollbar {
     padding-right: 6px;
 }
 
-textarea,
-input {
-    font-family: "Source Sans 3 VF", sans-serif;
+/* Override browsers that use
+   `cursor: default` */
+label,
+button {
+    cursor: pointer;
 }
 
 /* Override Bootstrap's fixed sizes for various elements */
-textarea,
 label {
     font-size: inherit;
     line-height: inherit;
 }
 
+button:focus {
+    outline: 0;
+}
+
 /* Bootstrap's focus outline uses -webkit-focus-ring-color which doesn't exist in Firefox */
 a:not(:active):focus,
-button:focus,
-.new-style label.checkbox input[type="checkbox"]:focus ~ span,
+button:focus-visible,
+label.checkbox input[type="checkbox"]:focus ~ .rendered-checkbox,
 i.fa:focus,
 i.zulip-icon:focus-visible,
 [role="button"]:focus {
@@ -622,23 +721,20 @@ i.zulip-icon:focus-visible,
 }
 
 /* List of text-like input types taken from Bootstrap */
-input {
+input:not(.input-element) {
     &[type="text"],
     &[type="password"],
-    &[type="datetime"],
-    &[type="datetime-local"],
-    &[type="date"],
-    &[type="month"],
-    &[type="time"],
-    &[type="week"],
-    &[type="number"],
     &[type="email"],
     &[type="url"],
-    &[type="search"],
-    &[type="tel"],
     &[type="color"] {
         font-size: inherit;
         height: 1.4em;
+        background-color: var(--color-background-legacy-input);
+        border-color: var(--color-border-legacy-input);
+
+        &:focus {
+            border-color: var(--color-border-legacy-input-focus);
+        }
     }
 }
 
@@ -648,7 +744,7 @@ li,
     line-height: inherit;
 }
 
-.btn {
+.bootstrap-btn {
     font-size: inherit;
     height: auto;
     line-height: 100%;
@@ -672,52 +768,12 @@ li,
 }
 
 .copy_message {
-    float: right;
-    position: relative;
-    cursor: pointer;
-    top: 30px;
-    /* To make sure the svg doesn't occupy any vertical space. */
-    margin-top: -30px;
-    right: 2px;
-    padding-top: 2px;
-
-    #clipboard_image {
-        margin: 0;
-    }
-}
-
-#copy_generated_link_container {
-    display: flex;
-    width: 100%;
-    margin-right: -32px;
-    gap: 4px;
-    align-items: center;
-}
-
-#copy_generated_invite_link {
-    position: relative;
-    margin-right: -32px;
-    margin-top: -1px;
-    padding: 6px 3px 6px 13px;
-    float: right;
-
-    /* This property nullifies the box-shadow rendered by .btn class */
-    &:active {
-        box-shadow: none;
-    }
-
-    & path {
-        fill: var(--color-fill-user-invite-copy-icon);
-    }
-
-    &:hover svg path {
-        fill: var(--color-fill-hover-copy-icon);
-    }
-}
-
-#clipboard_image {
-    margin-top: -5px;
-    margin-left: -8px;
+    position: absolute;
+    top: 5px;
+    right: 5px;
+    height: 1em;
+    backdrop-filter: blur(20px);
+    outline: 1px solid var(--color-copy-button-square-bg-active);
 }
 
 /* Classes for hiding and showing controls */
@@ -746,54 +802,13 @@ strong {
     white-space: pre-wrap;
 }
 
-.sp-input {
-    width: calc(100% - 14px);
-    box-sizing: initial !important;
-}
-
 .logout {
     white-space: nowrap;
 }
 
-.tooltip {
-    &.in {
-        font-size: 12px;
-        line-height: 1.3;
-
-        opacity: 1;
-
-        &.left {
-            margin-left: -12px;
-            margin-top: 3px;
-        }
-    }
-
-    .tooltip-inner {
-        background-color: hsl(0deg 0% 7% / 80%);
-        padding: 3px 5px;
-    }
-
-    /*
-    Since hover and click are activated together on touchscreen
-    devices, the hover state persists until the next click, creating
-    awkward UI where the tooltip sticks around forever :(.
-
-    To resolve this, we just hide the tooltip for touch-events on
-    touch-enabled devices resolving the above problem.  This means
-    that tooltips will never appear on touchscreen devices, but that's
-    probably a reasonable tradeoff here.
-
-    Source: https://drafts.csswg.org/mediaqueries-4/#mf-interaction
-    */
-
-    @media (hover: none) {
-        visibility: hidden !important;
-    }
-}
-
 .buddy_list_tooltip_content {
     text-align: left;
-    word-wrap: break-word;
+    overflow-wrap: break-word;
     /* 280px at 14px/1em */
     max-width: 20em;
 }
@@ -815,7 +830,7 @@ strong {
         top: 0.1667em;
     }
 
-    .tooltip-privacy-icon span {
+    .privacy-tooltip-stream-name {
         margin-left: 1.25em;
     }
 }
@@ -825,149 +840,35 @@ strong {
     position: relative;
 }
 
-.new_messages {
-    background-color: hsl(194deg 53% 79%);
+@keyframes pulse-unread {
+    /* Only unread dots in collapsed Views
+       have offset variables set; all others
+       will fall back to 0 (no offset). */
+    0% {
+        transform: scale(1) translateX(var(--unread-dot-x-offset, 0));
+    }
+
+    50% {
+        transform: scale(var(--pulse-unread-scale-max))
+            translateX(var(--unread-dot-x-offset-scaled, 0));
+    }
+
+    100% {
+        transform: scale(1) translateX(var(--unread-dot-x-offset, 0));
+    }
 }
 
-.new_messages,
-.new_messages_fadeout {
-    transition: all 3s ease-in-out;
+.new-unread .unread_count {
+    animation: 2s ease-in-out 2 pulse-unread;
 }
 
 .messagebox-content .slow-send-spinner {
     display: block;
-    font-size: 12px;
+    font-size: 0.8571em; /* 12px at 14px/em */
     text-align: right;
     opacity: 0.8;
     color: var(--color-text-default);
     animation: rotate 1s infinite linear;
-}
-
-.message_controls {
-    display: flex;
-    align-items: baseline;
-    font-size: 16px;
-    /* This is a bit tricky; we need to reserve space for the message
-       controls even when the message isn't hovered, so that hover
-       doesn't disturb the layout.  Usually that would be just
-       visibility: hidden, but that cannot be animated, so we set
-       opacity as well, which can be animated. */
-    .message_control_button {
-        opacity: 0;
-        visibility: hidden;
-        transition: all 0.2s ease;
-        width: var(--message-box-icon-width);
-        height: var(--message-box-icon-height);
-        text-align: center;
-        color: var(--color-message-action-visible);
-
-        & i {
-            vertical-align: middle;
-            /* TODO: Math for these values, possibly with variables.
-               In short, the icon body is 16px square; the current
-               area for the icon is 26px wide by 25px tall, so these
-               values ensure a 26px x 25px clickable area for the icon. */
-            padding: 2.5px 3px;
-
-            &::before {
-                /* We specify block display so the
-                   scaling transform below works as
-                   expected. */
-                display: block;
-            }
-
-            &:active::before {
-                transform: scale(0.92);
-                transform-origin: center;
-                outline: 0;
-            }
-
-            &:focus {
-                /* Remove the outline but do not color on focus;
-                   focus-visible is more appropriate for the color
-                   changes, as it only applies color when focus
-                   is achieved from a keyboard or other pointerless
-                   device. */
-                outline: 0;
-            }
-
-            &:hover,
-            &:focus-visible {
-                outline: 0;
-                color: var(--color-message-action-interactive);
-            }
-
-            /* Separate hover colors for stars */
-            &.star:hover,
-            &.star:focus-visible {
-                color: var(--color-message-star-action);
-            }
-        }
-
-        .zulip-icon-more-vertical {
-            /* Increase visual prominence of the vdots. */
-            font-size: 21px;
-        }
-    }
-
-    /* Tooltips should not follow the width restrictions of their parent element. */
-    [data-tippy-root] {
-        width: max-content;
-        word-wrap: unset;
-    }
-
-    .edit_content {
-        /* Icons for editing content are determined on message hover;
-           we set an empty `.edit_content` to have 0 height in order to
-           preserve the layout of the other icons prior to any hovering. */
-        &:empty {
-            height: 0;
-        }
-
-        &:hover {
-            cursor: pointer;
-        }
-    }
-
-    .message_failed {
-        display: inline-flex;
-        justify-content: space-between;
-        cursor: pointer;
-        position: relative;
-        vertical-align: middle;
-        padding-left: 2px;
-
-        &.hide {
-            display: none;
-        }
-
-        .rotating {
-            display: inline-block;
-            outline: none;
-
-            animation: rotate 1s infinite linear;
-        }
-
-        .failed_message_action {
-            opacity: 1 !important;
-            color: var(--color-failed-message-send-icon);
-            font-weight: bold;
-            padding: 1px;
-        }
-
-        .message_control_button {
-            visibility: inherit;
-        }
-    }
-
-    .star_container {
-        &:not(.empty-star) {
-            /* Color, opacity, and visibility, as though the message is hovered. */
-            color: var(--color-message-star-action);
-            opacity: 1;
-            visibility: visible !important;
-        }
-    }
 }
 
 .star {
@@ -979,9 +880,7 @@ strong {
 .copy-paste-text {
     /* Hide the text that we want copy paste to capture */
     position: absolute;
-    text-indent: -99999px;
-    float: left;
-    width: 0;
+    left: -99999px;
 }
 
 @keyframes rotate {
@@ -1082,13 +981,21 @@ div.focused-message-list {
     display: block;
 }
 
+/* In conversation view, always show the recipient bar action buttons */
+div.focused-message-list.is-conversation-view .recipient_row {
+    & .recipient_bar_controls {
+        opacity: 1;
+        transition: opacity 0.15s ease-in;
+    }
+}
+
 .rtl {
     direction: rtl;
 }
 
 .topic_edit {
     display: none;
-    line-height: 22px;
+    flex-grow: 1;
 
     .alert {
         display: inline-block;
@@ -1098,112 +1005,77 @@ div.focused-message-list {
     }
 }
 
+.topic_edit_form {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin: 0;
+    padding-right: 5px;
+    position: relative;
+}
+
 .inline_topic_edit {
-    margin-bottom: 5px;
-    width: 206px;
+    flex: 1;
+    line-height: 1.2142em;
+    padding: 0 5px;
+    color: var(--color-text-default);
+    border-radius: 4px;
+    border: 1px solid hsl(0deg 0% 80%);
+    font-family: inherit;
 
-    &.header-v {
-        height: 18px;
-        display: inline-block;
-        padding: 0 3px;
-        vertical-align: baseline;
-        line-height: 0px;
-        box-shadow: none;
-        color: hsl(0deg 0% 33%);
-        border-radius: 4px;
-        border: 1px solid hsl(0deg 0% 80%);
-        transition:
-            border linear 0.2s,
-            box-shadow linear 0.2s;
+    transition:
+        border-color linear 0.2s,
+        box-shadow linear 0.2s;
 
-        &:focus {
-            border-color: hsl(206deg 80% 62% / 80%);
-            outline: 0;
-            box-shadow:
-                inset 0 1px 1px hsl(0deg 0% 0% / 7.5%),
-                0 0 8px hsl(206deg 80% 62% / 60%);
-        }
+    &:focus {
+        border-color: hsl(206deg 80% 62% / 80%);
+        outline: 0;
+        box-shadow:
+            inset 0 1px 1px hsl(0deg 0% 0% / 7.5%),
+            0 0 8px hsl(206deg 80% 62% / 60%);
+    }
+
+    &.empty-topic-display::placeholder {
+        color: inherit;
     }
 }
 
-.inline_topic_edit:focus {
-    outline: none;
-}
-
-#move_topic_modal select {
-    width: auto;
-    margin-bottom: 10px;
-    max-width: 100%;
-}
-
-.topic_move_breadcrumb_messages {
-    margin: 0 5px 5px 0;
-    align-self: center;
-    width: 100%;
+.inline-topic-edit-placeholder {
+    position: absolute;
+    left: 5px;
+    max-width: 65%;
     white-space: nowrap;
-
-    & label.checkbox {
-        /* Place the checkboxes on their own lines. */
-        display: block;
-
-        & input {
-            margin: 0;
-            vertical-align: baseline;
-        }
-
-        & + label.checkbox {
-            margin-top: 10px;
-        }
-    }
-
-    & label {
-        display: inline-block;
-        margin-right: 10px;
-    }
+    overflow: hidden;
+    text-overflow: ellipsis;
+    pointer-events: none;
+    visibility: hidden;
 }
 
-.message_length_controller {
-    .message_length_toggle {
-        display: none;
-        width: 100%;
-        height: 24px;
-        margin-bottom: var(--message-box-markdown-aligned-vertical-space);
-        color: var(--color-text-show-more-less-button);
-        background-color: var(--color-show-more-less-button-background);
-        border-radius: 4px;
-        border: none;
-        outline: none;
-        font-variant: all-small-caps;
-
-        &:hover {
-            background-color: var(
-                --color-show-more-less-button-background-hover
-            );
-        }
-
-        &:active {
-            background-color: var(
-                --color-show-more-less-button-background-active
-            );
-            scale: 0.98;
-        }
-    }
+.inline-topic-edit-placeholder-visible {
+    visibility: visible;
 }
 
-.bookend {
-    margin-top: 10px;
-    background-color: transparent;
+.topic_edit_save {
+    border-color: light-dark(hsl(0deg 0% 0% / 10%), hsl(0deg 0% 0% / 60%));
+    border-width: 1px;
+    border-style: solid;
+    background-clip: padding-box;
 }
 
+.topic_edit_save,
+.topic_edit_cancel {
+    /* Adjust top and bottom padding to fit into the recipient row. */
+    padding: 0.125em 0.625em; /* 2px 10px at 16px/em */
+}
+
+.information-settings .user-profile-picture,
+.user_sidebar_entry.with_avatar .user-profile-picture,
 .inline_profile_picture {
     display: inline-block;
-    width: var(--message-box-avatar-width);
-    height: var(--message-box-avatar-height);
     /* Don't inherit the line-height from message-avatar;
        this preserves the dimensions and rounded corners
        on the image itself. */
     line-height: 1;
-    margin-right: 11px;
     vertical-align: top;
     border-radius: 4px;
     overflow: hidden;
@@ -1213,13 +1085,16 @@ div.focused-message-list {
     }
 }
 
-.home-error-bar {
-    margin-top: 5px;
-    display: none;
+.inline_profile_picture {
+    width: var(--message-box-avatar-width);
+    height: var(--message-box-avatar-height);
+}
 
-    .alert {
-        margin-bottom: auto;
-    }
+.information-settings .user-profile-picture,
+.user_sidebar_entry.with_avatar .user-profile-picture {
+    width: var(--right-sidebar-avatar-width);
+    height: var(--right-sidebar-avatar-height);
+    margin-right: var(--right-sidebar-avatar-right-margin);
 }
 
 .streamname {
@@ -1235,6 +1110,10 @@ div.focused-message-list {
     );
     overflow: hidden;
     text-overflow: ellipsis;
+}
+
+.top-navbar-container-allow-description-extension {
+    overflow: visible;
 }
 
 #streamlist-toggle {
@@ -1254,6 +1133,7 @@ div.focused-message-list {
     text-decoration: none;
     color: var(--color-navbar-icon);
     display: flex;
+    position: relative;
     align-items: center;
     justify-content: center;
     width: var(--header-height);
@@ -1291,15 +1171,26 @@ div.focused-message-list {
 .left-sidebar-toggle-unreadcount {
     position: absolute;
     display: none;
-    height: 6px;
-    width: 6px;
+    /* 6px at 16px/1em */
+    height: 0.375em;
+    width: 0.375em;
     background-color: var(--color-navbar-icon);
-    top: 10px;
-    right: 9px;
-    border: 2px solid var(--color-background-navbar);
-    border-radius: 6px;
+
+    /* 2px at 16px/1em */
+    border: 0.125em solid var(--color-background-navbar);
+    /* 6px at 16px/1em */
+    border-radius: 0.375em;
     padding: 0;
-    font-size: 0;
+
+    /* At 16px/1em, the toggle icon is 20px on a side, which is
+       half the width of its container (40px on a side). To
+       place the 10px-wide unread counter correctly, then, we
+       set it to 25% of the right of the container, or 10px,
+       and likewise 25% down from the top of the container,
+       also 10px. */
+
+    top: 25%;
+    right: 25%;
 }
 
 nav {
@@ -1316,17 +1207,27 @@ nav {
 
         .nav-logo {
             display: inline-block;
-            height: 20px;
-            max-width: 200px;
+            height: 1.25em; /* 20px at 16px em */
+            max-width: var(--realm-logo-max-width);
 
             @media (height < $short_navbar_cutoff_height) {
-                height: 15px;
+                height: 0.9375em; /* 15px at 16px em */
             }
         }
 
         .left-sidebar-toggle-button .left-sidebar-toggle-unreadcount {
-            top: 10px;
-            left: 21px;
+            /* The toggle icon is half the width of its container
+            and is at the center of the container.
+            So, the left width starts from left 25% of the container
+            and ends till 75% of the container's width.
+            Similarly, vertically, the dot is starts at the top 25% of
+            the container's height and ends at 75% of the total height
+
+            So, the top right corner of the icon is at 25% from top and
+            75% from the right. This is the location where we place the
+            unread indicator dot. */
+            top: 25%;
+            right: 25%;
         }
         .company-name {
             display: inline-block;
@@ -1367,21 +1268,28 @@ nav {
 }
 
 #loading_older_messages_indicator,
-#loading_newer_messages_indicator {
+#loading_more_indicator {
     margin: 10px;
 }
 
 #loading_older_messages_indicator_box_container,
-#loading_newer_messages_indicator_box_container {
+#loading_more_indicator_box_container {
     position: absolute;
     left: 50%;
+
+    /* Override the base rules in app_components.css, which would require
+       coordination with loading.make_indicator */
+    .loading_indicator_spinner {
+        height: 2.7143em; /* 38px at 14px/em */
+        width: 2.7143em; /* 38px at 14px/em */
+    }
 }
 
 #loading_older_messages_indicator_box,
-#loading_newer_messages_indicator_box {
+#loading_more_indicator_box {
     position: relative;
-    left: -50%;
-    top: -43px;
+    left: -1.3571em; /* 50% of 38px = 19px at 14px/em */
+    top: -3.0714em; /* -43px at 14px/em */
     z-index: 1;
     border-radius: 6px;
 }
@@ -1397,8 +1305,10 @@ nav {
 
 #page_loading_indicator_box {
     position: relative;
-    left: -50%;
-    top: -43px;
+    /* 50% of 38px = 19px at 14px/1em */
+    left: -1.3571em;
+    /* -43px at 14px/1em */
+    top: -3.0714em;
     z-index: 1;
     border-radius: 6px;
 }
@@ -1420,54 +1330,23 @@ nav {
     text-align: center;
 }
 
-.small_square_button {
-    padding: 0;
-    border: none;
-    font-size: 12px;
-    width: 18px;
-    height: 18px;
-    border-radius: 4px;
-    margin-bottom: 3px;
-
-    &:focus {
-        outline: none;
-    }
-
-    &.small_square_x {
-        background-color: hsl(0deg 0% 100%);
-        color: hsl(0deg 0% 47%);
-
-        &:hover {
-            color: hsl(0deg 0% 18%);
-        }
-    }
-}
-
 div.topic_edit_spinner {
-    display: inline-block;
-    width: 18px;
-    height: 18px;
-    margin-top: -1px;
-    padding: 2px;
-    vertical-align: middle;
+    display: flex;
+    align-items: center;
+    width: 1.2em; /* 18px at 15px/em  (from font size set in .message-header-contents) */
+    height: 1.2em; /* 18px at 15px/em */
 }
 
-div.toggle_resolve_topic_spinner {
-    margin-top: -12px;
-    padding-left: 9px;
-}
-
-div.topic_edit_spinner .loading_indicator_spinner,
-div.toggle_resolve_topic_spinner .loading_indicator_spinner {
-    width: 14px;
-    height: 14px;
+div.topic_edit_spinner .loading_indicator_spinner {
+    width: 0.9333em; /* 14px at 15px/em  (from font size set in .message-header-contents) */
+    height: 0.9333em; /* 14px at 15px/em */
 
     & path {
         fill: var(--color-recipient-bar-controls-spinner);
     }
 }
 
-#custom-expiration-time-input,
+.custom-time-input-value,
 #invite-user-form {
     margin: 0;
 }
@@ -1476,36 +1355,82 @@ div.toggle_resolve_topic_spinner .loading_indicator_spinner {
     vertical-align: middle;
 }
 
-#multiuse_invite_link {
-    width: 370px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    display: inline-block;
-    overflow: hidden;
-    vertical-align: bottom;
+.invite-user-modal-banners {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+
+    &:has(.banner) {
+        /* Only apply bottom margin if there is a banner present. */
+        margin-bottom: 10px;
+    }
+
+    .banner-wrapper:empty {
+        /* Avoid unnecessary spacing between empty banner
+           wrappers due to the flex gap property. */
+        display: none;
+    }
 }
 
+.copy-invite-link-banner {
+    .banner-content {
+        white-space: nowrap;
+    }
+
+    .banner-label {
+        width: 100%;
+        text-overflow: ellipsis;
+        overflow: hidden;
+    }
+}
+
+@container banner (width >= 25em) {
+    #copy_generated_invite_link .action-button-label {
+        display: none;
+    }
+}
+
+.invite-tips-list {
+    /* Override default bottom margin of ul tags in bootstrap. */
+    margin-bottom: 0;
+}
+
+#invite-user-form .loading_indicator_spinner {
+    height: 1em;
+    width: fit-content;
+    display: inline-block;
+    float: none;
+    margin: 0 5px;
+}
+
+.add-user-group-container,
 .add_streams_container {
     display: inline-flex;
     align-items: center;
     width: 100%;
 }
 
-#custom-expiration-time-input {
+#invite_welcome_custom_message_text {
+    height: 8em;
+}
+
+.custom-time-input-value {
     width: 5ch;
     margin-right: 15px;
 
-    padding: 4px 6px;
-    color: hsl(0deg 0% 33%);
+    padding: var(--input-vertical-padding) var(--input-horizontal-padding);
+    color: var(--color-text-default);
     border-radius: 4px;
-    border: 1px solid hsl(0deg 0% 80%);
+    border: var(--input-border-width) solid var(--color-border-legacy-input);
+    background-color: var(--color-background-legacy-input);
     box-shadow: inset 0 1px 1px hsl(0deg 0% 0% / 7.5%);
     transition:
-        border linear 0.2s,
+        border-color linear 0.2s,
         box-shadow linear 0.2s;
+    font-family: inherit;
 
     &:focus {
-        border-color: hsl(206deg 80% 62% / 80%);
+        border-color: var(--color-border-legacy-input-focus);
         outline: 0;
         box-shadow:
             inset 0 1px 1px hsl(0deg 0% 0% / 7.5%),
@@ -1513,12 +1438,12 @@ div.toggle_resolve_topic_spinner .loading_indicator_spinner {
     }
 }
 
-#custom-expiration-time-unit {
+.custom-time-input-unit {
     width: auto;
 }
 
 .empty_feed_notice {
-    max-width: 600px;
+    max-width: 42.8571em;
     margin: 0 auto;
     padding: 3em 1em;
     text-align: center;
@@ -1527,11 +1452,16 @@ div.toggle_resolve_topic_spinner .loading_indicator_spinner {
 .empty-feed-notice-title {
     font-size: 1.5em;
     font-weight: 400;
-    word-wrap: break-word;
+    line-height: inherit;
+    overflow-wrap: break-word;
 }
 
 .empty-feed-notice-description {
     font-size: 1.1em;
+
+    .search-query-word {
+        overflow-wrap: break-word;
+    }
 }
 
 .message-fade,
@@ -1567,88 +1497,10 @@ div.toggle_resolve_topic_spinner .loading_indicator_spinner {
     margin-right: 0;
 }
 
-/* FIXME: Combine this rule with the one in portico.css somehow? */
 #pw_strength {
     width: 100%;
     height: 10px;
     margin-bottom: 0;
-}
-
-.sub-unsub-message {
-    padding-bottom: 10px;
-    text-align: center;
-}
-
-.sub-unsub-message span {
-    font-size: 1em;
-    display: block;
-    padding: 4px;
-    overflow: hidden;
-}
-
-.sub-unsub-message .stream-status {
-    opacity: 0.6;
-
-    & i {
-        font-size: 10px;
-        position: relative;
-        top: 1px;
-        margin-left: 2px;
-    }
-
-    .zulip-icon.zulip-icon-lock {
-        font-size: 12px;
-    }
-}
-
-.sub-unsub-message span::before,
-.sub-unsub-message span::after,
-.date_row span::before,
-.date_row span::after {
-    display: inline-block;
-    position: relative;
-    content: " ";
-    vertical-align: middle;
-    height: 0;
-    opacity: 0.15;
-    border-bottom: 1px solid hsl(0deg 0% 0%);
-}
-
-.sub-unsub-message span::before,
-.sub-unsub-message span::after {
-    width: 50%;
-}
-
-.date_row span::before {
-    width: 100%;
-}
-
-.date_row span::after {
-    width: 6px;
-    left: 0.25em;
-    /* Align date with message time and recipient bar date. */
-    margin-right: -1px;
-}
-
-.sub-unsub-message span::before,
-.date_row span::before {
-    right: 0.25em;
-    margin-left: -50%;
-}
-
-.sub-unsub-message span::after {
-    left: 0.25em;
-    margin-right: -50%;
-}
-
-#topic_edit_form {
-    display: inline-block;
-    margin: 0;
-    height: 22px;
-    padding-left: 20px;
-    padding-right: 3px;
-    line-height: 22px;
-    margin-left: -15px;
 }
 
 .screen {
@@ -1689,7 +1541,7 @@ div.toggle_resolve_topic_spinner .loading_indicator_spinner {
     .flatpickr-confirm {
         color: hsl(0deg 0% 100%);
         background-color: hsl(213deg 90% 65%);
-        font-size: 18px;
+        font-size: var(--flatpickr-confirm-button-font-size);
         font-weight: 600;
     }
 
@@ -1712,6 +1564,7 @@ div.toggle_resolve_topic_spinner .loading_indicator_spinner {
     .exit {
         font-size: 1.5rem;
         font-weight: 600;
+        font-family: inherit;
         background-color: transparent;
         border: none;
         position: absolute;
@@ -1725,6 +1578,13 @@ div.toggle_resolve_topic_spinner .loading_indicator_spinner {
         border-radius: 4px;
     }
 
+    .zulip-version-info,
+    .zulip-merge-base-info {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+    }
+
     .about-zulip-logo {
         text-align: center;
         margin: 30px;
@@ -1734,14 +1594,6 @@ div.toggle_resolve_topic_spinner .loading_indicator_spinner {
         height: 40px;
     }
 
-    & i.fa-copy {
-        cursor: pointer;
-    }
-
-    .fa-copy:hover {
-        color: hsl(170deg 48% 54%);
-    }
-
     .overlay-body {
         max-height: 60vh;
         padding: 15px;
@@ -1749,38 +1601,53 @@ div.toggle_resolve_topic_spinner .loading_indicator_spinner {
 }
 
 @media (width < $xl_min) or (height < $short_navbar_cutoff_height) {
-    .default-sidebar-behaviour {
-        &.spectator-view.default-sidebar-behaviour {
-            #navbar-middle {
-                /* = (width of button, square with header) * 3 (number of buttons) + 10px extra margin. */
-                margin-right: calc(var(--header-height) * 3 + 10px);
-            }
-
-            #help-menu,
-            #gear-menu {
-                position: relative;
-                right: var(--header-height);
-            }
+    .spectator-view {
+        #navbar-middle {
+            /* = (width of button, square with header) * 3 (number of buttons) + 10px extra margin. */
+            margin-right: calc(var(--header-height) * 3 + 10px);
         }
 
-        &.spectator-view #top_navbar .column-right .spectator_login_buttons {
+        #help-menu,
+        #gear-menu {
+            position: relative;
+            right: var(--header-height);
+        }
+
+        #top_navbar .column-right .spectator_login_buttons {
             display: none;
+        }
+    }
+
+    .header-main .column-right {
+        /* For a diminutive right column in the navbar,
+           allow the width to be that of the flexing
+           button elements. */
+        width: auto;
+    }
+}
+
+@media (width < $md_min) {
+    .spectator-view {
+        #navbar-middle {
+            /* = (width of button, square with header) * 3 (number of buttons) */
+            margin-right: calc(var(--header-height) * 3);
         }
 
         .header-main .column-right {
-            /* For a diminutive right column in the navbar,
-               allow the width to be that of the flexing
-               button elements. */
-            width: auto;
+            width: calc(var(--header-height) * 3);
         }
     }
 }
 
 %hide-right-sidebar {
-    .app-main .column-right {
+    .column-right {
         display: none;
 
         &.expanded {
+            /* In the extended state, we open the sidebar
+               to its maximum possible size (otherwise, it
+               would be unnecessarily too narrow). */
+            --right-sidebar-width: var(--right-sidebar-max-width);
             display: block;
             position: absolute;
             float: none;
@@ -1794,9 +1661,8 @@ div.toggle_resolve_topic_spinner .loading_indicator_spinner {
             .right-sidebar {
                 box-shadow: 0 -2px 3px 0 hsl(0deg 0% 0% / 10%);
                 border-left: 1px solid var(--color-border-sidebar);
-                padding-right: 15px;
-                padding-left: 15px;
                 height: 100%;
+                width: var(--right-sidebar-width);
                 right: 0;
                 background-color: var(--color-background);
             }
@@ -1804,20 +1670,18 @@ div.toggle_resolve_topic_spinner .loading_indicator_spinner {
     }
 }
 
-#realm-navbar-icon-logo {
-    display: none;
-    width: 20px;
-    height: 20px;
-}
-
 .hide-right-sidebar {
-    @extend %hide-right-sidebar;
+    .app-main {
+        @extend %hide-right-sidebar;
+    }
 
-    &.fluid_layout_width {
-        #compose-content,
-        .app-main .column-middle {
-            margin-right: 7px;
-        }
+    #navbar-middle {
+        margin-right: var(--right-column-collapsed-sidebar-width);
+    }
+
+    #compose-content,
+    .app-main .column-middle {
+        margin-right: 7px;
     }
 }
 
@@ -1825,8 +1689,30 @@ div.toggle_resolve_topic_spinner .loading_indicator_spinner {
     visibility: hidden;
 }
 
+.left-sidebar-toggle-button .zulip-icon-panel-left {
+    display: none;
+}
+
+.column-middle.expanded {
+    .left-sidebar-toggle-button .zulip-icon-panel-left {
+        display: none;
+    }
+
+    .left-sidebar-toggle-button .zulip-icon-panel-left-dashed {
+        display: block;
+    }
+}
+
 %hide-left-sidebar {
-    .app-main .column-left {
+    .left-sidebar-toggle-button .zulip-icon-panel-left {
+        display: block;
+    }
+
+    .left-sidebar-toggle-button .zulip-icon-panel-left-dashed {
+        display: none;
+    }
+
+    .column-left {
         display: none;
 
         &.expanded {
@@ -1853,12 +1739,48 @@ div.toggle_resolve_topic_spinner .loading_indicator_spinner {
 }
 
 .hide-left-sidebar {
-    @extend %hide-left-sidebar;
+    .app-main {
+        @extend %hide-left-sidebar;
+    }
 
-    &.fluid_layout_width {
+    #compose-content,
+    .app-main .column-middle {
+        margin-left: 7px;
+    }
+
+    @container header-container (width > $cq_md_min) {
+        #navbar-middle {
+            margin-left: var(--middle-column-left-margin-fluid-layout);
+        }
+    }
+
+    @container header-container (width < $cq_xl_min) {
+        #top_navbar .column-left {
+            width: auto;
+        }
+    }
+
+    @container header-container (width < $cq_md_min) {
+        #navbar-middle {
+            margin-left: 0;
+        }
+    }
+
+    @container app (width < $cq_xl_min) {
         #compose-content,
         .app-main .column-middle {
             margin-left: 7px;
+        }
+    }
+}
+
+/* Media-query fallback for the cinched-up logo presentation. */
+@media (width > $md_min) {
+    .without-container-query-support {
+        &.hide-left-sidebar {
+            #navbar-middle {
+                margin-left: var(--middle-column-left-margin-fluid-layout);
+            }
         }
     }
 }
@@ -1871,12 +1793,118 @@ body:not(.hide-left-sidebar) {
     }
 }
 
-@media (width < $xl_min) {
-    .default-sidebar-behaviour {
+body:not(.spectator-view) {
+    /* The large Log In button for spectators makes this rule
+       inappropriate for that view. */
+    @container header-container (width < $cq_xl_min) {
+        #navbar-middle {
+            /* = (width of button, square with header) * 4 (number of buttons) + 3px extra margin. */
+            margin-right: var(--right-column-collapsed-sidebar-width);
+        }
+    }
+}
+
+/* We have some regrettable but temporarily necessary code duplication
+   in the queries that follow.
+
+   In browsers that support spec-aligned, em-aware container queries,
+   we query on the app-main container. That enables breakpoints that
+   look best at a chose base font size.
+
+   However, in browsers that lag the spec, we fall back to the original
+   media queries. The layout will not look as good as it could, but
+   essential scrolling behavior will be maintained. */
+
+@container app (width < $cq_xl_min) {
+    .app-main {
         @extend %hide-right-sidebar;
 
-        .app-main .column-middle {
+        .column-middle {
             margin-right: 7px;
+        }
+    }
+
+    #typing_notifications,
+    #scheduled_message_indicator,
+    #compose-content {
+        margin-right: 7px;
+    }
+}
+
+@container header-container (width < $cq_md_min) {
+    .header-main .column-left {
+        display: none;
+    }
+
+    #navbar-middle {
+        margin-left: 0;
+    }
+
+    #streamlist-toggle {
+        display: block;
+    }
+
+    .top-navbar-container {
+        /* The --header-height variable is used to make
+        the squared toggle area, so we offset it
+        accordingly. */
+        margin-left: var(--header-height);
+    }
+}
+
+@container app (width < $cq_md_min) {
+    .app-main {
+        @extend %hide-left-sidebar;
+
+        .column-middle {
+            margin-left: 7px;
+            margin-right: 7px;
+        }
+
+        .column-middle .column-middle-inner {
+            margin-left: 0;
+            margin-right: 0;
+        }
+    }
+
+    #typing_notifications,
+    #scheduled_message_indicator,
+    #compose-content {
+        margin-left: 7px;
+    }
+}
+
+@container app (width <= $cq_ml_min) {
+    .column-right.expanded,
+    .column-left.expanded {
+        width: 100vw;
+        max-width: 100%;
+    }
+
+    .app-main .column-right.expanded .right-sidebar,
+    .app-main .column-left.expanded .left-sidebar,
+    .app-main #left-sidebar.zoom-in-topics #left-sidebar-modal,
+    .app-main #left-sidebar.zoom-in-conversations #left-sidebar-modal {
+        width: 100vw;
+        max-width: 100%;
+    }
+}
+
+@container header-container (width <= $cq_sm_min) {
+    .narrow_description {
+        display: none;
+    }
+}
+
+/* Begin fallback media queries. */
+@media (width < $xl_min) {
+    .without-container-query-support {
+        .app-main {
+            @extend %hide-right-sidebar;
+
+            .column-middle {
+                margin-right: 7px;
+            }
         }
 
         #navbar-middle {
@@ -1889,52 +1917,42 @@ body:not(.hide-left-sidebar) {
         #compose-content {
             margin-right: 7px;
         }
-    }
 
-    .hide-left-sidebar {
-        #compose-content,
-        .app-main .column-middle {
-            margin-left: 7px;
-        }
+        .hide-left-sidebar {
+            #compose-content,
+            .app-main .column-middle {
+                margin-left: 7px;
+            }
 
-        #realm-navbar-icon-logo {
-            display: inline-block;
-        }
-
-        #realm-navbar-wide-logo {
-            display: none;
-        }
-
-        #top_navbar .column-left {
-            width: auto;
-        }
-
-        #navbar-middle {
-            margin-left: var(--left-sidebar-width-with-realm-icon-logo);
+            #top_navbar .column-left {
+                width: auto;
+            }
         }
     }
 }
 
 @media (width < $md_min) {
-    .default-sidebar-behaviour {
-        @extend %hide-left-sidebar;
+    .without-container-query-support {
+        .app-main {
+            @extend %hide-left-sidebar;
+
+            .column-middle {
+                margin-left: 7px;
+                margin-right: 7px;
+            }
+
+            .column-middle .column-middle-inner {
+                margin-left: 0;
+                margin-right: 0;
+            }
+        }
 
         .header-main .column-left {
             display: none;
         }
 
-        .app-main .column-middle {
-            margin-left: 7px;
-            margin-right: 7px;
-        }
-
         #navbar-middle {
             margin-left: 0;
-        }
-
-        .app-main .column-middle .column-middle-inner {
-            margin-left: 0;
-            margin-right: 0;
         }
 
         #streamlist-toggle {
@@ -1958,6 +1976,81 @@ body:not(.hide-left-sidebar) {
         }
     }
 }
+
+@media (width <= $ml_min) {
+    .without-container-query-support {
+        .column-right.expanded,
+        .column-left.expanded {
+            width: 100vw;
+            max-width: 100%;
+        }
+
+        .app-main .column-right.expanded .right-sidebar,
+        .app-main .column-left.expanded .left-sidebar {
+            width: 100vw;
+            max-width: 100%;
+        }
+    }
+}
+
+@media (width <= $sm_min) {
+    .without-container-query-support {
+        .narrow_description {
+            display: none;
+        }
+    }
+}
+
+/* End fallback media queries. */
+
+/* Begin viewport state queries. */
+
+/* We sometimes need the state of the viewport in JavaScript;
+   by setting values on `content:`, we can query instead for
+   those, independent of whether it's a container or media query
+   responsible for layout. See for example `sidebar_ui.ts`.
+
+   These queries for greater than or equal to should be ordered
+   smallest to largest. */
+
+/* Adjustments for smaller viewports are critical
+   regardless of info-density settings, so we
+   don't include a container-query check here. */
+@media (width < $md_min) {
+    .app-main::after {
+        content: "lt_md_min";
+    }
+}
+
+@container app (width >= $cq_md_min) {
+    .app-main::after {
+        content: "gte_md_min";
+    }
+}
+
+@media (width >= $md_min) {
+    .without-container-query-support {
+        .app-main::after {
+            content: "gte_md_min";
+        }
+    }
+}
+
+@container app (width >= $cq_xl_min) {
+    .app-main::after {
+        content: "gte_md_min gte_xl_min";
+    }
+}
+
+@media (width >= $xl_min) {
+    .without-container-query-support {
+        .app-main::after {
+            content: "gte_md_min gte_xl_min";
+        }
+    }
+}
+
+/* End viewport state queries. */
 
 @media (height < $short_navbar_cutoff_height) {
     .app-main .column-right.expanded .right-sidebar,
@@ -2015,11 +2108,14 @@ body:not(.hide-left-sidebar) {
     }
 
     #top_navbar .column-right #personal-menu .header-button-avatar {
-        width: 20px;
-        height: 20px;
+        width: 1.25em; /* 20px at 16px em */
+        height: 1.25em; /* 20px at 16px em */
     }
 }
 
+/* As these adjustments are properly the province of
+   the viewport, we do not present these mm_min queries
+   in a corresponding container query block. */
 @media (width < $mm_min) {
     html {
         overflow-x: hidden;
@@ -2057,39 +2153,42 @@ body:not(.hide-left-sidebar) {
     }
 
     #scroll-to-bottom-button-clickable-area {
-        width: 60px;
-        height: 60px;
+        width: 3.75em; /* 60px at 16px em */
+        height: 3.75em; /* 60px at 16px em */
         display: flex;
         align-items: center;
         justify-content: center;
         cursor: pointer;
 
-        &:hover #scroll-to-bottom-button {
-            background: hsl(240deg 96% 68%);
+        #scroll-to-bottom-button,
+        #scroll-to-bottom-button-underlay {
+            width: 2.5em; /* 40px at 16px em */
+            height: 2.5em; /* 40px at 16px em */
+            border-radius: 50%;
         }
 
         #scroll-to-bottom-button {
-            text-align: center;
-            width: 40px;
-            height: 40px;
-            background: hsl(240deg 96% 68% / 50%);
-            border-radius: 50%;
+            > .zulip-icon {
+                /* We increase the icon size for better visibility */
+                font-size: 1.5em; /* 24px at 16px em */
+            }
 
-            & i {
-                color: hsl(0deg 0% 100%);
-                margin: 0 auto;
-                font-size: 21px;
-                position: relative;
-                top: 8px;
+            &:active {
+                clip-path: none;
             }
         }
-    }
-}
 
-.tooltip_right_arrow {
-    position: relative;
-    top: -1px;
-    font-weight: 600;
+        #scroll-to-bottom-button-underlay {
+            position: absolute;
+            background-color: var(--color-background-stream-message-content);
+            opacity: 0.7;
+            z-index: -1;
+        }
+
+        &:hover #scroll-to-bottom-button {
+            backdrop-filter: blur(40px);
+        }
+    }
 }
 
 .spectator_login_for_image_button {
@@ -2140,6 +2239,21 @@ body:not(.hide-left-sidebar) {
 }
 
 .dropdown-list-container {
+    /* For hidden searchbox dropdowns, when the user uses a click to open
+       the dropdown, we focus this container, so that the rest of the
+       keyboard navigation has the right container. That itself doesn't
+       introduce focus-visible. But hotkeys.ts uses a programmatic click
+       which goes through the same path and invokes focus-visible.
+    */
+    &:focus-visible {
+        outline: none;
+    }
+
+    .dropdown-list-viewport-padding {
+        padding-top: 4px;
+        padding-bottom: 4px;
+    }
+
     .dropdown-list-wrapper {
         /* Sync with `max-height` in dropdown_widget. */
         max-height: 210px;
@@ -2149,6 +2263,32 @@ body:not(.hide-left-sidebar) {
         .dropdown-list {
             list-style: none;
             margin: 0;
+
+            .zulip-icon-preview {
+                font-size: 1.125em;
+            }
+        }
+    }
+
+    &.folder_id-dropdown-list-container {
+        width: calc(var(--modal-input-width) * 0.75);
+
+        /* Alignment adjustments on channel-folder selector. */
+        .dropdown-list-item-name:has(.dropdown-list-buttons) {
+            /* We hold the first row height to 28px at 16px/1em
+               for the sake of the buttons plus their padding. */
+            grid-template-rows: 1.75em minmax(0, auto);
+            /* We also align everything to start, so that we can
+               offset the text from the top to align it with the
+               buttons. */
+            align-items: start;
+
+            .dropdown-list-text-neutral {
+                /* 0.2em is an eyeballed value that keeps the buttons
+                   well aligned with the first/only line of text. */
+                padding-top: 0.2em;
+                align-self: start;
+            }
         }
     }
 
@@ -2160,48 +2300,155 @@ body:not(.hide-left-sidebar) {
         line-height: 20px;
         white-space: normal;
     }
-}
 
-.dropdown-list-container .list-item {
-    color: var(--color-dropdown-item);
-
-    &:focus {
-        background-color: var(--background-color-active-dropdown-item);
-        outline: none;
-    }
-}
-
-.dropdown-list-container .dropdown-list .dropdown-list-item-common-styles {
-    display: flex;
-    color: var(--color-dropdown-item);
-    padding: 3px 10px 3px 8px;
-    gap: 4px;
-    font-weight: 400;
-    line-height: var(--base-line-height-unitless);
-    white-space: normal;
-
-    .stream-privacy-type-icon {
-        font-size: 0.93em;
-        width: 0.93em;
-        height: 0.93em;
-        padding-right: 2px;
-    }
-
-    .zulip-icon {
-        margin-top: 2px;
-    }
-
-    &:focus,
-    &:hover {
+    .dropdown-list .dropdown-list-item-common-styles {
+        display: grid;
+        grid-template:
+            "item-label" min-content
+            "item-description" minmax(0, min-content)
+            / minmax(0, 1fr);
         color: var(--color-dropdown-item);
-        text-decoration: none;
-        background-color: var(--background-color-active-dropdown-item);
-        outline: none;
+        padding: 3px 10px 3px 8px;
+        font-weight: 400;
+        white-space: normal;
+        /* Keep the line-height stable, instead of using the
+           user-set line-height, so that the icon is always
+           vertically centered properly. */
+        line-height: 1.214;
+
+        .decorated-channel-name-wrapper,
+        .dropdown-list-item-direct-message,
+        .dropdown-list-item-setting-disabled-option,
+        .dropdown-list-item-channel-mapping {
+            grid-area: item-label;
+            display: flex;
+            gap: var(--dropdown-list-item-label-icon-gap);
+
+            .zulip-icon {
+                font-size: 0.9375em; /* 15px at 16px/1em */
+            }
+        }
+
+        .decorated-channel-name-wrapper .channel-privacy-type-icon,
+        .dropdown-list-item-icon {
+            line-height: 1.214;
+        }
+
+        .dropdown-list-item-channel-mapping .zulip-icon {
+            position: relative;
+            /* Calculated from visual inspection
+               to look good for 12px-20px font sizes. */
+            top: 0.1467em; /* 2.2px at 15px/1em */
+        }
+
+        .dropdown-list-item-description {
+            grid-area: item-description;
+        }
+
+        .dropdown-list-item-name {
+            grid-area: item-label;
+            display: grid;
+            grid-template:
+                "item-text item-buttons" minmax(0, auto)
+                "item-text .           " minmax(0, auto) / minmax(0, 1fr)
+                minmax(0, auto);
+            align-items: center;
+
+            &:has(.dropdown-list-buttons) {
+                grid-template-rows: 1.75em minmax(0, auto);
+                align-items: start;
+
+                .dropdown-list-text-neutral {
+                    padding-top: 0.2em;
+                    align-self: start;
+                }
+            }
+
+            .dropdown-list-text-neutral {
+                grid-area: item-text;
+                align-self: center;
+            }
+        }
+
+        /* This correctly places neutral text items
+           appearing without a wrapping
+           `.dropdown-list-item-name` class. */
+        .dropdown-list-text-neutral {
+            grid-area: item-label;
+            align-self: center;
+        }
+
+        .dropdown-list-buttons {
+            grid-area: item-buttons;
+            display: flex;
+            visibility: hidden;
+        }
+
+        &:focus,
+        &:hover {
+            color: var(--color-dropdown-item);
+            text-decoration: none;
+            background-color: var(--background-color-active-dropdown-item);
+            outline: none;
+
+            .dropdown-list-delete,
+            .dropdown-list-edit,
+            .dropdown-list-manage-folder {
+                visibility: visible;
+            }
+        }
+    }
+
+    .list-item {
+        border-radius: 4px;
+        margin: 0 4px;
+        position: relative;
+        color: var(--color-dropdown-item);
+
+        &:focus,
+        &.current_selection {
+            outline: none;
+            background-color: var(
+                --background-color-current-selection-dropdown-item
+            );
+
+            &:not(.highlight_value):hover {
+                background-color: transparent;
+            }
+        }
+
+        &:focus::before,
+        &.current_selection::before {
+            content: "";
+            position: absolute;
+            left: -3px;
+            top: 0;
+            bottom: 0;
+            width: 3px;
+            background-color: var(--color-outline-focus);
+            border-radius: 4px;
+        }
+
+        .dropdown-list-item-common-styles {
+            padding: 5px 6px;
+            border-radius: 4px;
+        }
+
+        &.highlight_value {
+            background-color: var(
+                --background-color-current-setting-dropdown-item
+            );
+
+            .dropdown-list-text-selected,
+            .setting-disabled-option-text {
+                color: var(--color-current-setting-dropdown-item);
+            }
+        }
     }
 }
 
-.dropdown-list-item-common-styles .dropdown-list-bold-selected {
-    font-weight: 700;
+.dropdown-list-item-common-styles .dropdown-list-text-selected {
+    font-weight: 600;
 }
 
 #scheduled_messages_overlay .error-icon-message-recipient {
@@ -2227,9 +2474,6 @@ body:not(.hide-left-sidebar) {
 
 .header-main .column-right {
     display: flex;
-    /* Make the top navbar right column its full width,
-       less 7px of space on the left and right. */
-    width: calc(var(--right-sidebar-width) - 7px - 7px);
     justify-content: flex-end;
     align-items: center;
 
@@ -2269,12 +2513,12 @@ body:not(.hide-left-sidebar) {
     }
 
     .zulip-icon-gear {
-        font-size: 18px;
+        font-size: 1.125em; /* 18px at 16px em */
     }
 
     .zulip-icon-help-bigger,
     .zulip-icon-user-list {
-        font-size: 20px;
+        font-size: 1.25em; /* 20px at 16px em */
     }
 
     .zulip-icon-help {
@@ -2284,13 +2528,69 @@ body:not(.hide-left-sidebar) {
     }
 }
 
+.left-sidebar-toggle-button {
+    .zulip-icon-panel-left,
+    .zulip-icon-panel-left-dashed {
+        font-size: 1.25em; /* 20px at 16px em */
+    }
+}
+
 #personal-menu {
     .header-button-avatar {
-        width: 24px;
-        height: 24px;
+        /* Put styling on div rather than img to gracefully handle
+           uBlock Origin blocking of gravatar, which seems to make
+           the img disappear. */
+        width: 1.5em; /* 24px at 16px em */
+        height: 1.5em; /* 24px at 16px em */
         background-size: cover;
         border-radius: 4px;
         background-color: var(--color-background-image-loader);
         border: 1px solid var(--color-border-personal-menu-avatar);
+        overflow: hidden;
+
+        .header-button-avatar-image {
+            /* Overcome `vertical-align: middle`. This prevents the
+               avatar in the navbar from being lower by a pixel. */
+            display: block;
+        }
+
+        &:has(.avatar-loaded) {
+            background-color: transparent;
+            border-color: transparent;
+        }
+    }
+}
+
+.default-language-display,
+.empty-topic-display,
+.empty-topic-placeholder-display::placeholder,
+.drafts-unknown-msg-header-field {
+    font-style: italic;
+}
+
+.popover-menu-user-avatar-container.deactivated,
+.inline_profile_picture.deactivated {
+    position: relative;
+
+    > img {
+        opacity: 0.5;
+    }
+
+    .deactivated-user-icon {
+        background-color: var(--color-background);
+        color: var(--color-user-circle-deactivated);
+        padding: 2px;
+        font-size: 0.8em;
+        position: absolute;
+        border-radius: 10px;
+        bottom: -2px;
+        right: -2px;
+    }
+}
+
+.scroll-to-time {
+    &:focus:not(:focus-visible) {
+        /* Avoid outline on click */
+        outline: none;
     }
 }

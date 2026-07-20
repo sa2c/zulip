@@ -1,4 +1,4 @@
-<form method="POST" class="remote-form">
+<form method="POST" class="support-form">
     <b>Billing collection method</b><br />
     {{ csrf_input }}
     <input type="hidden" name="{{ remote_type }}" value="{{ remote_id }}" />
@@ -10,17 +10,17 @@
 </form>
 
 {% if current_plan.status == current_plan.ACTIVE %}
-<form method="POST" class="remote-form">
+<form method="POST" class="support-form">
     <b>Plan end date</b><br />
     {{ csrf_input }}
     <input type="hidden" name="{{ remote_type }}" value="{{ remote_id }}" />
     <input type="date" name="plan_end_date" {% if current_plan.end_date %}
-      value="{{ current_plan.end_date.strftime('%Y-%m-%d') }}" {% endif %} required />
+      value="{{ current_plan.end_date.date().isoformat() }}" {% endif %} required />
     <button type="submit" class="support-submit-button">Update</button>
 </form>
 {% endif %}
 
-<form method="POST" class="remote-form">
+<form method="POST" class="support-form">
     <b>Modify current plan</b><br />
     {{ csrf_input }}
     <input type="hidden" name="{{ remote_type }}" value="{{ remote_id }}" />
@@ -29,6 +29,9 @@
         <option value="downgrade_at_billing_cycle_end">Downgrade at the end of current billing cycle</option>
         <option value="downgrade_now_without_additional_licenses">Downgrade now without creating additional invoices</option>
         <option value="downgrade_now_void_open_invoices">Downgrade now and void open invoices</option>
+        {% if not remote_support_view and not current_plan.fixed_price %}
+        <option value="upgrade_plan_tier">Upgrade to the Plus plan</option>
+        {% endif %}
     </select>
     <button type="submit" class="support-submit-button">Modify</button>
 </form>

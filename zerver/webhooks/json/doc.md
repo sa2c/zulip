@@ -2,12 +2,9 @@
 
 Render JSON payloads nicely in a Zulip code block! This is
 particularly useful when you want to capture a webhook payload as part
-of [writing an incoming webhook
-integration](/api/incoming-webhooks-overview).
+of [writing an incoming webhook integration][incoming-webhooks-overview].
 
 {start_tabs}
-
-1. {!create-channel.md!}
 
 1. {!create-an-incoming-webhook.md!}
 
@@ -25,3 +22,5 @@ integration](/api/incoming-webhooks-overview).
 ### Related documentation
 
 {!webhooks-url-specification.md!}
+
+[incoming-webhooks-overview]: https://zulip.readthedocs.io/en/latest/webhooks/incoming-webhooks-overview.html

@@ -6,6 +6,7 @@ from datetime import timedelta
 from typing import Any
 
 import sentry_sdk
+from django.conf import settings
 from django.db import transaction
 from django.db.utils import IntegrityError
 from django.utils.timezone import now as timezone_now
@@ -111,6 +112,14 @@ class MissedMessageWorker(QueueProcessingWorker):
     def start(self) -> None:
         with self.cv:
             self.stopping = False
+
+        # Do nothing to process events on staging servers, since we do
+        # not support running multiple copies of this worker.
+        if settings.STAGING:
+            with self.cv:
+                self.cv.wait()
+            return
+
         self.worker_thread = threading.Thread(target=self.work)
         self.worker_thread.start()
         super().start()
@@ -197,7 +206,7 @@ class MissedMessageWorker(QueueProcessingWorker):
                 # re-checking the condition.
                 return False
 
-            with sentry_sdk.start_span(description="condvar wait") as span:
+            with sentry_sdk.start_span(name="condvar wait") as span:
                 span.set_data("timeout", timeout)
                 was_notified = self.cv.wait_for(wait_condition, timeout=timeout)
                 span.set_data("was_notified", was_notified)
@@ -216,29 +225,35 @@ class MissedMessageWorker(QueueProcessingWorker):
     def maybe_send_batched_emails(self) -> None:
         current_time = timezone_now()
 
-        with transaction.atomic():
+        with transaction.atomic(durable=True):
             events_to_process = ScheduledMessageNotificationEmail.objects.filter(
                 scheduled_timestamp__lte=current_time
-            ).select_for_update()
+            ).select_for_update(
+                # We intend to delete these rows later, so we need a
+                # FOR UPDATE lock.
+                no_key=False,
+                # If another worker (or message deletion) has locked
+                # one of the rows, we can look at it later (if it
+                # still exists).  This avoids deadlocks.
+                skip_locked=True,
+            )
 
             # Batch the entries by user
             events_by_recipient: dict[int, dict[int, MissedMessageData]] = defaultdict(dict)
+            seen_events = []
             for event in events_to_process:
+                seen_events.append(event.id)
                 events_by_recipient[event.user_profile_id][event.message_id] = MissedMessageData(
                     trigger=event.trigger, mentioned_user_group_id=event.mentioned_user_group_id
                 )
 
-            for user_profile_id in events_by_recipient:
-                events = events_by_recipient[user_profile_id]
-
+            for user_profile_id, events in events_by_recipient.items():
                 logging.info(
                     "Batch-processing %s missedmessage_emails events for user %s",
                     len(events),
                     user_profile_id,
                 )
-                with sentry_sdk.start_span(
-                    description="sending missedmessage_emails to user"
-                ) as span:
+                with sentry_sdk.start_span(name="sending missedmessage_emails to user") as span:
                     span.set_data("user_profile_id", user_profile_id)
                     span.set_data("event_count", len(events))
                     try:
@@ -256,7 +271,8 @@ class MissedMessageWorker(QueueProcessingWorker):
                             stack_info=True,
                         )
 
-            events_to_process.delete()
+            # These were already locked, above.
+            ScheduledMessageNotificationEmail.objects.filter(id__in=seen_events).delete()
 
     @override
     def stop(self) -> None:
@@ -265,4 +281,8 @@ class MissedMessageWorker(QueueProcessingWorker):
             self.cv.notify()
         if self.worker_thread is not None:
             self.worker_thread.join()
+
+        if settings.STAGING:
+            return
+
         super().stop()

@@ -1,10 +1,12 @@
 class kandra::app_frontend {
+  include zulip::snakeoil
   include zulip::app_frontend_base
   include zulip::profile::memcached
   include zulip::profile::rabbitmq
-  include zulip::postfix_localmail
+  include zulip::local_mailserver
   include zulip::hooks::sentry
   include kandra::app_frontend_monitoring
+  include kandra::app_frontend_tmpfs
 
   kandra::firewall_allow{ 'smtp': }
   kandra::firewall_allow{ 'http': }
@@ -57,6 +59,16 @@ class kandra::app_frontend {
     group   => 'root',
     mode    => '0644',
     source  => 'puppet:///modules/kandra/nginx/zulip-include-app.d/well-known.conf',
+    notify  => Service['nginx'],
+  }
+
+  # Serve /static/navigation-tour-video/
+  file { '/etc/nginx/zulip-include/app.d/navigation-tour-video.conf':
+    require => File['/etc/nginx/zulip-include/app.d'],
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0644',
+    source  => 'puppet:///modules/kandra/nginx/zulip-include-app.d/navigation-tour-video.conf',
     notify  => Service['nginx'],
   }
 

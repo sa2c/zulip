@@ -7,35 +7,37 @@ function get_new_rand(old_random_int: number, max: number): number {
 }
 
 function get_random_item_from_array<T>(array: T[]): T {
-    assert(array.length >= 1);
+    assert(array.length > 0);
     return array[Math.floor(Math.random() * array.length)]!;
 }
 
+// This list should be squared with the logos listed
+// in templates/portico/hello.html
 const current_client_logo_class_names = new Set([
-    "client-logos__logo_akamai",
-    "client-logos__logo_tum",
-    "client-logos__logo_wikimedia",
-    "client-logos__logo_rust",
-    "client-logos__logo_dr_on_demand",
-    "client-logos__logo_maria",
+    "client-logos-div client-logos__logo_pilot",
+    "client-logos-div client-logos__logo_linux_foundation",
+    "client-logos-div client-logos__logo_tum",
+    "client-logos-div client-logos__logo_wikimedia",
+    "client-logos-div client-logos__logo_rust",
+    "client-logos-div client-logos__logo_dr_on_demand",
 ]);
 const future_client_logo_class_names = new Set([
-    "client-logos__logo_pilot",
-    "client-logos__logo_recurse",
-    "client-logos__logo_level_up",
-
-    "client-logos__logo_layershift",
-    "client-logos__logo_julia",
-    "client-logos__logo_ucsd",
-    "client-logos__logo_lean",
-    "client-logos__logo_asciidoc",
+    "client-logos-div client-logos__logo_recurse",
+    "client-logos-div client-logos__logo_maria",
+    "client-logos-div client-logos__logo_layershift",
+    "client-logos-div client-logos__logo_julia",
+    "client-logos-div client-logos__logo_ucsd",
+    "client-logos-div client-logos__logo_lean",
+    "client-logos-div client-logos__logo_asciidoc",
 ]);
 let current_client_logo_class_names_index = 0;
 function update_client_logo(): void {
     if (document.hidden) {
         return;
     }
-    const client_logos = [...document.querySelectorAll("[class^='client-logos__']")];
+    const client_logos = [
+        ...document.querySelectorAll("[class^='client-logos-div client-logos__']"),
+    ];
     current_client_logo_class_names_index = get_new_rand(
         current_client_logo_class_names_index,
         client_logos.length,

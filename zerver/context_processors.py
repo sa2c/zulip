@@ -22,7 +22,7 @@ from zerver.lib.realm_icon import get_realm_icon_url
 from zerver.lib.request import RequestNotes
 from zerver.lib.send_email import FromAddress
 from zerver.lib.subdomains import get_subdomain, is_root_domain_available
-from zerver.models import Realm, UserProfile
+from zerver.models import PreregistrationRealm, Realm, RealmUserDefault, UserProfile
 from zerver.models.realms import get_realm
 from zproject.backends import (
     AUTH_BACKEND_NAME_MAP,
@@ -36,6 +36,11 @@ from zproject.config import get_config
 DEFAULT_PAGE_PARAMS: Mapping[str, Any] = {
     "page_type": "default",
     "development_environment": settings.DEVELOPMENT,
+    # This language is used to initialize i18n.ts to do translations
+    # in the user's language. Callers are expected to replace this
+    # with the user's detected language using get_language wherever
+    # possible.
+    "request_language": "en",
 }
 
 
@@ -130,23 +135,20 @@ def zulip_default_context(request: HttpRequest) -> dict[str, Any]:
 
     skip_footer = False
     register_link_disabled = settings.REGISTER_LINK_DISABLED
-    login_link_disabled = settings.LOGIN_LINK_DISABLED
-    find_team_link_disabled = settings.FIND_TEAM_LINK_DISABLED
     allow_search_engine_indexing = False
+    non_realm_specific_page = False
 
     if (
         settings.ROOT_DOMAIN_LANDING_PAGE
         and get_subdomain(request) == Realm.SUBDOMAIN_FOR_ROOT_DOMAIN
     ):
         register_link_disabled = True
-        login_link_disabled = True
-        find_team_link_disabled = False
         allow_search_engine_indexing = True
+        non_realm_specific_page = True
     elif realm is None:
         register_link_disabled = True
-        login_link_disabled = True
-        find_team_link_disabled = False
         skip_footer = True
+        non_realm_specific_page = True
 
     apps_page_web = settings.ROOT_DOMAIN_URI + "/accounts/go/"
 
@@ -177,7 +179,6 @@ def zulip_default_context(request: HttpRequest) -> dict[str, Any]:
         "root_domain_landing_page": settings.ROOT_DOMAIN_LANDING_PAGE,
         "custom_logo_url": settings.CUSTOM_LOGO_URL,
         "register_link_disabled": register_link_disabled,
-        "login_link_disabled": login_link_disabled,
         "terms_of_service": settings.TERMS_OF_SERVICE_VERSION is not None,
         "login_url": settings.HOME_NOT_LOGGED_IN,
         "only_sso": settings.ONLY_SSO,
@@ -193,8 +194,8 @@ def zulip_default_context(request: HttpRequest) -> dict[str, Any]:
         "development_environment": settings.DEVELOPMENT,
         "support_email": support_email,
         "support_email_html_tag": support_email_html_tag,
-        "find_team_link_disabled": find_team_link_disabled,
         "password_min_length": settings.PASSWORD_MIN_LENGTH,
+        "password_max_length": settings.PASSWORD_MAX_LENGTH,
         "password_min_guesses": settings.PASSWORD_MIN_GUESSES,
         "zulip_version": ZULIP_VERSION,
         "user_is_authenticated": request.user.is_authenticated,
@@ -208,6 +209,7 @@ def zulip_default_context(request: HttpRequest) -> dict[str, Any]:
         "skip_footer": skip_footer,
         "default_page_params": default_page_params,
         "corporate_enabled": corporate_enabled,
+        "non_realm_specific_page": non_realm_specific_page,
     }
 
     if settings.SENTRY_FRONTEND_DSN is not None:
@@ -248,6 +250,16 @@ def login_context(request: HttpRequest) -> dict[str, Any]:
         # public streams configured, in addition to having it enabled.
         realm_web_public_access_enabled = realm.allow_web_public_streams_access()
 
+    # Get realm default emojiset for rendering emojis in organization description
+    if realm is not None:
+        try:
+            realm_user_default = RealmUserDefault.objects.get(realm=realm)
+            realm_default_emojiset = realm_user_default.emojiset
+        except RealmUserDefault.DoesNotExist:  # nocoverage
+            realm_default_emojiset = UserProfile.GOOGLE_EMOJISET
+    else:
+        realm_default_emojiset = UserProfile.GOOGLE_EMOJISET
+
     context: dict[str, Any] = {
         "realm_invite_required": realm_invite_required,
         "realm_description": realm_description,
@@ -274,6 +286,13 @@ def login_context(request: HttpRequest) -> dict[str, Any]:
     context["external_authentication_methods"] = get_external_method_dicts(realm)
     context["no_auth_enabled"] = no_auth_enabled
 
+    # Sync this with login_page_params_schema in base_page_params.ts.
+    context["page_params"] = {
+        **DEFAULT_PAGE_PARAMS,
+        "page_type": "login",
+        "realm_default_emojiset": realm_default_emojiset,
+    }
+
     return context
 
 
@@ -286,6 +305,10 @@ def latest_info_context() -> dict[str, str]:
     return context
 
 
+def is_realm_import_enabled() -> bool:
+    return settings.MAX_WEB_DATA_IMPORT_SIZE_MB != 0
+
+
 def get_realm_create_form_context() -> dict[str, Any]:
     context = {
         "language_list": get_language_list(),
@@ -293,5 +316,7 @@ def get_realm_create_form_context() -> dict[str, Any]:
         "MAX_REALM_SUBDOMAIN_LENGTH": str(Realm.MAX_REALM_SUBDOMAIN_LENGTH),
         "root_domain_available": is_root_domain_available(),
         "sorted_realm_types": sorted(Realm.ORG_TYPES.values(), key=lambda d: d["display_order"]),
+        "is_realm_import_enabled": is_realm_import_enabled(),
+        "import_from_choices": PreregistrationRealm.IMPORT_FROM_CHOICES,
     }
     return context

@@ -1,7 +1,7 @@
 class zulip::snakeoil {
   zulip::safepackage { 'ssl-cert': ensure => installed }
 
-  # We use the snakeoil certificate for PostgreSQL and Postfix; some VMs
+  # We use the snakeoil certificate for PostgreSQL and SMTP; some VMs
   # install the `ssl-cert` package but (reasonably) don't build the
   # snakeoil certs into the image; build them as needed.
   exec { 'generate-default-snakeoil':

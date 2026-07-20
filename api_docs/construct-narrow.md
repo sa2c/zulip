@@ -42,7 +42,7 @@ Zulip API.
 
 Note that many narrows, including all that lack a `channel` or `channels`
 operator, search the current user's personal message history. See
-[searching shared history](/help/search-for-messages#searching-shared-history)
+[searching shared history](/help/search-for-messages#search-shared-history)
 for details.
 
 Clients should note that the `is:unread` filter takes advantage of the
@@ -51,7 +51,27 @@ important optimization when fetching messages in certain cases (e.g.,
 when [adding the `read` flag to a user's personal
 messages](/api/update-message-flags-for-narrow)).
 
+Note: When the value of `realm_empty_topic_display_name` found in
+the [POST /register](/api/register-queue) response is used as an operand
+for the `"topic"` operator in the narrow, it is interpreted
+as an empty string.
+
 ## Changes
+
+* In Zulip 12.0 (feature level 489), support was added for a new
+  filter, `channels:archived`, which returns messages the current user
+  received in channels that have been [archived](/help/archive-a-channel).
+
+* In Zulip 12.0 (feature level 446), add the `mentions` operator,
+  matching messages that contain a direct personal mention of the
+  specified user.
+
+* In Zulip 10.0 (feature level 366), support was added for a new
+  `is:muted` operator combination, matching messages in topics and
+  channels that the user has [muted](/help/mute-a-topic).
+
+* Before Zulip 10.0 (feature level 334), empty string was not a valid
+  topic name for channel messages.
 
 * In Zulip 9.0 (feature level 271), support was added for a new filter
   operator, `with`, which uses a [message ID](#message-ids) for its
@@ -95,27 +115,42 @@ messages](/api/update-message-flags-for-narrow)).
 
 ### Message IDs
 
-The `near`, `id` and `with` operators use message IDs for their
-operands. The `near` and `id` operators are documented in the help
-center [here](/help/search-for-messages#search-by-message-id).
+The `id` and `with` operators use message IDs for their operands. The
+message ID operand for these two operators may be encoded as either a
+number or a string.
 
-The `with` operator is designed to be used for permanent links to topics,
-which means they should continue to work when the topic is
-[moved](/help/move-content-to-another-topic) or
-[resolved](/help/resolve-a-topic). If the message with the specified ID
-exists, and can be accessed by the user, then it will return messages
-with the `channel`/`topic`/`dm` operators corresponding to the current
-conversation containing that message, and replacing any such filters
-included in the narrow.
-
+* `id:12345`: Search for only the message with ID `12345`.
 * `with:12345`: Search for the conversation that contains the message
   with ID `12345`.
-* `near:12345`: Search messages around the message with ID `12345`.
-* `id:12345`: Search for only the message with ID `12345`.
 
-The message ID operand for the `with` and `id` operators may be encoded
-as either a number or a string. The message ID operand for the `near`
-operator must be encoded as a string.
+The `id` operator returns the message with the specified ID if it exists,
+and if it can be accessed by the user.
+
+The `with` operator is designed to be used for permanent links to
+topics, which means they should continue to work when the topic is
+[moved](/help/move-content-to-another-topic) or
+[resolved](/help/resolve-a-topic). If the message with the specified
+ID exists, and can be accessed by the user, then it will return
+messages with the `channel`/`topic`/`dm` operators corresponding to
+the current conversation containing that message, replacing any such
+operators included in the original narrow query.
+
+If no such message exists, or the message ID represents a message that
+is inaccessible to the user, this operator will be ignored (rather
+than throwing an error) if the remaining operators uniquely identify a
+conversation (i.e., they contain `channel` and `topic` terms or `dm`
+term). This behavior is intended to provide the best possible
+experience for links to private channels with protected history.
+
+The [help center](/help/search-for-messages#search-by-message-id) also
+documents the `near` operator for searching for messages by ID, but
+this narrow operator has no effect on filtering messages when sent to
+the server. In practice, when the `near` operator is used to search for
+messages, or is part of a URL fragment, the value of its operand should
+instead be used for the value of the `anchor` parameter in endpoints
+that also accept a `narrow` parameter; see
+[GET /messages][anchor-get-messages] and
+[POST /messages/flags/narrow][anchor-post-flags].
 
 **Changes**: Prior to Zulip 8.0 (feature level 194), the message ID
 operand for the `id` operator needed to be encoded as a string.
@@ -171,3 +206,5 @@ user 1234, and user 5678, the correct JSON-encoded query is:
 
 [view-profile]: /help/view-someones-profile
 [browse-channels]: /help/introduction-to-channels#browse-and-subscribe-to-channels
+[anchor-get-messages]: /api/get-messages#parameter-anchor
+[anchor-post-flags]: /api/update-message-flags-for-narrow#parameter-anchor

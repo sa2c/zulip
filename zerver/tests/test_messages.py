@@ -7,7 +7,9 @@ from zerver.lib.test_classes import ZulipTestCase
 from zerver.models import Message, UserPresence, UserProfile
 from zerver.models.recipients import (
     bulk_get_direct_message_group_user_ids,
+    get_direct_message_group,
     get_direct_message_group_user_ids,
+    get_or_create_direct_message_group,
 )
 
 
@@ -86,26 +88,67 @@ class TestBulkGetDirectMessageGroupUserIds(ZulipTestCase):
         ]
 
         messages = Message.objects.filter(id__in=message_ids).order_by("id")
+
         first_direct_message_group_recipient = messages[0].recipient
         first_direct_message_group_user_ids = set(
             get_direct_message_group_user_ids(first_direct_message_group_recipient)
         )
+        first_direct_message_group = get_or_create_direct_message_group(
+            list(first_direct_message_group_user_ids)
+        )
+
         second_direct_message_group_recipient = messages[1].recipient
         second_direct_message_group_user_ids = set(
             get_direct_message_group_user_ids(second_direct_message_group_recipient)
+        )
+        second_direct_message_group = get_or_create_direct_message_group(
+            list(second_direct_message_group_user_ids)
         )
 
         direct_message_group_user_ids = bulk_get_direct_message_group_user_ids(
             [first_direct_message_group_recipient.id, second_direct_message_group_recipient.id]
         )
+
         self.assertEqual(
             direct_message_group_user_ids[first_direct_message_group_recipient.id],
             first_direct_message_group_user_ids,
         )
         self.assertEqual(
+            first_direct_message_group.group_size, len(first_direct_message_group_user_ids)
+        )
+
+        self.assertEqual(
             direct_message_group_user_ids[second_direct_message_group_recipient.id],
             second_direct_message_group_user_ids,
+        )
+        self.assertEqual(
+            second_direct_message_group.group_size, len(second_direct_message_group_user_ids)
         )
 
     def test_bulk_get_direct_message_group_user_ids_empty_list(self) -> None:
         self.assertEqual(bulk_get_direct_message_group_user_ids([]), {})
+
+
+class TestGetDirectMessageGroup(ZulipTestCase):
+    def test_get_direct_message_group_nonexistent(self) -> None:
+        """Test that get_direct_message_group returns None when the group doesn't exist."""
+        hamlet = self.example_user("hamlet")
+        cordelia = self.example_user("cordelia")
+
+        # These users haven't had any group DM, so no DirectMessageGroup exists
+        result = get_direct_message_group([hamlet.id, cordelia.id])
+        self.assertIsNone(result)
+
+    def test_get_direct_message_group_exists(self) -> None:
+        """Test that get_direct_message_group returns the group when it exists."""
+        hamlet = self.example_user("hamlet")
+        cordelia = self.example_user("cordelia")
+        othello = self.example_user("othello")
+
+        # Create a group DM which will create the DirectMessageGroup
+        self.send_group_direct_message(hamlet, [cordelia, othello], "test")
+
+        # Now the DirectMessageGroup should exist
+        result = get_direct_message_group([hamlet.id, cordelia.id, othello.id])
+        assert result is not None
+        self.assertEqual(result.group_size, 3)

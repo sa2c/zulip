@@ -76,6 +76,7 @@ Dependencies:
 
 """
 
+import logging
 import re
 from collections.abc import Callable, Iterable, Mapping, MutableSequence, Sequence
 from typing import Any
@@ -93,6 +94,7 @@ from typing_extensions import override
 from zerver.lib.exceptions import MarkdownRenderingError
 from zerver.lib.markdown.priorities import PREPROCESSOR_PRIORITIES
 from zerver.lib.tex import render_tex
+from zerver.models.realm_playgrounds import PLAYGROUND_LANGUAGE_REGEX
 
 # Global vars
 FENCE_RE = re.compile(
@@ -108,7 +110,9 @@ FENCE_RE = re.compile(
         # language, like ".py" or "{javascript}"
         \{?\.?
         (?P<lang>
-            [a-zA-Z0-9_+-./#]+
+            """
+    + PLAYGROUND_LANGUAGE_REGEX
+    + r"""
         ) # "py" or "javascript"
 
         [ ]* # spaces
@@ -145,6 +149,20 @@ Missing required -X argument in curl command:
 CODE_VALIDATORS: dict[str | None, Callable[[list[str]], None]] = {
     "curl": validate_curl_content,
 }
+
+
+# This function is similar to one used in fenced_code.ts
+def get_unused_fence(content: str) -> str:
+    # Define the regular expression pattern to match ``` fences
+    fence_length_re = re.compile(r"^ {0,3}(`{3,})", re.MULTILINE)
+
+    # Initialize the length variable to 3, corresponding to default fence length
+    length = 3
+    matches = fence_length_re.findall(content)
+    for match in matches:
+        length = max(length, len(match) + 1)
+
+    return "`" * length
 
 
 class FencedCodeExtension(Extension):
@@ -492,7 +510,11 @@ class FencedBlockPreprocessor(Preprocessor):
                 startinline=True,
             )
 
-            code = highliter.hilite().rstrip("\n")
+            try:
+                code = highliter.hilite().rstrip("\n")
+            except Exception:
+                logging.exception("Failed to highlight fenced code block")
+                code = CODE_WRAP.format(langclass, self._escape(text))
         else:
             code = CODE_WRAP.format(langclass, self._escape(text))
 

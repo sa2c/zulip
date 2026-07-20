@@ -1,8 +1,9 @@
-import {z} from "zod";
+import * as z from "zod/mini";
 
-import type {StateData} from "./state_data";
+import type {StateData} from "./state_data.ts";
 
 export const realm_default_settings_schema = z.object({
+    allow_private_data_export: z.boolean(),
     automatically_follow_topics_policy: z.number(),
     automatically_follow_topics_where_mentioned: z.boolean(),
     automatically_unmute_topics_in_muted_streams_policy: z.number(),
@@ -10,7 +11,6 @@ export const realm_default_settings_schema = z.object({
     color_scheme: z.number(),
     default_language: z.string(),
     demote_inactive_streams: z.number(),
-    dense_mode: z.boolean(),
     desktop_icon_count_display: z.number(),
     display_emoji_reaction_users: z.boolean(),
     email_address_visibility: z.number(),
@@ -37,6 +37,7 @@ export const realm_default_settings_schema = z.object({
     enable_stream_push_notifications: z.boolean(),
     enter_sends: z.boolean(),
     fluid_layout_width: z.boolean(),
+    hide_ai_features: z.boolean(),
     high_contrast_mode: z.boolean(),
     left_side_userlist: z.boolean(),
     message_content_in_email_notifications: z.boolean(),
@@ -45,6 +46,7 @@ export const realm_default_settings_schema = z.object({
     presence_enabled: z.boolean(),
     realm_name_in_email_notifications_policy: z.number(),
     receives_typing_notifications: z.boolean(),
+    resolved_topic_notice_auto_read_policy: z.enum(["always", "except_followed", "never"]),
     send_private_typing_notifications: z.boolean(),
     send_read_receipts: z.boolean(),
     send_stream_typing_notifications: z.boolean(),
@@ -57,6 +59,9 @@ export const realm_default_settings_schema = z.object({
     web_escape_navigates_to_home_view: z.boolean(),
     web_font_size_px: z.number(),
     web_home_view: z.string(),
+    web_inbox_show_channel_folders: z.boolean(),
+    web_left_sidebar_show_channel_folders: z.boolean(),
+    web_left_sidebar_unreads_count_summary: z.boolean(),
     web_line_height_percent: z.number(),
     web_mark_read_on_scroll_policy: z.number(),
     web_navigate_to_sent_message: z.boolean(),

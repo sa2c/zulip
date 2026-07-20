@@ -19,17 +19,24 @@ from zerver.lib.message import (
     access_message_and_usermessage,
     access_web_public_message,
     messages_for_ids,
+    visible_edit_history_for_message,
 )
 from zerver.lib.request import RequestNotes
 from zerver.lib.response import json_success
+from zerver.lib.streams import can_delete_any_message_in_channel, can_delete_own_message_in_channel
 from zerver.lib.timestamp import datetime_to_timestamp
+from zerver.lib.topic import maybe_rename_empty_topic_to_general_chat
 from zerver.lib.typed_endpoint import OptionalTopic, PathOnly, typed_endpoint
 from zerver.lib.types import EditHistoryEvent, FormattedEditHistoryEvent
 from zerver.models import Message, UserProfile
+from zerver.models.realms import MessageEditHistoryVisibilityPolicyEnum
+from zerver.models.streams import Stream, get_stream_by_id_in_realm
 
 
 def fill_edit_history_entries(
-    raw_edit_history: list[EditHistoryEvent], message: Message
+    raw_edit_history: list[EditHistoryEvent],
+    message: Message,
+    allow_empty_topic_name: bool,
 ) -> list[FormattedEditHistoryEvent]:
     """
     This fills out the message edit history entries from the database
@@ -39,7 +46,13 @@ def fill_edit_history_entries(
     """
     prev_content = message.content
     prev_rendered_content = message.rendered_content
-    prev_topic_name = message.topic_name()
+    is_channel_message = message.is_channel_message
+    if is_channel_message:
+        prev_topic_name = maybe_rename_empty_topic_to_general_chat(
+            message.topic_name(), is_channel_message, allow_empty_topic_name
+        )
+    else:
+        prev_topic_name = ""
 
     # Make sure that the latest entry in the history corresponds to the
     # message's last edit time
@@ -58,7 +71,9 @@ def fill_edit_history_entries(
         }
 
         if "prev_topic" in edit_history_event:
-            prev_topic_name = edit_history_event["prev_topic"]
+            prev_topic_name = maybe_rename_empty_topic_to_general_chat(
+                edit_history_event["prev_topic"], is_channel_message, allow_empty_topic_name
+            )
             formatted_entry["prev_topic"] = prev_topic_name
 
         # Fill current values for content/rendered_content.
@@ -98,11 +113,18 @@ def get_message_edit_history(
     request: HttpRequest,
     user_profile: UserProfile,
     *,
+    allow_empty_topic_name: Json[bool] = False,
     message_id: PathOnly[NonNegativeInt],
 ) -> HttpResponse:
-    if not user_profile.realm.allow_edit_history:
+    user_realm_message_edit_history_visibility_policy = (
+        user_profile.realm.message_edit_history_visibility_policy
+    )
+    if (
+        user_realm_message_edit_history_visibility_policy
+        == MessageEditHistoryVisibilityPolicyEnum.none.value
+    ):
         raise JsonableError(_("Message edit history is disabled in this organization"))
-    message = access_message(user_profile, message_id)
+    message = access_message(user_profile, message_id, is_modifying_message=False)
 
     # Extract the message edit history from the message
     if message.edit_history is not None:
@@ -111,8 +133,17 @@ def get_message_edit_history(
         raw_edit_history = []
 
     # Fill in all the extra data that will make it usable
-    message_edit_history = fill_edit_history_entries(raw_edit_history, message)
-    return json_success(request, data={"message_history": list(reversed(message_edit_history))})
+    message_edit_history = fill_edit_history_entries(
+        raw_edit_history, message, allow_empty_topic_name
+    )
+
+    visible_message_edit_history = visible_edit_history_for_message(
+        user_realm_message_edit_history_visibility_policy, message_edit_history
+    )
+
+    return json_success(
+        request, data={"message_history": list(reversed(visible_message_edit_history))}
+    )
 
 
 @typed_endpoint
@@ -120,15 +151,16 @@ def update_message_backend(
     request: HttpRequest,
     user_profile: UserProfile,
     *,
+    content: str | None = None,
     message_id: PathOnly[NonNegativeInt],
+    prev_content_sha256: str | None = None,
+    propagate_mode: Literal["change_later", "change_one", "change_all"] = "change_one",
+    send_notification_to_new_thread: Json[bool] = True,
+    send_notification_to_old_thread: Json[bool] = False,
     stream_id: Json[NonNegativeInt] | None = None,
     topic_name: OptionalTopic = None,
-    propagate_mode: Literal["change_later", "change_one", "change_all"] = "change_one",
-    send_notification_to_old_thread: Json[bool] = False,
-    send_notification_to_new_thread: Json[bool] = True,
-    content: str | None = None,
 ) -> HttpResponse:
-    number_changed = check_update_message(
+    updated_message_result = check_update_message(
         user_profile,
         message_id,
         stream_id,
@@ -137,26 +169,41 @@ def update_message_backend(
         send_notification_to_old_thread,
         send_notification_to_new_thread,
         content,
+        prev_content_sha256,
     )
 
     # Include the number of messages changed in the logs
     log_data = RequestNotes.get_notes(request).log_data
     assert log_data is not None
-    log_data["extra"] = f"[{number_changed}]"
+    log_data["extra"] = f"[{updated_message_result.changed_message_count}]"
 
-    return json_success(request)
+    return json_success(request, data={"detached_uploads": updated_message_result.detached_uploads})
 
 
 def validate_can_delete_message(user_profile: UserProfile, message: Message) -> None:
-    if user_profile.is_realm_admin:
-        # Admin can delete any message, any time.
+    if user_profile.can_delete_any_message():
         return
+
+    stream: Stream | None = None
+    if message.is_channel_message:
+        stream = get_stream_by_id_in_realm(message.recipient.type_id, user_profile.realm)
+        if can_delete_any_message_in_channel(user_profile, stream):
+            return
+
     if message.sender != user_profile and message.sender.bot_owner_id != user_profile.id:
         # Users can only delete messages sent by them or by their bots.
         raise JsonableError(_("You don't have permission to delete this message"))
+
     if not user_profile.can_delete_own_message():
-        # Only user with roles as allowed by delete_own_message_policy can delete message.
-        raise JsonableError(_("You don't have permission to delete this message"))
+        if not message.is_channel_message:
+            raise JsonableError(_("You don't have permission to delete this message"))
+
+        assert stream is not None
+        # For channel messages, users are required to have either the
+        # channel-level permission or the organization-level permission to delete
+        # their own messages.
+        if not can_delete_own_message_in_channel(user_profile, stream):
+            raise JsonableError(_("You don't have permission to delete this message"))
 
     deadline_seconds: int | None = user_profile.realm.message_content_delete_limit_seconds
     if deadline_seconds is None:
@@ -168,7 +215,7 @@ def validate_can_delete_message(user_profile: UserProfile, message: Message) -> 
     return
 
 
-@transaction.atomic
+@transaction.atomic(durable=True)
 @typed_endpoint
 def delete_message_backend(
     request: HttpRequest,
@@ -180,7 +227,7 @@ def delete_message_backend(
     # concurrently are serialized properly with deleting the message; this prevents a deadlock
     # that would otherwise happen because of the other transaction holding a lock on the `Message`
     # row.
-    message = access_message(user_profile, message_id, lock_message=True)
+    message = access_message(user_profile, message_id, lock_message=True, is_modifying_message=True)
     validate_can_delete_message(user_profile, message)
     try:
         do_delete_messages(user_profile.realm, [message], acting_user=user_profile)
@@ -194,26 +241,31 @@ def json_fetch_raw_message(
     request: HttpRequest,
     maybe_user_profile: UserProfile | AnonymousUser,
     *,
-    message_id: PathOnly[NonNegativeInt],
+    allow_empty_topic_name: Json[bool] = False,
     apply_markdown: Json[bool] = True,
+    message_id: PathOnly[NonNegativeInt],
 ) -> HttpResponse:
     if not maybe_user_profile.is_authenticated:
         realm = get_valid_realm_from_request(request)
         message = access_web_public_message(realm, message_id)
         user_profile = None
     else:
-        (message, user_message) = access_message_and_usermessage(maybe_user_profile, message_id)
+        (message, user_message) = access_message_and_usermessage(
+            maybe_user_profile, message_id, is_modifying_message=False
+        )
         user_profile = maybe_user_profile
 
     flags = ["read"]
     if not maybe_user_profile.is_authenticated:
-        allow_edit_history = realm.allow_edit_history
+        message_edit_history_visibility_policy = realm.message_edit_history_visibility_policy
     else:
         if user_message:
             flags = user_message.flags_list()
         else:
             flags = ["read", "historical"]
-        allow_edit_history = maybe_user_profile.realm.allow_edit_history
+        message_edit_history_visibility_policy = (
+            maybe_user_profile.realm.message_edit_history_visibility_policy
+        )
 
     # Security note: It's important that we call this only with a
     # message already fetched via `access_message` type methods,
@@ -224,7 +276,8 @@ def json_fetch_raw_message(
         search_fields={},
         apply_markdown=apply_markdown,
         client_gravatar=True,
-        allow_edit_history=allow_edit_history,
+        message_edit_history_visibility_policy=message_edit_history_visibility_policy,
+        allow_empty_topic_name=allow_empty_topic_name,
         user_profile=user_profile,
         realm=message.realm,
     )

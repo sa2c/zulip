@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import IO, TYPE_CHECKING, Any, TypeVar, Union, cast
 from unittest import mock
 from unittest.mock import patch
+from urllib.parse import urlsplit
 
 import boto3.session
 import fakeldap
@@ -17,12 +18,13 @@ import ldap
 import orjson
 from django.conf import settings
 from django.contrib.auth.models import AnonymousUser
+from django.contrib.sessions.backends.base import SessionBase
 from django.db.migrations.state import StateApps
-from django.http import HttpRequest, HttpResponse, HttpResponseRedirect
+from django.http import HttpRequest, HttpResponse
 from django.http.request import QueryDict
 from django.http.response import HttpResponseBase
 from django.test import override_settings
-from django.urls import URLResolver
+from django.urls import URLResolver, resolve
 from moto.core.decorator import mock_aws
 from mypy_boto3_s3.service_resource import Bucket
 from typing_extensions import ParamSpec, override
@@ -33,17 +35,19 @@ from zerver.lib import cache
 from zerver.lib.avatar import avatar_url
 from zerver.lib.cache import get_cache_backend
 from zerver.lib.db import Params, Query, TimeTrackingCursor
-from zerver.lib.integrations import WEBHOOK_INTEGRATIONS
+from zerver.lib.integrations import INCOMING_WEBHOOK_INTEGRATIONS
 from zerver.lib.per_request_cache import flush_per_request_caches
-from zerver.lib.rate_limiter import RateLimitedIPAddr, rules
+from zerver.lib.rate_limiter import RateLimitedIPAddr
 from zerver.lib.request import RequestNotes
 from zerver.lib.types import AnalyticsDataUploadLevel
 from zerver.lib.upload.s3 import S3UploadBackend
+from zerver.lib.url_redirects import REDIRECTED_TO_HELP_DOCUMENTATION
 from zerver.models import Client, Message, RealmUserDefault, Subscription, UserMessage, UserProfile
 from zerver.models.clients import clear_client_cache, get_client
 from zerver.models.realms import get_realm
 from zerver.models.streams import get_stream
 from zerver.tornado.handlers import AsyncDjangoHandler, allocate_handler_id
+from zerver.views.auth import log_into_subdomain
 from zilencer.models import RemoteZulipServer
 from zproject.backends import ExternalAuthDataDict, ExternalAuthResult
 
@@ -264,7 +268,7 @@ def reset_email_visibility_to_everyone_in_zulip_realm() -> None:
 
 def get_test_image_file(filename: str) -> IO[bytes]:
     test_avatar_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../tests/images"))
-    return open(os.path.join(test_avatar_dir, filename), "rb")  # noqa: SIM115
+    return open(os.path.join(test_avatar_dir, filename), "rb")
 
 
 def read_test_image_file(filename: str) -> bytes:
@@ -343,6 +347,14 @@ def get_user_messages(user_profile: UserProfile) -> list[Message]:
     return [um.message for um in query]
 
 
+def get_user_sent_message_ids(user_profile: UserProfile) -> list[int]:
+    return list(
+        Message.objects.filter(realm_id=user_profile.realm_id, sender=user_profile).values_list(
+            "id", flat=True
+        )
+    )
+
+
 class DummyHandler(AsyncDjangoHandler):
     def __init__(self) -> None:
         self.handler_id = allocate_handler_id(self)
@@ -395,11 +407,18 @@ class HostRequestMock(HttpRequest):
         self.user = user_profile or AnonymousUser()
         self._body = orjson.dumps(post_data)
         self.content_type = ""
+        self.session = SessionBase()
+
+        # Mock parse_client() in middleware.py
+        if meta_data and "HTTP_USER_AGENT" in meta_data:
+            client = meta_data["HTTP_USER_AGENT"]
+        else:
+            client = ""
 
         RequestNotes.set_notes(
             self,
             RequestNotes(
-                client_name="",
+                client_name=client,
                 log_data={},
                 tornado_handler_id=None if tornado_handler is None else tornado_handler.handler_id,
                 client=get_client(client_name) if client_name is not None else None,
@@ -489,14 +508,10 @@ def write_instrumentation_reports(full_suite: bool, include_webhooks: bool) -> N
                 find_pattern(pattern, prefixes)
 
         def cleanup_url(url: str) -> str:
-            if url.startswith("/"):
-                url = url[1:]
-            if url.startswith("http://testserver/"):
-                url = url[len("http://testserver/") :]
-            if url.startswith("http://zulip.testserver/"):
-                url = url[len("http://zulip.testserver/") :]
-            if url.startswith("http://testserver:9080/"):
-                url = url[len("http://testserver:9080/") :]
+            url = url.removeprefix("/")
+            url = url.removeprefix("http://testserver/")
+            url = url.removeprefix("http://zulip.testserver/")
+            url = url.removeprefix("http://testserver:9080/")
             return url
 
         def find_pattern(pattern: Any, prefixes: list[str]) -> None:
@@ -516,7 +531,7 @@ def write_instrumentation_reports(full_suite: bool, include_webhooks: bool) -> N
 
                 for prefix in prefixes:
                     if url.startswith(prefix):
-                        match_url = url[len(prefix) :]
+                        match_url = url.removeprefix(prefix)
                         if pattern.resolve(match_url):
                             if call["status_code"] in [200, 204, 301, 302]:
                                 cnt += 1
@@ -544,7 +559,7 @@ def write_instrumentation_reports(full_suite: bool, include_webhooks: bool) -> N
             "docs/",
             "docs/(?P<path>.+)",
             "casper/(?P<path>.+)",
-            "static/(?P<path>.+)",
+            "static/(?P<path>.*)",
             "flush_caches",
             "external_content/(?P<digest>[^/]+)/(?P<received_url>[^/]+)",
             # Such endpoints are only used in certain test cases that can be skipped
@@ -565,7 +580,13 @@ def write_instrumentation_reports(full_suite: bool, include_webhooks: bool) -> N
             # This endpoint only returns 500 and 404 codes, so it doesn't get picked up
             # by find_pattern above and therefore needs to be exempt.
             "self-hosted-billing/not-configured/",
-            *(webhook.url for webhook in WEBHOOK_INTEGRATIONS if not include_webhooks),
+            *(redirect.old_url.lstrip("/") for redirect in REDIRECTED_TO_HELP_DOCUMENTATION),
+            *(
+                url
+                for webhook in INCOMING_WEBHOOK_INTEGRATIONS
+                for url in webhook.urls
+                if not include_webhooks
+            ),
         }
 
         untested_patterns -= exempt_patterns
@@ -573,8 +594,7 @@ def write_instrumentation_reports(full_suite: bool, include_webhooks: bool) -> N
         var_dir = "var"  # TODO make sure path is robust here
         fn = os.path.join(var_dir, "url_coverage.txt")
         with open(fn, "wb") as f:
-            for call in calls:
-                f.write(orjson.dumps(call, option=orjson.OPT_APPEND_NEWLINE))
+            f.writelines(orjson.dumps(call, option=orjson.OPT_APPEND_NEWLINE) for call in calls)
 
         if full_suite:
             print(f"INFO: URL coverage report is in {fn}")
@@ -587,8 +607,10 @@ def write_instrumentation_reports(full_suite: bool, include_webhooks: bool) -> N
 
 
 def load_subdomain_token(response: Union["TestHttpResponse", HttpResponse]) -> ExternalAuthDataDict:
-    assert isinstance(response, HttpResponseRedirect)
-    token = response.url.rsplit("/", 1)[1]
+    assert response.status_code == 302
+    match = resolve(urlsplit(response["Location"]).path)
+    assert match.func == log_into_subdomain
+    token = match.kwargs["token"]
     data = ExternalAuthResult(
         request=mock.MagicMock(), login_token=token, delete_stored_data=False
     ).data_dict
@@ -606,10 +628,7 @@ def use_s3_backend(method: Callable[P, None]) -> Callable[P, None]:
     @override_settings(LOCAL_FILES_DIR=None)
     def new_method(*args: P.args, **kwargs: P.kwargs) -> None:
         backend = S3UploadBackend()
-        with (
-            mock.patch("zerver.lib.upload.upload_backend", backend),
-            mock.patch("zerver.worker.thumbnail.upload_backend", backend),
-        ):
+        with mock.patch("zerver.lib.upload._upload_backend", backend):
             return method(*args, **kwargs)
 
     return new_method
@@ -654,7 +673,6 @@ def use_db_models(
         RealmEmoji = apps.get_model("zerver", "RealmEmoji")
         RealmFilter = apps.get_model("zerver", "RealmFilter")
         Recipient = apps.get_model("zerver", "Recipient")
-        Recipient.PERSONAL = 1
         Recipient.STREAM = 2
         Recipient.DIRECT_MESSAGE_GROUP = 3
         ScheduledEmail = apps.get_model("zerver", "ScheduledEmail")
@@ -785,11 +803,14 @@ def ratelimit_rule(
     """Temporarily add a rate-limiting rule to the rate limiter"""
     RateLimitedIPAddr("127.0.0.1", domain=domain).clear_history()
 
-    domain_rules = rules.get(domain, []).copy()
+    domain_rules = settings.RATE_LIMITING_RULES.get(domain, []).copy()
     domain_rules.append((range_seconds, num_requests))
     domain_rules.sort(key=lambda x: x[0])
 
-    with patch.dict(rules, {domain: domain_rules}), override_settings(RATE_LIMITING=True):
+    with (
+        patch.dict(settings.RATE_LIMITING_RULES, {domain: domain_rules}),
+        override_settings(RATE_LIMITING=True),
+    ):
         yield
 
 

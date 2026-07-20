@@ -1,6 +1,8 @@
+import datetime
 import logging
 import zoneinfo
 from email.headerregistry import Address
+from enum import Enum
 from typing import Any, Literal
 
 from django.conf import settings
@@ -13,24 +15,29 @@ from confirmation.models import Confirmation, create_confirmation_link, generate
 from zerver.actions.custom_profile_fields import do_remove_realm_custom_profile_fields
 from zerver.actions.message_delete import do_delete_messages_by_sender
 from zerver.actions.user_groups import update_users_in_full_members_system_group
-from zerver.actions.user_settings import do_delete_avatar_image
+from zerver.actions.user_settings import do_scrub_avatar_images
+from zerver.lib.demo_organizations import demo_organization_owner_email_exists
 from zerver.lib.exceptions import JsonableError
 from zerver.lib.message import parse_message_time_limit_setting, update_first_visible_message_id
+from zerver.lib.queue import queue_json_publish_rollback_unsafe
 from zerver.lib.retention import move_messages_to_archive
 from zerver.lib.send_email import FromAddress, send_email, send_email_to_admins
 from zerver.lib.sessions import delete_realm_user_sessions
 from zerver.lib.timestamp import datetime_to_timestamp, timestamp_to_datetime
 from zerver.lib.timezone import canonicalize_timezone
+from zerver.lib.types import UserGroupMembersData
 from zerver.lib.upload import delete_message_attachments
 from zerver.lib.user_counts import realm_user_count_by_role
 from zerver.lib.user_groups import (
-    AnonymousSettingGroupDict,
+    convert_to_user_group_members_dict,
     get_group_setting_value_for_api,
     get_group_setting_value_for_audit_log_data,
 )
+from zerver.lib.utils import optional_bytes_to_mib
 from zerver.models import (
     ArchivedAttachment,
     Attachment,
+    ImageAttachment,
     Message,
     NamedUserGroup,
     Realm,
@@ -46,32 +53,54 @@ from zerver.models import (
     UserProfile,
 )
 from zerver.models.groups import SystemGroups
-from zerver.models.realms import get_realm
+from zerver.models.realm_audit_logs import AuditLogEventType
+from zerver.models.realms import (
+    MessageEditHistoryVisibilityPolicyEnum,
+    RealmTopicsPolicyEnum,
+    get_default_max_invites_for_realm_plan_type,
+    get_realm,
+)
 from zerver.models.users import active_user_ids
-from zerver.tornado.django_api import send_event, send_event_on_commit
-
-if settings.BILLING_ENABLED:
-    from corporate.lib.stripe import RealmBillingSession
+from zerver.tornado.django_api import send_event_on_commit
 
 
 @transaction.atomic(savepoint=False)
 def do_set_realm_property(
-    realm: Realm, name: str, value: Any, *, acting_user: UserProfile | None
+    realm: Realm, name: str, raw_value: Any, *, acting_user: UserProfile | None
 ) -> None:
     """Takes in a realm object, the name of an attribute to update, the
-    value to update and and the user who initiated the update.
+    value to update and the user who initiated the update.
     """
     property_type = Realm.property_types[name]
-    assert isinstance(
-        value, property_type
-    ), f"Cannot update {name}: {value} is not an instance of {property_type}"
+    assert isinstance(raw_value, property_type), (
+        f"Cannot update {name}: {raw_value} is not an instance of {property_type}"
+    )
 
     old_value = getattr(realm, name)
+    if isinstance(raw_value, Enum):
+        value = raw_value.value
+    else:
+        value = raw_value
+
     if old_value == value:
         return
 
     setattr(realm, name, value)
-    realm.save(update_fields=[name])
+    if name == "description":
+        from zerver.lib.realm_description import render_realm_description
+
+        rendered_description, version = render_realm_description(value, realm)
+        realm.rendered_description = rendered_description
+        realm.rendered_description_version = version
+        realm.save(update_fields=[name, "rendered_description", "rendered_description_version"])
+    else:
+        realm.save(update_fields=[name])
+
+    if name == "enable_spectator_access":
+        Attachment.objects.filter(realm=realm).update(is_web_public=None)
+        # We need to do the same for ArchivedAttachment to avoid
+        # bugs if deleted attachments are later restored.
+        ArchivedAttachment.objects.filter(realm=realm).update(is_web_public=None)
 
     event = dict(
         type="realm",
@@ -83,7 +112,6 @@ def do_set_realm_property(
     # These settings have a different event format due to their history.
     message_edit_settings = [
         "allow_message_editing",
-        "edit_topic_policy",
         "message_content_edit_limit_seconds",
     ]
     if name in message_edit_settings:
@@ -93,13 +121,40 @@ def do_set_realm_property(
             property="default",
             data={name: value},
         )
+    if name == "message_edit_history_visibility_policy":
+        event = dict(
+            type="realm",
+            op="update",
+            property=name,
+            value=MessageEditHistoryVisibilityPolicyEnum(value).name,
+        )
+    if name == "topics_policy":
+        event = dict(
+            type="realm",
+            op="update_dict",
+            property="default",
+            data={
+                name: RealmTopicsPolicyEnum(value).name,
+                "mandatory_topics": value == RealmTopicsPolicyEnum.disable_empty_topic.value,
+            },
+        )
+    if name == "description":
+        event = dict(
+            type="realm",
+            op="update_dict",
+            property="default",
+            data={
+                "description": realm.description,
+                "rendered_description": realm.rendered_description,
+            },
+        )
 
     send_event_on_commit(realm, event, active_user_ids(realm.id))
 
     event_time = timezone_now()
     RealmAuditLog.objects.create(
         realm=realm,
-        event_type=RealmAuditLog.REALM_PROPERTY_CHANGED,
+        event_type=AuditLogEventType.REALM_PROPERTY_CHANGED,
         event_time=event_time,
         acting_user=acting_user,
         extra_data={
@@ -113,6 +168,7 @@ def do_set_realm_property(
         update_users_in_full_members_system_group(realm, acting_user=acting_user)
 
 
+@transaction.atomic(durable=True)
 def do_set_push_notifications_enabled_end_timestamp(
     realm: Realm, value: int | None, *, acting_user: UserProfile | None
 ) -> None:
@@ -128,25 +184,24 @@ def do_set_push_notifications_enabled_end_timestamp(
     if old_timestamp == value:
         return
 
-    with transaction.atomic():
-        new_datetime = None
-        if value is not None:
-            new_datetime = timestamp_to_datetime(value)
-        setattr(realm, name, new_datetime)
-        realm.save(update_fields=[name])
+    new_datetime = None
+    if value is not None:
+        new_datetime = timestamp_to_datetime(value)
+    setattr(realm, name, new_datetime)
+    realm.save(update_fields=[name])
 
-        event_time = timezone_now()
-        RealmAuditLog.objects.create(
-            realm=realm,
-            event_type=RealmAuditLog.REALM_PROPERTY_CHANGED,
-            event_time=event_time,
-            acting_user=acting_user,
-            extra_data={
-                RealmAuditLog.OLD_VALUE: old_timestamp,
-                RealmAuditLog.NEW_VALUE: value,
-                "property": name,
-            },
-        )
+    event_time = timezone_now()
+    RealmAuditLog.objects.create(
+        realm=realm,
+        event_type=AuditLogEventType.REALM_PROPERTY_CHANGED,
+        event_time=event_time,
+        acting_user=acting_user,
+        extra_data={
+            RealmAuditLog.OLD_VALUE: old_timestamp,
+            RealmAuditLog.NEW_VALUE: value,
+            "property": name,
+        },
+    )
 
     event = dict(
         type="realm",
@@ -154,7 +209,7 @@ def do_set_push_notifications_enabled_end_timestamp(
         property=name,
         value=value,
     )
-    send_event(realm, event, active_user_ids(realm.id))
+    send_event_on_commit(realm, event, active_user_ids(realm.id))
 
 
 @transaction.atomic(savepoint=False)
@@ -162,12 +217,12 @@ def do_change_realm_permission_group_setting(
     realm: Realm,
     setting_name: str,
     user_group: UserGroup,
-    old_setting_api_value: int | AnonymousSettingGroupDict | None = None,
+    old_setting_api_value: int | UserGroupMembersData | None = None,
     *,
     acting_user: UserProfile | None,
 ) -> None:
     """Takes in a realm object, the name of an attribute to update, the
-    user_group to update and and the user who initiated the update.
+    user_group to update and the user who initiated the update.
     """
     assert setting_name in Realm.REALM_PERMISSION_GROUP_SETTINGS
     old_value = getattr(realm, setting_name)
@@ -195,7 +250,7 @@ def do_change_realm_permission_group_setting(
         type="realm",
         op="update_dict",
         property="default",
-        data={setting_name: new_setting_api_value},
+        data={setting_name: convert_to_user_group_members_dict(new_setting_api_value)},
     )
 
     send_event_on_commit(realm, event, active_user_ids(realm.id))
@@ -203,7 +258,7 @@ def do_change_realm_permission_group_setting(
     event_time = timezone_now()
     RealmAuditLog.objects.create(
         realm=realm,
-        event_type=RealmAuditLog.REALM_PROPERTY_CHANGED,
+        event_type=AuditLogEventType.REALM_PROPERTY_CHANGED,
         event_time=event_time,
         acting_user=acting_user,
         extra_data={
@@ -216,6 +271,22 @@ def do_change_realm_permission_group_setting(
             "property": setting_name,
         },
     )
+
+    if setting_name == "workplace_users_group":
+        RealmAuditLog.objects.create(
+            realm=realm,
+            event_type=AuditLogEventType.WORKPLACE_USERS_COUNT_CHANGED,
+            event_time=event_time,
+            acting_user=acting_user,
+            extra_data={
+                RealmAuditLog.ROLE_COUNT: realm_user_count_by_role(realm),
+                "trigger": "setting_changed",
+            },
+        )
+
+        from zerver.lib.remote_server import maybe_enqueue_audit_log_upload
+
+        maybe_enqueue_audit_log_upload(realm)
 
 
 def parse_and_set_setting_value_if_required(
@@ -265,13 +336,13 @@ def get_realm_authentication_methods_for_page_params_api(
     # The rest of the function is only for the mechanism of restricting
     # certain backends based on the realm's plan type on Zulip Cloud.
 
-    from corporate.models import CustomerPlan
+    from corporate.models.plans import CustomerPlan
 
-    for backend_name in result_dict:
+    for backend_name, backend_result in result_dict.items():
         available_for = AUTH_BACKEND_NAME_MAP[backend_name].available_for_cloud_plans
 
         if available_for is not None and realm.plan_type not in available_for:
-            result_dict[backend_name]["available"] = False
+            backend_result["available"] = False
 
             required_upgrade_plan_number = min(
                 set(available_for).intersection({Realm.PLAN_TYPE_STANDARD, Realm.PLAN_TYPE_PLUS})
@@ -286,11 +357,11 @@ def get_realm_authentication_methods_for_page_params_api(
                     CustomerPlan.TIER_CLOUD_PLUS
                 )
 
-            result_dict[backend_name]["unavailable_reason"] = _(
+            backend_result["unavailable_reason"] = _(
                 "You need to upgrade to the {required_upgrade_plan_name} plan to use this authentication method."
             ).format(required_upgrade_plan_name=required_upgrade_plan_name)
         else:
-            result_dict[backend_name]["available"] = True
+            backend_result["available"] = True
 
     return result_dict
 
@@ -334,31 +405,31 @@ def validate_plan_for_authentication_methods(
             )
 
 
+@transaction.atomic(savepoint=False)
 def do_set_realm_authentication_methods(
     realm: Realm, authentication_methods: dict[str, bool], *, acting_user: UserProfile | None
 ) -> None:
     old_value = realm.authentication_methods_dict()
-    with transaction.atomic():
-        for key, value in authentication_methods.items():
-            # This does queries in a loop, but this isn't a performance sensitive
-            # path and is only run rarely.
-            if value:
-                RealmAuthenticationMethod.objects.get_or_create(realm=realm, name=key)
-            else:
-                RealmAuthenticationMethod.objects.filter(realm=realm, name=key).delete()
+    for key, value in authentication_methods.items():
+        # This does queries in a loop, but this isn't a performance sensitive
+        # path and is only run rarely.
+        if value:
+            RealmAuthenticationMethod.objects.get_or_create(realm=realm, name=key)
+        else:
+            RealmAuthenticationMethod.objects.filter(realm=realm, name=key).delete()
 
-        updated_value = realm.authentication_methods_dict()
-        RealmAuditLog.objects.create(
-            realm=realm,
-            event_type=RealmAuditLog.REALM_PROPERTY_CHANGED,
-            event_time=timezone_now(),
-            acting_user=acting_user,
-            extra_data={
-                RealmAuditLog.OLD_VALUE: old_value,
-                RealmAuditLog.NEW_VALUE: updated_value,
-                "property": "authentication_methods",
-            },
-        )
+    updated_value = realm.authentication_methods_dict()
+    RealmAuditLog.objects.create(
+        realm=realm,
+        event_type=AuditLogEventType.REALM_PROPERTY_CHANGED,
+        event_time=timezone_now(),
+        acting_user=acting_user,
+        extra_data={
+            RealmAuditLog.OLD_VALUE: old_value,
+            RealmAuditLog.NEW_VALUE: updated_value,
+            "property": "authentication_methods",
+        },
+    )
 
     event_data = dict(
         authentication_methods=get_realm_authentication_methods_for_page_params_api(
@@ -371,12 +442,13 @@ def do_set_realm_authentication_methods(
         property="default",
         data=event_data,
     )
-    send_event(realm, event, active_user_ids(realm.id))
+    send_event_on_commit(realm, event, active_user_ids(realm.id))
 
 
 def do_set_realm_stream(
     realm: Realm,
     field: Literal[
+        "moderation_request_channel",
         "new_stream_announcements_stream",
         "signup_announcements_stream",
         "zulip_update_announcements_stream",
@@ -388,7 +460,11 @@ def do_set_realm_stream(
 ) -> None:
     # We could calculate more of these variables from `field`, but
     # it's probably more readable to not do so.
-    if field == "new_stream_announcements_stream":
+    if field == "moderation_request_channel":
+        old_value = realm.moderation_request_channel_id
+        realm.moderation_request_channel = stream
+        property = "moderation_request_channel_id"
+    elif field == "new_stream_announcements_stream":
         old_value = realm.new_stream_announcements_stream_id
         realm.new_stream_announcements_stream = stream
         property = "new_stream_announcements_stream_id"
@@ -403,13 +479,13 @@ def do_set_realm_stream(
     else:
         raise AssertionError("Invalid realm stream field.")
 
-    with transaction.atomic():
+    with transaction.atomic(durable=True):
         realm.save(update_fields=[field])
 
         event_time = timezone_now()
         RealmAuditLog.objects.create(
             realm=realm,
-            event_type=RealmAuditLog.REALM_PROPERTY_CHANGED,
+            event_type=AuditLogEventType.REALM_PROPERTY_CHANGED,
             event_time=event_time,
             acting_user=acting_user,
             extra_data={
@@ -419,13 +495,23 @@ def do_set_realm_stream(
             },
         )
 
-    event = dict(
-        type="realm",
-        op="update",
-        property=property,
-        value=stream_id,
+        event = dict(
+            type="realm",
+            op="update",
+            property=property,
+            value=stream_id,
+        )
+        send_event_on_commit(realm, event, active_user_ids(realm.id))
+
+
+def do_set_realm_moderation_request_channel(
+    realm: Realm, stream: Stream | None, stream_id: int, *, acting_user: UserProfile | None
+) -> None:
+    if stream is not None and stream.is_public():
+        raise JsonableError(_("Moderation request channel must be private."))
+    do_set_realm_stream(
+        realm, "moderation_request_channel", stream, stream_id, acting_user=acting_user
     )
-    send_event(realm, event, active_user_ids(realm.id))
 
 
 def do_set_realm_new_stream_announcements_stream(
@@ -452,10 +538,11 @@ def do_set_realm_zulip_update_announcements_stream(
     )
 
 
+@transaction.atomic(durable=True)
 def do_set_realm_user_default_setting(
     realm_user_default: RealmUserDefault,
     name: str,
-    value: Any,
+    raw_value: Any,
     *,
     acting_user: UserProfile | None,
 ) -> None:
@@ -463,29 +550,35 @@ def do_set_realm_user_default_setting(
     realm = realm_user_default.realm
     event_time = timezone_now()
 
-    with transaction.atomic(savepoint=False):
-        setattr(realm_user_default, name, value)
-        realm_user_default.save(update_fields=[name])
+    if isinstance(raw_value, Enum):
+        value = raw_value.value
+        event_value = raw_value.name
+    else:
+        value = raw_value
+        event_value = raw_value
 
-        RealmAuditLog.objects.create(
-            realm=realm,
-            event_type=RealmAuditLog.REALM_DEFAULT_USER_SETTINGS_CHANGED,
-            event_time=event_time,
-            acting_user=acting_user,
-            extra_data={
-                RealmAuditLog.OLD_VALUE: old_value,
-                RealmAuditLog.NEW_VALUE: value,
-                "property": name,
-            },
-        )
+    setattr(realm_user_default, name, value)
+    realm_user_default.save(update_fields=[name])
+
+    RealmAuditLog.objects.create(
+        realm=realm,
+        event_type=AuditLogEventType.REALM_DEFAULT_USER_SETTINGS_CHANGED,
+        event_time=event_time,
+        acting_user=acting_user,
+        extra_data={
+            RealmAuditLog.OLD_VALUE: old_value,
+            RealmAuditLog.NEW_VALUE: value,
+            "property": name,
+        },
+    )
 
     event = dict(
         type="realm_user_settings_defaults",
         op="update",
         property=name,
-        value=value,
+        value=event_value,
     )
-    send_event(realm, event, active_user_ids(realm.id))
+    send_event_on_commit(realm, event, active_user_ids(realm.id))
 
 
 RealmDeactivationReasonType = Literal[
@@ -493,6 +586,7 @@ RealmDeactivationReasonType = Literal[
     "tos_violation",
     "inactivity",
     "self_hosting_migration",
+    "demo_expired",
     # When we change the subdomain of a realm, we leave
     # behind a deactivated gravestone realm.
     "subdomain_change",
@@ -504,6 +598,7 @@ def do_deactivate_realm(
     *,
     acting_user: UserProfile | None,
     deactivation_reason: RealmDeactivationReasonType,
+    deletion_delay_days: int | None = None,
     email_owners: bool,
 ) -> None:
     """
@@ -515,9 +610,18 @@ def do_deactivate_realm(
     if realm.deactivated:
         return
 
-    with transaction.atomic():
+    if settings.BILLING_ENABLED:
+        from corporate.lib.stripe import RealmBillingSession
+
+    with transaction.atomic(durable=True):
         realm.deactivated = True
-        realm.save(update_fields=["deactivated"])
+        if deletion_delay_days is None:
+            realm.save(update_fields=["deactivated"])
+        else:
+            realm.scheduled_deletion_date = timezone_now() + datetime.timedelta(
+                days=deletion_delay_days
+            )
+            realm.save(update_fields=["scheduled_deletion_date", "deactivated"])
 
         if settings.BILLING_ENABLED:
             billing_session = RealmBillingSession(user=acting_user, realm=realm)
@@ -526,7 +630,7 @@ def do_deactivate_realm(
         event_time = timezone_now()
         RealmAuditLog.objects.create(
             realm=realm,
-            event_type=RealmAuditLog.REALM_DEACTIVATED,
+            event_type=AuditLogEventType.REALM_DEACTIVATED,
             event_time=event_time,
             acting_user=acting_user,
             extra_data={
@@ -550,6 +654,13 @@ def do_deactivate_realm(
         event = dict(type="realm", op="deactivated", realm_id=realm.id)
         send_event_on_commit(realm, event, active_user_ids(realm.id))
 
+        if deletion_delay_days == 0:
+            event = {
+                "type": "scrub_deactivated_realm",
+                "realm_id": realm.id,
+            }
+            queue_json_publish_rollback_unsafe("deferred_work", event)
+
     # Don't deactivate the users, as that would lose a lot of state if
     # the realm needs to be reactivated, but do delete their sessions
     # so they get bumped to the login screen, where they'll get a
@@ -565,7 +676,27 @@ def do_deactivate_realm(
     # for realm exports and realm subdomain changes so that those actions
     # do not email active organization owners.
     if email_owners:
-        do_send_realm_deactivation_email(realm, acting_user)
+        do_send_realm_deactivation_email(realm, acting_user, deletion_delay_days)
+
+
+def delete_expired_demo_organizations() -> None:
+    demo_organizations_to_delete = Realm.objects.filter(
+        deactivated=False, demo_organization_scheduled_deletion_date__lte=timezone_now()
+    )
+    for demo_organization in demo_organizations_to_delete:
+        email_owners = False
+        if demo_organization_owner_email_exists(demo_organization):
+            email_owners = True
+        # By setting deletion_delay_days to zero, we send an event to
+        # the deferred work queue to scrub the realm data when
+        # deactivating the realm.
+        do_deactivate_realm(
+            realm=demo_organization,
+            acting_user=None,
+            deactivation_reason="demo_expired",
+            deletion_delay_days=0,
+            email_owners=email_owners,
+        )
 
 
 def do_reactivate_realm(realm: Realm) -> None:
@@ -574,8 +705,9 @@ def do_reactivate_realm(realm: Realm) -> None:
         return
 
     realm.deactivated = False
-    with transaction.atomic():
-        realm.save(update_fields=["deactivated"])
+    realm.scheduled_deletion_date = None
+    with transaction.atomic(durable=True):
+        realm.save(update_fields=["deactivated", "scheduled_deletion_date"])
 
         event_time = timezone_now()
         RealmAuditLog.objects.create(
@@ -584,7 +716,7 @@ def do_reactivate_realm(realm: Realm) -> None:
             # know which user initiated the change.
             acting_user=None,
             realm=realm,
-            event_type=RealmAuditLog.REALM_REACTIVATED,
+            event_type=AuditLogEventType.REALM_REACTIVATED,
             event_time=event_time,
             extra_data={
                 RealmAuditLog.ROLE_COUNT: realm_user_count_by_role(realm),
@@ -601,34 +733,34 @@ def do_add_deactivated_redirect(realm: Realm, redirect_url: str) -> None:
     realm.save(update_fields=["deactivated_redirect"])
 
 
-def do_delete_all_realm_attachments(realm: Realm, *, batch_size: int = 1000) -> None:
+def do_delete_all_realm_attachments(realm: Realm) -> None:
     # Delete attachment files from the storage backend, so that we
     # don't leave them dangling.
-    for obj_class in Attachment, ArchivedAttachment:
-        last_id = 0
-        while True:
+    with delete_message_attachments(delete_from=(ImageAttachment,)) as delete_one:
+        for obj_class in Attachment, ArchivedAttachment:
             to_delete = (
-                obj_class._default_manager.filter(realm_id=realm.id, pk__gt=last_id)
+                obj_class._default_manager.filter(realm_id=realm.id)
                 .order_by("pk")
-                .values_list("pk", "path_id")[:batch_size]
+                .select_for_update(no_key=False)
+                .values_list("path_id", flat=True)
             )
-            if len(to_delete) > 0:
-                delete_message_attachments([row[1] for row in to_delete])
-                last_id = to_delete[len(to_delete) - 1][0]
-            if len(to_delete) < batch_size:
-                break
-        obj_class._default_manager.filter(realm=realm).delete()
+            for path_id in to_delete.iterator():
+                delete_one(path_id)
+            obj_class._default_manager.filter(realm_id=realm.id).delete()
 
 
+@transaction.atomic(durable=True)
 def do_scrub_realm(realm: Realm, *, acting_user: UserProfile | None) -> None:
     if settings.BILLING_ENABLED:
+        from corporate.lib.stripe import RealmBillingSession
+
         billing_session = RealmBillingSession(user=acting_user, realm=realm)
         billing_session.downgrade_now_without_creating_additional_invoices()
 
     users = UserProfile.objects.filter(realm=realm)
     for user in users:
-        do_delete_messages_by_sender(user)
-        do_delete_avatar_image(user, acting_user=acting_user)
+        do_delete_messages_by_sender(user, skip_notify=True)
+        do_scrub_avatar_images(user, acting_user=acting_user)
         user.full_name = f"Scrubbed {generate_key()[:15]}"
         scrubbed_email = Address(
             username=f"scrubbed-{generate_key()[:15]}", domain=realm.host
@@ -643,13 +775,15 @@ def do_scrub_realm(realm: Realm, *, acting_user: UserProfile | None) -> None:
     # more secure against bugs that may cause Message.realm to be incorrect for some
     # cross-realm messages to also determine the actual Recipients - to prevent
     # deletion of excessive messages.
-    all_recipient_ids_in_realm = [
-        *Stream.objects.filter(realm=realm).values_list("recipient_id", flat=True),
-        *UserProfile.objects.filter(realm=realm).values_list("recipient_id", flat=True),
-        *Subscription.objects.filter(
-            recipient__type=Recipient.DIRECT_MESSAGE_GROUP, user_profile__realm=realm
-        ).values_list("recipient_id", flat=True),
-    ]
+    all_recipient_ids_in_realm = (
+        Stream.objects.filter(realm=realm)
+        .values_list("recipient_id", flat=True)
+        .union(
+            Subscription.objects.filter(
+                recipient__type=Recipient.DIRECT_MESSAGE_GROUP, user_profile__realm=realm
+            ).values_list("recipient_id", flat=True),
+        )
+    )
     cross_realm_bot_message_ids = list(
         Message.objects.filter(
             # Filtering by both message.recipient and message.realm is
@@ -662,7 +796,11 @@ def do_scrub_realm(realm: Realm, *, acting_user: UserProfile | None) -> None:
             realm=realm,
         ).values_list("id", flat=True)
     )
-    move_messages_to_archive(cross_realm_bot_message_ids)
+    move_messages_to_archive(cross_realm_bot_message_ids, realm=realm, skip_notify=True)
+
+    # Since we delete messages with skip_notify=True, we must take care of updating the first_message_id
+    # of channels in the realm.
+    Stream.objects.filter(realm=realm).update(first_message_id=None)
 
     do_remove_realm_custom_profile_fields(realm)
     do_delete_all_realm_attachments(realm)
@@ -671,8 +809,31 @@ def do_scrub_realm(realm: Realm, *, acting_user: UserProfile | None) -> None:
         realm=realm,
         event_time=timezone_now(),
         acting_user=acting_user,
-        event_type=RealmAuditLog.REALM_SCRUBBED,
+        event_type=AuditLogEventType.REALM_SCRUBBED,
     )
+    realm.scheduled_deletion_date = None
+    realm.save()
+
+
+def scrub_deactivated_realm(realm_to_scrub: Realm) -> None:
+    if (
+        realm_to_scrub.scheduled_deletion_date is not None
+        and realm_to_scrub.scheduled_deletion_date <= timezone_now()
+    ):
+        assert realm_to_scrub.deactivated, (
+            "Non-deactivated realm unexpectedly scheduled for deletion."
+        )
+        do_scrub_realm(realm_to_scrub, acting_user=None)
+        logging.info("Scrubbed realm %s", realm_to_scrub.id)
+
+
+def clean_deactivated_realm_data() -> None:
+    realms_to_scrub = Realm.objects.filter(
+        deactivated=True,
+        scheduled_deletion_date__lte=timezone_now(),
+    )
+    for realm in realms_to_scrub:
+        scrub_deactivated_realm(realm)
 
 
 @transaction.atomic(durable=True)
@@ -686,15 +847,48 @@ def do_change_realm_org_type(
     realm.save(update_fields=["org_type"])
 
     RealmAuditLog.objects.create(
-        event_type=RealmAuditLog.REALM_ORG_TYPE_CHANGED,
+        event_type=AuditLogEventType.REALM_ORG_TYPE_CHANGED,
         realm=realm,
         event_time=timezone_now(),
         acting_user=acting_user,
-        extra_data={"old_value": old_value, "new_value": org_type},
+        extra_data={
+            # Prior to Zulip 12.0, RealmAuditLog entries for this
+            # incorrectly used the strings "old_value" and "new_value"
+            # as keys here.
+            RealmAuditLog.OLD_VALUE: old_value,
+            RealmAuditLog.NEW_VALUE: org_type,
+        },
     )
 
     event = dict(type="realm", op="update", property="org_type", value=org_type)
     send_event_on_commit(realm, event, active_user_ids(realm.id))
+
+
+@transaction.atomic(durable=True)
+def do_change_realm_max_invites(realm: Realm, max_invites: int, acting_user: UserProfile) -> None:
+    old_value = realm.max_invites
+    if max_invites == 0:
+        # Reset to default maximum for plan type
+        new_max = get_default_max_invites_for_realm_plan_type(realm.plan_type)
+    else:
+        new_max = max_invites
+    realm.max_invites = new_max
+    realm.save(update_fields=["_max_invites"])
+
+    RealmAuditLog.objects.create(
+        event_type=AuditLogEventType.REALM_PROPERTY_CHANGED,
+        realm=realm,
+        event_time=timezone_now(),
+        acting_user=acting_user,
+        extra_data={
+            # Prior to Zulip 12.0, RealmAuditLog entries for this
+            # incorrectly used the strings "old_value" and "new_value"
+            # as keys here.
+            RealmAuditLog.OLD_VALUE: old_value,
+            RealmAuditLog.NEW_VALUE: new_max,
+            "property": "max_invites",
+        },
+    )
 
 
 @transaction.atomic(savepoint=False)
@@ -704,6 +898,8 @@ def do_change_realm_plan_type(
     from zproject.backends import AUTH_BACKEND_NAME_MAP
 
     old_value = realm.plan_type
+    if plan_type not in Realm.ALL_PLAN_TYPES:
+        raise AssertionError("Invalid plan type")
 
     if plan_type == Realm.PLAN_TYPE_LIMITED:
         # We do not allow public access on limited plans.
@@ -717,7 +913,7 @@ def do_change_realm_plan_type(
         # can_access_all_users_group, set it back to the default
         # value.
         everyone_system_group = NamedUserGroup.objects.get(
-            name=SystemGroups.EVERYONE, realm=realm, is_system_group=True
+            name=SystemGroups.EVERYONE, realm_for_sharding=realm, is_system_group=True
         )
         if realm.can_access_all_users_group_id != everyone_system_group.id:
             do_change_realm_permission_group_setting(
@@ -740,48 +936,39 @@ def do_change_realm_plan_type(
     realm.plan_type = plan_type
     realm.save(update_fields=["plan_type"])
     RealmAuditLog.objects.create(
-        event_type=RealmAuditLog.REALM_PLAN_TYPE_CHANGED,
+        event_type=AuditLogEventType.REALM_PLAN_TYPE_CHANGED,
         realm=realm,
         event_time=timezone_now(),
         acting_user=acting_user,
-        extra_data={"old_value": old_value, "new_value": plan_type},
+        extra_data={
+            # Prior to Zulip 12.0, RealmAuditLog entries for this
+            # incorrectly used the strings "old_value" and "new_value"
+            # as keys here.
+            RealmAuditLog.OLD_VALUE: old_value,
+            RealmAuditLog.NEW_VALUE: plan_type,
+        },
     )
 
-    if plan_type == Realm.PLAN_TYPE_PLUS:
-        realm.max_invites = Realm.INVITES_STANDARD_REALM_DAILY_MAX
-        realm.message_visibility_limit = None
-    elif plan_type == Realm.PLAN_TYPE_STANDARD:
-        realm.max_invites = Realm.INVITES_STANDARD_REALM_DAILY_MAX
-        realm.message_visibility_limit = None
-    elif plan_type == Realm.PLAN_TYPE_SELF_HOSTED:
-        realm.max_invites = None  # type: ignore[assignment] # https://github.com/python/mypy/issues/3004
-        realm.message_visibility_limit = None
-    elif plan_type == Realm.PLAN_TYPE_STANDARD_FREE:
-        realm.max_invites = Realm.INVITES_STANDARD_REALM_DAILY_MAX
-        realm.message_visibility_limit = None
-    elif plan_type == Realm.PLAN_TYPE_LIMITED:
-        realm.max_invites = settings.INVITES_DEFAULT_REALM_DAILY_MAX
+    realm.max_invites = get_default_max_invites_for_realm_plan_type(plan_type)
+    if plan_type == Realm.PLAN_TYPE_LIMITED:
         realm.message_visibility_limit = Realm.MESSAGE_VISIBILITY_LIMITED
     else:
-        raise AssertionError("Invalid plan type")
+        realm.message_visibility_limit = None
 
     update_first_visible_message_id(realm)
 
-    realm.save(
-        update_fields=[
-            "_max_invites",
-            "enable_spectator_access",
-            "message_visibility_limit",
-        ]
-    )
+    realm.save(update_fields=["_max_invites", "message_visibility_limit"])
 
-    event = {
-        "type": "realm",
-        "op": "update",
-        "property": "plan_type",
-        "value": plan_type,
-        "extra_data": {"upload_quota": realm.upload_quota_bytes()},
-    }
+    event = dict(
+        type="realm",
+        op="update_dict",
+        property="default",
+        data={
+            "plan_type": plan_type,
+            "upload_quota_mib": optional_bytes_to_mib(realm.upload_quota_bytes()),
+            "max_file_upload_size_mib": realm.get_max_file_upload_size_mebibytes(),
+        },
+    )
     send_event_on_commit(realm, event, active_user_ids(realm.id))
 
 
@@ -792,7 +979,7 @@ def do_send_realm_reactivation_email(realm: Realm, *, acting_user: UserProfile |
     RealmAuditLog.objects.create(
         realm=realm,
         acting_user=acting_user,
-        event_type=RealmAuditLog.REALM_REACTIVATION_EMAIL_SENT,
+        event_type=AuditLogEventType.REALM_REACTIVATION_EMAIL_SENT,
         event_time=timezone_now(),
     )
     context = {
@@ -800,6 +987,7 @@ def do_send_realm_reactivation_email(realm: Realm, *, acting_user: UserProfile |
         "realm_url": realm.url,
         "realm_name": realm.name,
         "corporate_enabled": settings.CORPORATE_ENABLED,
+        "is_demo_organization": realm.demo_organization_scheduled_deletion_date is not None,
     }
     language = realm.default_language
     send_email_to_admins(
@@ -812,13 +1000,18 @@ def do_send_realm_reactivation_email(realm: Realm, *, acting_user: UserProfile |
     )
 
 
-def do_send_realm_deactivation_email(realm: Realm, acting_user: UserProfile | None) -> None:
+def do_send_realm_deactivation_email(
+    realm: Realm, acting_user: UserProfile | None, deletion_delay_days: int | None
+) -> None:
     shared_context: dict[str, Any] = {
         "realm_name": realm.name,
+        "is_demo_organization": realm.demo_organization_scheduled_deletion_date is not None,
     }
     deactivation_time = timezone_now()
     owners = set(realm.get_human_owner_users())
     anonymous_deactivation = False
+    data_deleted = False
+    scheduled_data_deletion = None
 
     # The realm was deactivated via the deactivate_realm management command.
     if acting_user is None:
@@ -829,6 +1022,14 @@ def do_send_realm_deactivation_email(realm: Realm, acting_user: UserProfile | No
     if acting_user is not None and acting_user not in owners:
         anonymous_deactivation = True
 
+    # If realm data has been deleted or has a date set for it to be deleted,
+    # we include that information in the deactivation email to owners.
+    if deletion_delay_days is not None:
+        if deletion_delay_days == 0:
+            data_deleted = True
+        else:
+            scheduled_data_deletion = realm.scheduled_deletion_date
+
     for owner in owners:
         owner_tz = owner.timezone
         if owner_tz == "":
@@ -836,12 +1037,20 @@ def do_send_realm_deactivation_email(realm: Realm, acting_user: UserProfile | No
         local_date = deactivation_time.astimezone(
             zoneinfo.ZoneInfo(canonicalize_timezone(owner_tz))
         ).date()
+        if scheduled_data_deletion:
+            data_deletion_date = scheduled_data_deletion.astimezone(
+                zoneinfo.ZoneInfo(canonicalize_timezone(owner_tz))
+            ).date()
+        else:
+            data_deletion_date = None
 
         if anonymous_deactivation:
             context = dict(
                 acting_user=False,
                 initiated_deactivation=False,
                 event_date=local_date,
+                data_already_deleted=data_deleted,
+                scheduled_deletion_date=data_deletion_date,
                 **shared_context,
             )
         else:
@@ -851,6 +1060,8 @@ def do_send_realm_deactivation_email(realm: Realm, acting_user: UserProfile | No
                     acting_user=True,
                     initiated_deactivation=True,
                     event_date=local_date,
+                    data_already_deleted=data_deleted,
+                    scheduled_deletion_date=data_deletion_date,
                     **shared_context,
                 )
             else:
@@ -859,6 +1070,8 @@ def do_send_realm_deactivation_email(realm: Realm, acting_user: UserProfile | No
                     initiated_deactivation=False,
                     deactivating_owner=acting_user.full_name,
                     event_date=local_date,
+                    data_already_deleted=data_deleted,
+                    scheduled_deletion_date=data_deletion_date,
                     **shared_context,
                 )
 

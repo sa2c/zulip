@@ -2,18 +2,15 @@ import $ from "jquery";
 
 import render_scheduled_messages_indicator from "../templates/scheduled_messages_indicator.hbs";
 
-import * as narrow_state from "./narrow_state";
-import * as scheduled_messages from "./scheduled_messages";
-import type {ScheduledMessage} from "./scheduled_messages";
-import * as util from "./util";
+import * as narrow_state from "./narrow_state.ts";
+import * as scheduled_messages from "./scheduled_messages.ts";
+import type {ScheduledMessage} from "./scheduled_messages.ts";
+import * as util from "./util.ts";
 
 function get_scheduled_messages_matching_narrow(): ScheduledMessage[] {
-    const scheduled_messages_list = [...scheduled_messages.scheduled_messages_data.values()];
+    const scheduled_messages_list = scheduled_messages.get_all_scheduled_messages();
     const filter = narrow_state.filter();
-    const is_conversation_view =
-        filter === undefined
-            ? false
-            : filter.is_conversation_view() || filter.is_conversation_view_with_near();
+    const is_conversation_view = filter === undefined ? false : filter.is_conversation_view();
     const current_view_type = narrow_state.narrowed_to_pms() ? "private" : "stream";
 
     if (!is_conversation_view) {
@@ -37,13 +34,13 @@ function get_scheduled_messages_matching_narrow(): ScheduledMessage[] {
                 return true;
             }
         } else if (scheduled_message.type === "stream") {
-            const current_stream = narrow_state.stream_sub();
+            const current_stream_id = narrow_state.stream_id(narrow_state.filter(), true);
             const current_topic = narrow_state.topic();
-            if (current_stream === undefined || current_topic === undefined) {
+            if (current_stream_id === undefined || current_topic === undefined) {
                 return false;
             }
             const narrow_dict = {
-                stream_id: current_stream.stream_id,
+                stream_id: current_stream_id,
                 topic: current_topic,
             };
             const scheduled_message_dict = {

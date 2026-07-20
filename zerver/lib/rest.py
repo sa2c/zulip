@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable
 from functools import wraps
 from typing import Concatenate
@@ -19,6 +20,7 @@ from zerver.decorator import (
 from zerver.lib.exceptions import MissingAuthenticationError
 from zerver.lib.request import RequestNotes
 from zerver.lib.response import json_method_not_allowed
+from zerver.lib.sessions import narrow_request_user
 
 ParamT = ParamSpec("ParamT")
 METHODS = ("GET", "HEAD", "POST", "PUT", "DELETE", "PATCH")
@@ -91,6 +93,12 @@ def get_target_view_function_or_response(
     # Override requested method if magic method=??? parameter exists
     method_to_use = request.method
     if request.POST and "method" in request.POST:
+        logging.warning(
+            "Overriding HTTP method via 'method' parameter: original=%s, override=%s, client=%s",
+            request.method,
+            request.POST["method"],
+            request_notes.client_name,
+        )
         method_to_use = request.POST["method"]
 
     if method_to_use in supported_methods:
@@ -152,6 +160,11 @@ def rest_dispatch(request: HttpRequest, /, **kwargs: object) -> HttpResponse:
     # Security implications of this portion of the code are minimal,
     # as we should worst-case fail closed if we miscategorize a request.
 
+    def check_is_authenticated(request: HttpRequest) -> bool:
+        if "narrow_user_session_cache" not in view_flags:
+            return request.user.is_authenticated
+        return narrow_request_user(request).is_authenticated
+
     # for some special views (e.g. serving a file that has been
     # uploaded), we support using the same URL for web and API clients.
     if "override_api_url_scheme" in view_flags and "Authorization" in request.headers:
@@ -168,7 +181,7 @@ def rest_dispatch(request: HttpRequest, /, **kwargs: object) -> HttpResponse:
         # React Native.  See last block for rate limiting notes.
         target_function = authenticated_uploads_api_view(skip_rate_limiting=True)(target_function)
     # /json views (web client) validate with a session token (cookie)
-    elif not request.path.startswith("/api") and request.user.is_authenticated:
+    elif not request.path.startswith("/api") and check_is_authenticated(request):
         # Authenticated via sessions framework, only CSRF check needed
         auth_kwargs = {}
         if "override_api_url_scheme" in view_flags:

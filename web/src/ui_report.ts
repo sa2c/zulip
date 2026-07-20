@@ -1,9 +1,9 @@
 import $ from "jquery";
-import {z} from "zod";
+import * as z from "zod/mini";
 
-import * as channel from "./channel";
-import * as common from "./common";
-import {$t} from "./i18n";
+import * as channel from "./channel.ts";
+import * as common from "./common.ts";
+import {$t} from "./i18n.ts";
 
 /* Arguments used in the report_* functions are,
    response- response that we want to display
@@ -27,7 +27,7 @@ export function message(
         .fadeTo(0, 1);
     if (remove_after !== undefined) {
         setTimeout(() => {
-            $status_box.fadeOut(400);
+            $status_box.fadeOut(400, () => $status_box.removeClass(cls));
         }, remove_after);
     }
     $status_box.addClass("show");
@@ -68,7 +68,7 @@ export function generic_embed_error(error_html: string, remove_after?: number): 
     }
 }
 
-export function generic_row_button_error(xhr: JQuery.jqXHR, $btn: JQuery): void {
+export function generic_row_button_error(xhr: JQuery.jqXHR, $button: JQuery): void {
     let parsed;
     if (
         xhr.status >= 400 &&
@@ -76,9 +76,9 @@ export function generic_row_button_error(xhr: JQuery.jqXHR, $btn: JQuery): void 
         (parsed = z.object({msg: z.string()}).safeParse(xhr.responseJSON)).success
     ) {
         const $error = $("<p>").addClass("text-error").text(parsed.data.msg);
-        $btn.closest("td").empty().append($error);
+        $button.closest("td").empty().append($error);
     } else {
-        $btn.text($t({defaultMessage: "Failed!"}));
+        $button.text($t({defaultMessage: "Failed!"}));
     }
 }
 
@@ -91,22 +91,4 @@ export function hide_error($target: JQuery): void {
 
 export function show_error($target: JQuery): void {
     $target.addClass("show");
-}
-
-export function loading(
-    response_html: string,
-    $status_box: JQuery,
-    successfully_loaded = false,
-): void {
-    $status_box.find(".alert-content").html(response_html);
-    if (!successfully_loaded) {
-        $status_box.removeClass(common.status_classes).addClass("alert-loading").stop(true);
-    } else {
-        $status_box.removeClass(common.status_classes).addClass("alert-success").stop(true);
-        setTimeout(() => {
-            $status_box.removeClass("show");
-        }, 2500);
-    }
-
-    $status_box.addClass("show");
 }

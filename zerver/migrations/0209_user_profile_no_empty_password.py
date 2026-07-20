@@ -11,7 +11,7 @@ from django.db.migrations.state import StateApps
 from django.utils.timezone import now as timezone_now
 
 from zerver.lib.cache import cache_delete, user_profile_by_api_key_cache_key
-from zerver.lib.queue import queue_json_publish
+from zerver.lib.queue import queue_json_publish_rollback_unsafe
 from zerver.lib.utils import generate_api_key
 
 
@@ -170,7 +170,7 @@ def ensure_no_empty_passwords(apps: StateApps, schema_editor: BaseDatabaseSchema
     # change a bot into a human user if they really wanted to.  And
     # there's essentially no harm in rewriting state for a deactivated
     # account.
-    for user_profile in UserProfile.objects.all():
+    for user_profile in UserProfile.objects.all().iterator():
         event_time = timezone_now()
         if check_password("", user_profile.password):
             # This user currently has the empty string as their password.
@@ -223,7 +223,7 @@ def reset_user_api_key(user_profile: Any) -> None:
     # we can just write to the queue processor that handles sending
     # those notices to the push notifications bouncer service.
     event = {"type": "clear_push_device_tokens", "user_profile_id": user_profile.id}
-    queue_json_publish("deferred_work", event)
+    queue_json_publish_rollback_unsafe("deferred_work", event)
 
 
 class Migration(migrations.Migration):

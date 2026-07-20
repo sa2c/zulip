@@ -5,6 +5,7 @@ from django.utils.timezone import now as timezone_now
 from zerver.lib.exceptions import ValidationFailureError
 from zerver.lib.types import RealmPlaygroundDict
 from zerver.models import Realm, RealmAuditLog, RealmPlayground, UserProfile
+from zerver.models.realm_audit_logs import AuditLogEventType
 from zerver.models.realm_playgrounds import get_realm_playgrounds
 from zerver.models.users import active_user_ids
 from zerver.tornado.django_api import send_event_on_commit
@@ -30,7 +31,7 @@ def check_add_realm_playground(
         pygments_language=pygments_language,
         url_template=url_template,
     )
-    # The additional validations using url_template_validaton
+    # The additional validations using url_template_validation
     # check_pygments_language, etc are included in full_clean.
     # Because we want to avoid raising ValidationError from this check_*
     # function, we do error handling here to turn it into a JsonableError.
@@ -43,7 +44,7 @@ def check_add_realm_playground(
     RealmAuditLog.objects.create(
         realm=realm,
         acting_user=acting_user,
-        event_type=RealmAuditLog.REALM_PLAYGROUND_ADDED,
+        event_type=AuditLogEventType.REALM_PLAYGROUND_ADDED,
         event_time=timezone_now(),
         extra_data={
             "realm_playgrounds": realm_playgrounds,
@@ -75,7 +76,7 @@ def do_remove_realm_playground(
     RealmAuditLog.objects.create(
         realm=realm,
         acting_user=acting_user,
-        event_type=RealmAuditLog.REALM_PLAYGROUND_REMOVED,
+        event_type=AuditLogEventType.REALM_PLAYGROUND_REMOVED,
         event_time=timezone_now(),
         extra_data={
             "realm_playgrounds": realm_playgrounds,

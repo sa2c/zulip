@@ -1,28 +1,68 @@
 import type {Meta, UppyFile} from "@uppy/core";
 import {Uppy} from "@uppy/core";
-import XHRUpload from "@uppy/xhr-upload";
+import Tus, {type TusBody} from "@uppy/tus";
+import {getSafeFileId} from "@uppy/utils";
 import $ from "jquery";
 import assert from "minimalistic-assert";
-import {z} from "zod";
+import * as z from "zod/mini";
 
 import render_upload_banner from "../templates/compose_banner/upload_banner.hbs";
 
-import * as blueslip from "./blueslip";
-import * as compose_actions from "./compose_actions";
-import * as compose_banner from "./compose_banner";
-import * as compose_reply from "./compose_reply";
-import * as compose_state from "./compose_state";
-import * as compose_ui from "./compose_ui";
-import * as compose_validate from "./compose_validate";
-import {csrf_token} from "./csrf";
-import {$t} from "./i18n";
-import * as message_lists from "./message_lists";
-import * as rows from "./rows";
-import {realm} from "./state_data";
+import * as blueslip from "./blueslip.ts";
+import * as compose_actions from "./compose_actions.ts";
+import * as compose_banner from "./compose_banner.ts";
+import * as compose_recipient from "./compose_recipient.ts";
+import * as compose_reply from "./compose_reply.ts";
+import * as compose_state from "./compose_state.ts";
+import * as compose_ui from "./compose_ui.ts";
+import * as compose_validate from "./compose_validate.ts";
+import {$t} from "./i18n.ts";
+import * as message_lists from "./message_lists.ts";
+import * as rows from "./rows.ts";
+import {realm} from "./state_data.ts";
+
+type ZulipMeta = {
+    zulip_url: string;
+} & Meta;
 
 let drag_drop_img: HTMLElement | null = null;
-let compose_upload_object: Uppy;
-const upload_objects_by_message_edit_row = new Map<number, Uppy>();
+let compose_upload_object: Uppy<ZulipMeta, TusBody>;
+const upload_objects_by_message_edit_row = new Map<number, Uppy<ZulipMeta, TusBody>>();
+
+// This list should be kept identical to the one defined as
+// THUMBNAIL_ACCEPT_IMAGE_TYPES in zerver/lib/thumbnail.py
+// "Supported" in this context means _by the server_ -- uploaded
+// images are transcoded into more widely supported formats by the server.
+export const SUPPORTED_IMAGE_TYPES = new Set([
+    "image/avif",
+    "image/gif",
+    "image/heic",
+    "image/jpeg",
+    "image/png",
+    "image/tiff",
+    "image/webp",
+]);
+
+export function is_supported_image_type(file_type: string): boolean {
+    return SUPPORTED_IMAGE_TYPES.has(file_type);
+}
+
+// This list should be kept identical to the one defined as
+// AUDIO_INLINE_MIME_TYPES defined in zerver/lib/mime_types.py
+const SUPPORTED_AUDIO_TYPES = new Set([
+    "audio/aac",
+    "audio/flac",
+    "audio/mp4",
+    "audio/mpeg",
+    "audio/vnd.wave",
+    "audio/wav",
+    "audio/webm",
+    "audio/x-wav",
+]);
+
+function is_supported_audio_type(file_type: string): boolean {
+    return SUPPORTED_AUDIO_TYPES.has(file_type);
+}
 
 export function compose_upload_cancel(): void {
     compose_upload_object.cancelAll();
@@ -33,9 +73,45 @@ export function feature_check(): XMLHttpRequestUpload {
     return window.XMLHttpRequest && new window.XMLHttpRequest().upload;
 }
 
-export function get_translated_status(file: File | UppyFile<Meta, Record<string, never>>): string {
-    const status = $t({defaultMessage: "Uploading {filename}…"}, {filename: file.name});
+export function get_translated_status(filename: string): string {
+    const status = $t({defaultMessage: "Uploading {filename}…"}, {filename});
     return "[" + status + "]()";
+}
+
+function contains_folder(data_transfer: DataTransfer): boolean {
+    if (!data_transfer.items) {
+        return false;
+    }
+
+    for (const item of data_transfer.items) {
+        if (item.kind !== "file") {
+            continue;
+        }
+
+        // https://developer.mozilla.org/en-US/docs/Web/API/DataTransferItem/webkitGetAsEntry
+        // Note: This function is implemented as webkitGetAsEntry() in non-WebKit
+        // browsers including Firefox at this time; it may be renamed to getAsEntry()
+        // in the future, so you should code defensively, looking for both.
+        // @ts-expect-error -- getAsEntry/webkitGetAsEntry not in lib.dom.d.ts yet
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call
+        const entry = item.getAsEntry?.() ?? item.webkitGetAsEntry?.();
+
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+        if (entry?.isDirectory) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function show_folder_upload_error(config: Config): void {
+    show_error_message(
+        config,
+        $t({
+            defaultMessage: "Folders can't be uploaded. Instead, please upload the files you need.",
+        }),
+    );
 }
 
 type Config = ({mode: "compose"} | {mode: "edit"; row: number}) & {
@@ -126,15 +202,35 @@ export function edit_config(row: number): Config {
     };
 }
 
-export function hide_upload_banner(uppy: Uppy, config: Config, file_id: string): void {
-    config.upload_banner(file_id).remove();
-    if (uppy.getFiles().length === 0) {
+export let hide_upload_banner = (
+    uppy: Uppy<ZulipMeta, TusBody>,
+    config: Config,
+    file_id: string,
+    delay = 0,
+): void => {
+    if (delay > 0) {
+        setTimeout(() => {
+            config.upload_banner(file_id).remove();
+        }, delay);
+    } else {
+        config.upload_banner(file_id).remove();
+    }
+
+    // Allow sending the message if all uploads are complete or cancelled.
+    if (
+        uppy.getFiles().every((e) => e.progress.uploadComplete) ||
+        Object.keys(uppy.getState().currentUploads).length === 0
+    ) {
         if (config.mode === "compose") {
             compose_validate.set_upload_in_progress(false);
         } else {
             config.send_button().prop("disabled", false);
         }
     }
+};
+
+export function rewire_hide_upload_banner(value: typeof hide_upload_banner): void {
+    hide_upload_banner = value;
 }
 
 function add_upload_banner(
@@ -173,7 +269,11 @@ export function show_error_message(
     }
 }
 
-export function upload_files(uppy: Uppy, config: Config, files: File[] | FileList): void {
+export let upload_files = (
+    uppy: Uppy<ZulipMeta, TusBody>,
+    config: Config,
+    files: File[] | FileList,
+): void => {
     if (files.length === 0) {
         return;
     }
@@ -194,7 +294,7 @@ export function upload_files(uppy: Uppy, config: Config, files: File[] | FileLis
     // We implement this transition through triggering a click on the
     // toggle button to take advantage of the existing plumbing for
     // handling the compose and edit UIs.
-    if (config.markdown_preview_hide_button().is(":visible")) {
+    if (config.markdown_preview_hide_button().css("display") !== "none") {
         config.markdown_preview_hide_button().trigger("click");
     }
 
@@ -202,7 +302,7 @@ export function upload_files(uppy: Uppy, config: Config, files: File[] | FileLis
         let file_id;
         try {
             compose_ui.insert_syntax_and_focus(
-                get_translated_status(file),
+                get_translated_status(file.name),
                 config.textarea(),
                 "block",
                 1,
@@ -231,22 +331,108 @@ export function upload_files(uppy: Uppy, config: Config, files: File[] | FileLis
             file_id,
             true,
         );
-        config.upload_banner_cancel_button(file_id).one("click", () => {
-            compose_ui.replace_syntax(get_translated_status(file), "", config.textarea());
+        // eslint-disable-next-line @typescript-eslint/no-loop-func
+        config.upload_banner_cancel_button(file_id).on("click", () => {
+            compose_ui.set_prevent_next_spinner(true);
+            compose_ui.replace_syntax(get_translated_status(file.name), "", config.textarea());
+            compose_ui.set_prevent_next_spinner(false);
             compose_ui.autosize_textarea(config.textarea());
             config.textarea().trigger("focus");
 
             uppy.removeFile(file_id);
             hide_upload_banner(uppy, config, file_id);
         });
-        config.upload_banner_hide_button(file_id).one("click", () => {
+        // eslint-disable-next-line @typescript-eslint/no-loop-func
+        config.upload_banner_hide_button(file_id).on("click", () => {
             hide_upload_banner(uppy, config, file_id);
         });
     }
+};
+
+export function rewire_upload_files(value: typeof upload_files): void {
+    upload_files = value;
 }
 
-export function setup_upload(config: Config): Uppy {
-    const uppy = new Uppy({
+export function upload_pasted_file(textarea: HTMLTextAreaElement, pasted_file: File): void {
+    if (textarea.id === "compose-textarea") {
+        upload_files(compose_upload_object, compose_config, [pasted_file]);
+        return;
+    }
+    const row = rows.get_message_id(textarea);
+    const edit_uploader = upload_objects_by_message_edit_row.get(row);
+    assert(edit_uploader !== undefined);
+    upload_files(edit_uploader, edit_config(row), [pasted_file]);
+}
+
+// Borrowed from tus-js-client code at
+// https://github.com/tus/tus-js-client/blob/ca63ba254ea8766438b9d422f6f94284911f1fa5/lib/index.d.ts#L79
+// The library does not export this type, hence requiring a copy here.
+type PreviousUpload = {
+    size: number | null;
+    metadata: Record<string, string>;
+    creationTime: string;
+    urlStorageKey: string;
+    uploadUrl: string | null;
+    parallelUploadUrls: string[] | null;
+};
+
+// Parts of it are inspired from WebStorageUrlStorage at
+// https://github.com/tus/tus-js-client/blob/ca63ba254ea8766438b9d422f6f94284911f1fa5/lib/browser/urlStorage.js#L27
+// While there are no async actions happening in any of the methods in
+// this class, UrlStorage interface for tus-js-client requires a Promise
+// to be returned for each of these methods.
+class InMemoryUrlStorage {
+    urlStorage: Map<string, PreviousUpload>;
+
+    constructor() {
+        this.urlStorage = new Map();
+    }
+
+    async findAllUploads(): Promise<PreviousUpload[]> {
+        return await Promise.resolve([...this.urlStorage.values()]);
+    }
+
+    async findUploadsByFingerprint(fingerprint: string): Promise<PreviousUpload[]> {
+        const results = [];
+
+        for (const [key, value] of this.urlStorage) {
+            if (!key.startsWith(`${fingerprint}::`)) {
+                continue;
+            }
+            results.push(value);
+        }
+
+        return await Promise.resolve(results);
+    }
+
+    async removeUpload(urlStorageKey: string): Promise<void> {
+        this.urlStorage.delete(urlStorageKey);
+        await Promise.resolve();
+    }
+
+    async addUpload(fingerprint: string, upload: PreviousUpload): Promise<string> {
+        const id = Math.round(Math.random() * 1e12);
+        const key = `${fingerprint}::${id}`;
+
+        upload.urlStorageKey = key;
+        this.urlStorage.set(key, upload);
+        return await Promise.resolve(key);
+    }
+}
+
+const zulip_upload_response_schema = z.object({
+    url: z.string(),
+    filename: z.string(),
+});
+
+// Wrapped to work around https://github.com/transloadit/uppy/issues/6033
+const get_safe_file_id: <M extends Meta>(
+    file: UppyFile<M, TusBody>,
+    instance_id: string,
+) => string = getSafeFileId;
+
+export function setup_upload(config: Config): Uppy<ZulipMeta, TusBody> {
+    const uppy = new Uppy<ZulipMeta, TusBody>({
         debug: false,
         autoProceed: true,
         restrictions: {
@@ -265,24 +451,39 @@ export function setup_upload(config: Config): Uppy {
             },
             pluralize: (_n) => 0,
         },
+        onBeforeFileAdded(file, files) {
+            const file_id = get_safe_file_id(file, uppy.getID());
+
+            if (files[file_id]) {
+                // We have a duplicate file upload on our hands.
+                // Since we don't get a response with a body back from
+                // the server, pull the values that we got the last
+                // time around.
+                file.meta.zulip_url = files[file_id].meta.zulip_url!;
+                file.name = files[file_id].name!;
+            }
+
+            return file;
+        }, // Allow duplicate file uploads
     });
-    uppy.setMeta({
-        csrfmiddlewaretoken: csrf_token,
-    });
-    uppy.use(XHRUpload, {
-        endpoint: "/json/user_uploads",
-        formData: true,
-        fieldName: "file",
+    uppy.use(Tus, {
+        // https://uppy.io/docs/tus/#options
+        endpoint: "/api/v1/tus/",
+        // The tus-js-client fingerprinting feature stores metadata on
+        // previously uploaded files by default in browser local storage.
+        // Since these local storage entries are never garbage-collected,
+        // they can be accessed via the browser console even after
+        // logging out, and contain some metadata about previously
+        // uploaded files, which seems like a security risk for
+        // using Zulip on a public computer.
+
+        // We use our own implementation of url storage that saves urls
+        // in memory instead. We won't be able to retain this history
+        // across reloads unlike local storage, which is a tradeoff we
+        // are willing to make.
+        urlStorage: new InMemoryUrlStorage(),
         // Number of concurrent uploads
         limit: 5,
-        locale: {
-            strings: {
-                uploadStalled: $t({
-                    defaultMessage: "Upload stalled for %'{seconds}' seconds, aborting.",
-                }),
-            },
-            pluralize: (_n) => 0,
-        },
     });
 
     if (config.mode === "edit") {
@@ -329,6 +530,17 @@ export function setup_upload(config: Config): Uppy {
         event.stopPropagation();
         assert(event.originalEvent !== undefined);
         assert(event.originalEvent.dataTransfer !== null);
+
+        if (contains_folder(event.originalEvent.dataTransfer)) {
+            setTimeout(() => {
+                if ($("#compose_select_recipient_widget").hasClass("widget-open")) {
+                    compose_recipient.toggle_compose_recipient_dropdown();
+                }
+            }, 0);
+            show_folder_upload_error(config);
+            return;
+        }
+
         const files = event.originalEvent.dataTransfer.files;
         if (config.mode === "compose" && !compose_state.composing()) {
             compose_reply.respond_to_message({
@@ -372,16 +584,58 @@ export function setup_upload(config: Config): Uppy {
 
     uppy.on("upload-success", (file, response) => {
         assert(file !== undefined);
-        const {url} = z.object({url: z.string().optional()}).parse(response.body);
-        if (url === undefined) {
+        if (response.status !== 200) {
+            blueslip.warn("Tus server returned an error, expected a 200 OK response code.", {
+                response,
+            });
             return;
         }
-        const split_url = url.split("/");
-        const filename = split_url.at(-1);
-        const syntax_to_insert = "[" + filename + "](" + url + ")";
+
+        // We do not receive response text if the file has already
+        // been uploaded. For an existing upload, TUS js client sends
+        // a HEAD request to the TUS server to check `Upload-Offset`
+        // and if some part of the upload is left to be done -- and
+        // when the upload offset is the same as the file length, it
+        // will not send any further requests, meaning we will not
+        // have a response body.  See the beforeUpload hook, above.
+        if (response.body!.xhr.responseText === "") {
+            if (!file.meta.zulip_url) {
+                blueslip.warn("No zulip_url retrieved from previous upload", {file});
+                return;
+            }
+        } else {
+            try {
+                const upload_response = zulip_upload_response_schema.parse(
+                    JSON.parse(response.body!.xhr.responseText),
+                );
+                uppy.setFileState(file.id, {
+                    name: upload_response.filename,
+                });
+                uppy.setFileMeta(file.id, {
+                    zulip_url: upload_response.url,
+                });
+                file = uppy.getFile(file.id);
+            } catch {
+                blueslip.warn("Invalid JSON response from the tus server", {
+                    body: response.body!.xhr.responseText,
+                });
+                return;
+            }
+        }
+
+        const filtered_filename = file.name.replaceAll("[", "").replaceAll("]", "");
+        let syntax_to_insert = "[" + filtered_filename + "](" + file.meta.zulip_url + ")";
+        if (is_supported_image_type(file.type) || is_supported_audio_type(file.type)) {
+            syntax_to_insert = "!" + syntax_to_insert;
+        }
+
         const $text_area = config.textarea();
         const replacement_successful = compose_ui.replace_syntax(
-            get_translated_status(file),
+            // We need to replace the original file name, and not the
+            // possibly modified filename returned in the response by
+            // the server. file.meta.name remains unchanged by us
+            // unlike file.name
+            get_translated_status(file.meta.name),
             syntax_to_insert,
             $text_area,
         );
@@ -391,14 +645,9 @@ export function setup_upload(config: Config): Uppy {
 
         compose_ui.autosize_textarea($text_area);
 
-        // The uploaded files should be removed since uppy doesn't allow files in the store
-        // to be re-uploaded again.
-        uppy.removeFile(file.id);
         // Hide upload status after waiting 100ms after the 1s transition to 100%
         // so that the user can see the progress bar at 100%.
-        setTimeout(() => {
-            hide_upload_banner(uppy, config, file.id);
-        }, 1100);
+        hide_upload_banner(uppy, config, file.id, 1100);
     });
 
     uppy.on("info-visible", () => {
@@ -447,14 +696,20 @@ export function setup_upload(config: Config): Uppy {
         // Hide the upload status banner on error so only the error banner shows
         hide_upload_banner(uppy, config, file.id);
         show_error_message(config, message, file.id);
-        compose_ui.replace_syntax(get_translated_status(file), "", config.textarea());
+        compose_ui.replace_syntax(get_translated_status(file.name), "", config.textarea());
         compose_ui.autosize_textarea(config.textarea());
     });
 
     uppy.on("restriction-failed", (file) => {
         assert(file !== undefined);
-        compose_ui.replace_syntax(get_translated_status(file), "", config.textarea());
+        compose_ui.replace_syntax(get_translated_status(file.name), "", config.textarea());
         compose_ui.autosize_textarea(config.textarea());
+    });
+
+    uppy.on("cancel-all", () => {
+        if (config.mode === "compose") {
+            compose_validate.set_upload_in_progress(false);
+        }
     });
 
     return uppy;
@@ -526,6 +781,37 @@ export function initialize(): void {
         const $drag_drop_edit_containers = $(".message_edit_form form");
         assert(event.originalEvent !== undefined);
         assert(event.originalEvent.dataTransfer !== null);
+
+        if (contains_folder(event.originalEvent.dataTransfer)) {
+            const was_dropdown_open = $("#compose_select_recipient_widget").hasClass("widget-open");
+
+            if (!compose_state.composing()) {
+                if (message_lists.current?.selected_message()) {
+                    compose_reply.respond_to_message({
+                        trigger: "drag_drop_file",
+                        keep_composebox_empty: true,
+                    });
+                } else {
+                    compose_actions.start({
+                        message_type: "stream",
+                        trigger: "drag_drop_file",
+                        keep_composebox_empty: true,
+                    });
+                }
+            }
+
+            if (was_dropdown_open) {
+                setTimeout(() => {
+                    if ($("#compose_select_recipient_widget").hasClass("widget-open")) {
+                        compose_recipient.toggle_compose_recipient_dropdown();
+                    }
+                }, 0);
+            }
+
+            show_folder_upload_error(compose_config);
+            return;
+        }
+
         const files = event.originalEvent.dataTransfer.files;
         const $last_drag_drop_edit_container = $drag_drop_edit_containers.last();
 
@@ -541,7 +827,7 @@ export function initialize(): void {
             // A message edit box is open; drop there.
             const row_id = rows.get_message_id($last_drag_drop_edit_container[0]);
             const $drag_drop_container = edit_config(row_id).drag_drop_container();
-            if (!$drag_drop_container.closest("html").length) {
+            if ($drag_drop_container.closest("html").length === 0) {
                 return;
             }
             const edit_upload_object = upload_objects_by_message_edit_row.get(row_id);

@@ -3,6 +3,7 @@
 import argparse
 import contextlib
 import glob
+import multiprocessing
 import os
 import shlex
 import subprocess
@@ -16,6 +17,8 @@ if TYPE_CHECKING:
     # This script does not have access to the zerver module during runtime.
     # We can only import this when type checking.
     from zerver.lib.test_runner import Runner
+
+multiprocessing.set_start_method("fork")
 
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(os.path.dirname(TOOLS_DIR))
@@ -54,11 +57,14 @@ not_yet_fully_covered = [
     # TODO: This is a work in progress and therefore without
     # tests yet.
     "corporate/views/installation_activity.py",
+    "corporate/views/plan_activity.py",
     "corporate/views/realm_activity.py",
     "corporate/views/remote_billing_page.py",
+    "corporate/views/audit_logs.py",
     "corporate/views/support.py",
     "corporate/lib/activity.py",
     "corporate/lib/remote_billing_util.py",
+    "corporate/lib/billing_management.py",
     # Major lib files should have 100% coverage
     "zerver/lib/addressee.py",
     "zerver/lib/markdown/__init__.py",
@@ -70,19 +76,15 @@ not_yet_fully_covered = [
     # Markdown sub-libs should have full coverage too; a lot are really close
     "zerver/lib/markdown/api_arguments_table_generator.py",
     "zerver/lib/markdown/fenced_code.py",
-    "zerver/lib/markdown/help_relative_links.py",
     "zerver/lib/markdown/nested_code_blocks.py",
     # Workers should get full coverage; many have it already
     "zerver/worker/deferred_work.py",
-    "zerver/worker/email_senders.py",
-    "zerver/worker/invites.py",
     "zerver/worker/missedmessage_emails.py",
     # Worker-associated files; lower-priority to get testing on
     "zerver/worker/base.py",
     "zerver/worker/queue_processors.py",
     "zerver/worker/test.py",
     # Other lib files that ideally would coverage, but aren't sorted
-    "zerver/filters.py",
     "zerver/middleware.py",
     "zerver/lib/bot_lib.py",
     "zerver/lib/camo.py",
@@ -95,19 +97,20 @@ not_yet_fully_covered = [
     "zerver/lib/queue.py",
     "zerver/lib/sqlalchemy_utils.py",
     "zerver/lib/storage.py",
-    "zerver/lib/zephyr.py",
     "zerver/lib/templates.py",
     # Low priority for coverage
-    "zerver/lib/ccache.py",
     "zerver/lib/generate_test_data.py",
     "zerver/lib/server_initialization.py",
     "zerver/lib/test_fixtures.py",
     "zerver/lib/test_runner.py",
     "zerver/lib/test_console_output.py",
+    "zerver/lib/zstd_level9.py",
     "zerver/openapi/curl_param_value_generators.py",
     "zerver/openapi/javascript_examples.py",
     "zerver/openapi/python_examples.py",
     "zerver/openapi/test_curl_examples.py",
+    # Helper for tooling; doesn't need coverage
+    "zerver/openapi/merge_api_changelogs.py",
     # Tornado should ideally have full coverage, but we're not there.
     "zerver/tornado/descriptors.py",
     "zerver/tornado/django_api.py",
@@ -122,9 +125,7 @@ not_yet_fully_covered = [
     "zerver/data_import/import_util.py",
     # Webhook integrations with incomplete coverage
     "zerver/webhooks/greenhouse/view.py",
-    "zerver/webhooks/jira/view.py",
     "zerver/webhooks/teamcity/view.py",
-    "zerver/webhooks/travis/view.py",
     "zerver/webhooks/zapier/view.py",
     # This is hard to get test coverage for, and low value to do so
     "zerver/views/sentry.py",
@@ -211,10 +212,10 @@ def main() -> None:
     test-backend zerver.tests.test_markdown # run all tests in a test module
     test-backend zerver/tests/test_markdown.py # run all tests in a test module
     test-backend test_markdown # run all tests in a test module
-    test-backend zerver.tests.test_markdown.MarkdownTest # run all tests in a test class
-    test-backend MarkdownTest # run all tests in a test class
-    test-backend zerver.tests.test_markdown.MarkdownTest.test_inline_youtube # run a single test
-    test-backend MarkdownTest.test_inline_youtube # run a single test"""
+    test-backend zerver.tests.test_markdown.MarkdownEmbedsTest # run all tests in a test class
+    test-backend MarkdownEmbedsTest # run all tests in a test class
+    test-backend zerver.tests.test_markdown.MarkdownEmbedsTest.test_inline_youtube # run a single test
+    test-backend MarkdownEmbedsTest.test_inline_youtube # run a single test"""
 
     parser = argparse.ArgumentParser(
         description=usage, formatter_class=argparse.RawTextHelpFormatter
@@ -277,6 +278,11 @@ def main() -> None:
         "--generate-stripe-fixtures",
         action="store_true",
         help="Generate Stripe test fixtures by making requests to Stripe test network",
+    )
+    parser.add_argument(
+        "--generate-llm-fixtures",
+        action="store_true",
+        help="Generate LLM test fixtures using credentials in zproject/dev-secrets.conf",
     )
     parser.add_argument("args", nargs="*")
     parser.add_argument(
@@ -382,7 +388,19 @@ def main() -> None:
                 "corporate.tests.test_stripe",
             ]
             full_suite = False
+        print("-- Forcing serial mode for generating stripe fixtures.", flush=True)
+        default_parallel = 1
         os.environ["GENERATE_STRIPE_FIXTURES"] = "1"
+
+    if options.generate_llm_fixtures:
+        if full_suite:
+            suites = [
+                "zerver.tests.test_message_summary",
+            ]
+            full_suite = False
+        print("-- Forcing serial mode for generating LLM fixtures.", flush=True)
+        default_parallel = 1
+        os.environ["GENERATE_LLM_FIXTURES"] = "1"
 
     assert_provisioning_status_ok(options.skip_provision_check)
 

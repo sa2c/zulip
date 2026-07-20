@@ -16,8 +16,8 @@ Zulip development on hold. However, because they loved Zulip's
 topic-based threading experience, Zulip's early customers [continued
 using Zulip all through that time](/case-studies/recurse-center/).
 
-> “We strongly prefer Zulip to other options for several reasons – its message
-> threading being a key one.”
+> We strongly prefer Zulip to other options for several reasons – its message
+> threading being a key one.
 >
 > — [Nick Bergson-Shilcock](https://github.com/nicholasbs), Recurse Center
 > [co-founder and CEO](https://www.recurse.com/team), September 2015
@@ -129,11 +129,21 @@ badge](https://www.capterra.com/p/197945/Zulip/).
 
 ## Press highlights
 
+- June 2025: Zulip's head of product is interviewed about how we’ve built a
+  welcoming open-source community around Zulip [on the Business of Open Source
+  podcast](https://open.spotify.com/episode/3KMLGk4buv8zfDxTjVnChw).
+
+- September 2024: An in-depth interview with Zulip’s head of product [on The
+  Changelog podcast](https://changelog.com/podcast/607): *“We talk about Zulip’s
+  origins, how it’s open source, the way it’s led, no VC funding, what makes it
+  different/better, how you can self-host it or use their cloud, moving to
+  Zulip, contributing and being a part of the community… all the things.”*
+
 - June 2024: An in-depth [review of
   Zulip](https://www.hostingadvice.com/blog/emerging-open-source-team-chat-app-set-to-rival-slack/)
   is published on [HostingAdvice.com](https://www.hostingadvice.com/).
 
-> "An excellent solution for teams collaborating across different time zones."
+> An excellent solution for teams collaborating across different time zones.
 >
 > — [Zulip
 > review](https://www.hostingadvice.com/blog/emerging-open-source-team-chat-app-set-to-rival-slack/)
@@ -161,10 +171,10 @@ badge](https://www.capterra.com/p/197945/Zulip/).
   Zulip](https://www.theregister.com/2021/07/28/zulip_open_source_chat_collaboration_software/)
   is published in *[The Register](https://www.theregister.com)*.
 
-> “In fact now it seems strange to me to just fire off messages in Slack with no
+> In fact now it seems strange to me to just fire off messages in Slack with no
 > subject – that's chaos, madness. The genius of subject lines is that you can
 > quickly and easily catch up on the messages you missed in your off-hours...
-> This feature alone saves me hours a week.”
+> This feature alone saves me hours a week.
 >
 > — [Zulip
 > review](https://www.theregister.com/2021/07/28/zulip_open_source_chat_collaboration_software/)
@@ -177,11 +187,11 @@ badge](https://www.capterra.com/p/197945/Zulip/).
   Zulip earns mentions in Quanta Magazine articles about the [formalization of
   mathematics](/case-studies/lean/).
 
-> “Every day, dozens of like-minded mathematicians gather on an online forum
-> called Zulip to build what they believe is the future of their field.”
+> Every day, dozens of like-minded mathematicians gather on an online forum
+> called Zulip to build what they believe is the future of their field.
 >
 > — *Quanta Magazine*, [“Building the Mathematical Library of the
-> Future“](https://www.quantamagazine.org/building-the-mathematical-library-of-the-future-20201001/)
+> Future”](https://www.quantamagazine.org/building-the-mathematical-library-of-the-future-20201001/)
 
 - November 2020: An interview with Tim Abbott is [featured in Linux
   Format](https://linuxformat.com/archives?issue=269).
@@ -196,6 +206,32 @@ badge](https://www.capterra.com/p/197945/Zulip/).
   [Podcast.__init__](https://www.pythonpodcast.com/about/).
 
 ## Major server releases and product announcements
+
+- August 2025: [Zulip Server 11.0
+  released](https://blog.zulip.com/2025/08/13/zulip-11-0-released/), with over
+  3300 new commits. 76 people contributed commits to Zulip since the 10.0
+  release.
+
+- June 2025: Zulip’s next-generation mobile app for Android and iOS, built on
+  Flutter,
+  [becomes](https://blog.zulip.com/2025/06/17/flutter-mobile-app-launched/) the
+  official mobile app.
+
+- March 2025: [Zulip Server 10.0
+  released](https://blog.zulip.com/2025/03/20/zulip-10-0-released/), with over
+  5200 new commits. 121 people contributed commits to Zulip since the 9.0
+  release.
+
+- March 2025: Zulip
+  [announces](https://blog.zulip.com/2025/03/20/flexible-permissions-management/)
+  a new flexible system for permissions management. Zulip users can now grant
+  permissions across the app to any combination of roles, groups, and individual
+  users.
+
+- July 2024: [Zulip Server 9.0
+  released](https://blog.zulip.com/2024/07/25/zulip-9-0-released/), with over
+  5300 new commits. 124 people contributed commits to Zulip since the 8.0
+  release.
 
 - December 2023: [Zulip Server 8.0
   released](https://blog.zulip.com/2023/12/15/zulip-8-0-released/), with over
@@ -229,9 +265,9 @@ badge](https://www.capterra.com/p/197945/Zulip/).
   [launches](https://blog.zulip.com/2021/07/26/zulip-for-education-launch/) a
   dedicated [Zulip for Education](/for/education/) offering.
 
-> “Zulip has the best user experience of all the chat apps I’ve tried. With the
+> Zulip has the best user experience of all the chat apps I’ve tried. With the
 > discussion organized by topic within each channel, Zulip is the only app that
-> makes hundreds of conversations manageable.”
+> makes hundreds of conversations manageable.
 >
 > — [Tobias Lasser](https://ciip.in.tum.de/people/lasser.html), lecturer at the
 > Technical University of Munich Department of Informatics [[customer
@@ -241,14 +277,14 @@ badge](https://www.capterra.com/p/197945/Zulip/).
   released](https://blog.zulip.com/2021/05/13/zulip-4-0-released/), with over 4300
   new commits by 137 contributors.
 
-> “This has been an unusually long release cycle, because I took a few months off
+> This has been an unusually long release cycle, because I took a few months off
 > work on Zulip to welcome my new daughter Zoe. Coming back to work was a great
 > stress-test of Zulip’s asynchronous model: I received over 20,000 messages in
 > chat.zulip.org during my paternity leave. I really enjoyed reading everything
 > and replying to the hundreds of topics where I had something to contribute or
 > someone to thank. Systematically reading months of history would have been
-> impossible with any other tool!”
-
+> impossible with any other tool!
+>
 > —Tim Abbott, Zulip founder and lead developer, [Zulip 4.0 release blog
 > post](https://blog.zulip.com/2021/05/13/zulip-4-0-released/)
 

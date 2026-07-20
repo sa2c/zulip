@@ -4,15 +4,18 @@ import assert from "minimalistic-assert";
 import render_empty_list_widget_for_list from "../templates/empty_list_widget_for_list.hbs";
 import render_empty_list_widget_for_table from "../templates/empty_list_widget_for_table.hbs";
 
-import * as blueslip from "./blueslip";
-import * as scroll_util from "./scroll_util";
+import * as blueslip from "./blueslip.ts";
+import * as scroll_util from "./scroll_util.ts";
 
 type SortingFunction<T> = (a: T, b: T) => number;
 
 type ListWidgetMeta<Key, Item = Key> = {
     sorting_function: SortingFunction<Item> | null;
+    applied_sorting_functions: [SortingFunction<Item>, boolean][]; // This is used to keep track of the sorting functions applied.
     sorting_functions: Map<string, SortingFunction<Item>>;
+    sort_by_filter_value?: (items: Item[], filter_value: string) => Item[];
     filter_value: string;
+    has_active_filters: boolean;
     offset: number;
     list: Key[];
     filtered_list: Item[];
@@ -25,6 +28,7 @@ type ListWidgetMeta<Key, Item = Key> = {
 type ListWidgetFilterOpts<Item> = {
     $element?: JQuery<HTMLInputElement>;
     onupdate?: () => void;
+    is_active?: () => boolean;
 } & (
     | {
           predicate: (item: Item, value: string) => boolean;
@@ -40,13 +44,17 @@ type ListWidgetOpts<Key, Item = Key> = {
     name?: string;
     get_item: (key: Key) => Item;
     modifier_html: (item: Item, filter_value: string) => string;
-    init_sort?: string | SortingFunction<Item>;
+    init_sort?: string | string[] | SortingFunction<Item>;
     initially_descending_sort?: boolean;
     html_selector?: (item: Item) => JQuery;
     callback_after_render?: () => void;
     post_scroll__pre_render_callback?: () => void;
     get_min_load_count?: (rendered_count: number, load_count: number) => number;
     is_scroll_position_for_render?: () => boolean;
+    render_empty_list_widget_for_table?: (context: {
+        empty_list_message: string;
+        column_count: number;
+    }) => string;
     filter?: ListWidgetFilterOpts<Item>;
     multiselect?: {
         selected_items: Key[];
@@ -54,6 +62,7 @@ type ListWidgetOpts<Key, Item = Key> = {
     sort_fields?: Record<string, SortingFunction<Item>>;
     $simplebar_container: JQuery;
     $parent_container?: JQuery;
+    sort_by_filter_value?: ((items: Item[], filter_value: string) => Item[]) | undefined;
 };
 
 type BaseListWidget = {
@@ -62,6 +71,7 @@ type BaseListWidget = {
 
 export type ListWidget<Key, Item = Key> = BaseListWidget & {
     get_current_list: () => Item[];
+    get_rendered_list: () => Item[];
     filter_and_sort: () => void;
     retain_selected_items: () => void;
     all_rendered: () => boolean;
@@ -70,7 +80,7 @@ export type ListWidget<Key, Item = Key> = BaseListWidget & {
     clear: () => void;
     set_filter_value: (value: string) => void;
     set_reverse_mode: (reverse_mode: boolean) => void;
-    set_sorting_function: (sorting_function: string | SortingFunction<Item>) => void;
+    set_sorting_function: (sorting_function: string | string[] | SortingFunction<Item>) => void;
     set_up_event_handlers: () => void;
     increase_rendered_offset: () => void;
     reduce_rendered_offset: () => void;
@@ -204,7 +214,7 @@ function is_scroll_position_for_render(scroll_container: HTMLElement): boolean {
 function get_column_count_for_table($table: JQuery): number {
     let column_count = 0;
     const $thead = $table.find("thead");
-    if ($thead.length) {
+    if ($thead.length > 0) {
         column_count = $thead.find("tr").children().length;
     }
     return column_count;
@@ -212,16 +222,20 @@ function get_column_count_for_table($table: JQuery): number {
 
 export function render_empty_list_message_if_needed(
     $container: JQuery,
-    filter_value: string,
+    has_active_filters?: boolean,
+    custom_render_empty_list_widget_for_table?: (context: {
+        empty_list_message: string;
+        column_count: number;
+    }) => string,
 ): void {
     let empty_list_message = $container.attr("data-empty");
 
     const empty_search_results_message = $container.attr("data-search-results-empty");
-    if (filter_value && empty_search_results_message) {
+    if (has_active_filters && empty_search_results_message) {
         empty_list_message = empty_search_results_message;
     }
 
-    if (!empty_list_message || $container.children().length) {
+    if (!empty_list_message || $container.children().length > 0) {
         return;
     }
 
@@ -234,7 +248,9 @@ export function render_empty_list_message_if_needed(
         }
 
         const column_count = get_column_count_for_table($table);
-        empty_list_widget_html = render_empty_list_widget_for_table({
+        const render_fn =
+            custom_render_empty_list_widget_for_table ?? render_empty_list_widget_for_table;
+        empty_list_widget_html = render_fn({
             empty_list_message,
             column_count,
         });
@@ -279,30 +295,64 @@ export function create<Key, Item = Key>(
 
     const meta: ListWidgetMeta<Key, Item> = {
         sorting_function: null,
+        applied_sorting_functions: [],
         sorting_functions: new Map(),
         offset: 0,
         list,
         filtered_list: [],
         reverse_mode: false,
         filter_value: "",
+        has_active_filters: opts.filter?.is_active?.() ?? false,
         $scroll_container: scroll_util.get_scroll_element(opts.$simplebar_container),
         $scroll_listening_element,
     };
+
+    if (opts.sort_by_filter_value) {
+        meta.sort_by_filter_value = opts.sort_by_filter_value;
+    }
 
     const widget: ListWidget<Key, Item> = {
         get_current_list() {
             return meta.filtered_list;
         },
 
+        get_rendered_list() {
+            return meta.filtered_list.slice(0, meta.offset);
+        },
+
         filter_and_sort() {
             meta.filtered_list = get_filtered_items(meta.filter_value, meta.list, opts);
 
-            if (meta.sorting_function) {
-                meta.filtered_list.sort(meta.sorting_function);
+            if (meta.sort_by_filter_value) {
+                assert(meta.sorting_function === null);
+                meta.filtered_list = meta.sort_by_filter_value(
+                    meta.filtered_list,
+                    meta.filter_value,
+                );
+                return;
             }
 
-            if (meta.reverse_mode) {
-                meta.filtered_list.reverse();
+            if (meta.sorting_function) {
+                // If the sorting function is already applied, remove it to avoid duplicate sorting.
+                const existing_sorting_function_index = meta.applied_sorting_functions.findIndex(
+                    ([sorting_function, _]) => sorting_function === meta.sorting_function,
+                );
+                if (existing_sorting_function_index !== -1) {
+                    meta.applied_sorting_functions.splice(existing_sorting_function_index, 1);
+                }
+
+                meta.applied_sorting_functions.push([meta.sorting_function, meta.reverse_mode]);
+                meta.filtered_list.sort((a, b) => {
+                    for (let i = meta.applied_sorting_functions.length - 1; i >= 0; i -= 1) {
+                        const sorting_function = meta.applied_sorting_functions[i]![0];
+                        const is_reverse = meta.applied_sorting_functions[i]![1];
+                        const result = sorting_function(a, b);
+                        if (result !== 0) {
+                            return is_reverse ? -result : result;
+                        }
+                    }
+                    return 0;
+                });
             }
         },
 
@@ -317,7 +367,7 @@ export function create<Key, Item = Key>(
                     const $list_item = $container.find(
                         `li[data-value="${CSS.escape(String(value))}"]`,
                     );
-                    if ($list_item.length) {
+                    if ($list_item.length > 0) {
                         const $link_elem = $list_item.find("a").expectOne();
                         $list_item.addClass("checked");
                         $link_elem.prepend($("<i>").addClass(["fa", "fa-check"]));
@@ -342,11 +392,22 @@ export function create<Key, Item = Key>(
 
             // Stop once the offset reaches the length of the original list.
             if (this.all_rendered()) {
-                render_empty_list_message_if_needed($container, meta.filter_value);
+                meta.has_active_filters = opts.filter?.is_active?.() ?? Boolean(meta.filter_value);
+                render_empty_list_message_if_needed(
+                    $container,
+                    meta.has_active_filters,
+                    opts.render_empty_list_widget_for_table,
+                );
                 if (opts.callback_after_render) {
                     opts.callback_after_render();
                 }
                 return;
+            }
+
+            // When no items have been rendered yet, clear any
+            // previously shown empty-list message before appending.
+            if (meta.offset === 0) {
+                $container.empty();
             }
 
             const slice = meta.filtered_list.slice(meta.offset, meta.offset + load_count);
@@ -457,7 +518,7 @@ export function create<Key, Item = Key>(
                     "click.list_widget_sort",
                     "[data-sort]",
                     function (this: HTMLElement) {
-                        handle_sort($(this), widget);
+                        handle_sort($(this), widget, opts.$parent_container);
                     },
                 );
             }
@@ -467,6 +528,14 @@ export function create<Key, Item = Key>(
                 widget.set_filter_value(value);
                 widget.hard_redraw();
             });
+
+            opts.filter?.$element?.siblings(".clear-filter").on("click", () => {
+                assert(opts.filter?.$element !== undefined);
+                const $filter = opts.filter?.$element;
+                $filter.val("");
+                widget.set_filter_value("");
+                widget.clean_redraw();
+            });
         },
 
         clear_event_handlers() {
@@ -474,6 +543,7 @@ export function create<Key, Item = Key>(
 
             if (opts.$parent_container) {
                 opts.$parent_container.off("click.list_widget_sort", "[data-sort]");
+                opts.filter?.$element?.siblings(".clear-filter").off("click");
             }
 
             opts.filter?.$element?.off("input.list_widget_filter");
@@ -491,6 +561,11 @@ export function create<Key, Item = Key>(
             rendered_row.remove();
             // We removed a rendered row, so we need to reduce one offset.
             widget.reduce_rendered_offset();
+            // If the container is now empty, render() will display
+            // the empty-list message.
+            if (this.all_rendered()) {
+                this.render();
+            }
         },
 
         clean_redraw() {
@@ -541,8 +616,23 @@ export function create<Key, Item = Key>(
                     const $target_row = opts.html_selector!(meta.filtered_list[insert_index - 1]!);
                     $target_row.after($(rendered_row));
                 } else {
-                    const $target_row = opts.html_selector!(meta.filtered_list[insert_index + 1]!);
-                    $target_row.before($(rendered_row));
+                    let $target_row = opts.html_selector!(meta.filtered_list[insert_index + 1]!);
+                    if ($target_row.length > 0) {
+                        $target_row.before($(rendered_row));
+                    } else if (insert_index > 0) {
+                        // We don't have a row rendered after row we are trying to insert at.
+                        // So, try looking for the row before current row.
+                        $target_row = opts.html_selector!(meta.filtered_list[insert_index - 1]!);
+                        if ($target_row.length > 0) {
+                            $target_row.after($(rendered_row));
+                        }
+                    }
+
+                    // If we failed at inserting the row due rows around the row
+                    // not being rendered yet, just do a clean redraw.
+                    if ($target_row.length === 0) {
+                        widget.clean_redraw();
+                    }
                 }
                 widget.increase_rendered_offset();
             }
@@ -594,7 +684,11 @@ export function create<Key, Item = Key>(
     return widget;
 }
 
-export function handle_sort<Key, Item>($th: JQuery, list: ListWidget<Key, Item>): void {
+export function handle_sort<Key, Item>(
+    $th: JQuery,
+    list: ListWidget<Key, Item>,
+    $parent_container?: JQuery,
+): void {
     /*
         one would specify sort parameters like this:
             - name => sort alphabetic.
@@ -603,9 +697,11 @@ export function handle_sort<Key, Item>($th: JQuery, list: ListWidget<Key, Item>)
                         to find custom sort function
 
         <thead>
-            <th data-sort="alphabetic" data-sort-prop="name"></th>
-            <th data-sort="numeric" data-sort-prop="age"></th>
-            <th data-sort="status"></th>
+            <tr>
+                <th data-sort="alphabetic" data-sort-prop="name"></th>
+                <th data-sort="numeric" data-sort-prop="age"></th>
+                <th data-sort="status"></th>
+            </tr>
         </thead>
         */
     const sort_type = $th.attr("data-sort");
@@ -619,7 +715,13 @@ export function handle_sort<Key, Item>($th: JQuery, list: ListWidget<Key, Item>)
             $th.removeClass("descend");
         }
     } else {
-        $th.siblings(".active").removeClass("active");
+        if ($parent_container) {
+            // Remove `active` class for other elements with `[data-sort]`.
+            // This helps support HTML structures where the sorting `<th>` elements are not siblings.
+            $parent_container.find("[data-sort].active").not($th).removeClass("active");
+        } else {
+            $th.siblings(".active").removeClass("active");
+        }
         $th.addClass("active");
     }
 

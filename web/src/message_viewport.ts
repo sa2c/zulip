@@ -1,20 +1,26 @@
 import $ from "jquery";
 import assert from "minimalistic-assert";
 
-import * as blueslip from "./blueslip";
-import * as message_lists from "./message_lists";
-import * as message_scroll_state from "./message_scroll_state";
-import type {Message} from "./message_store";
-import * as rows from "./rows";
-import * as util from "./util";
+import * as blueslip from "./blueslip.ts";
+import * as message_lists from "./message_lists.ts";
+import * as message_scroll_state from "./message_scroll_state.ts";
+import type {Message} from "./message_store.ts";
+import * as rows from "./rows.ts";
+import * as util from "./util.ts";
 
-type MessageViewportInfo = {
+export type MessageViewportInfo = {
     visible_top: number;
     visible_bottom: number;
     visible_height: number;
 };
 
-export const $scroll_container = $("html");
+export const $scroll_container = $(":root");
+
+let window_resize_handler: () => void;
+
+export function register_resize_handler(handler: () => void): void {
+    window_resize_handler = handler;
+}
 
 let in_stoppable_autoscroll = false;
 
@@ -22,13 +28,6 @@ const cached_width = new util.CachedValue({compute_value: () => $scroll_containe
 const cached_height = new util.CachedValue({compute_value: () => $scroll_container.height() ?? 0});
 export const width = cached_width.get.bind(cached_width);
 export const height = cached_height.get.bind(cached_height);
-
-// TODO: This function lets us use the DOM API instead of jquery
-// (<10x faster) for condense.js, but we want to eventually do a
-// bigger of refactor `height` and `width` above to do the same.
-export function max_message_height(): number {
-    return document.querySelector("html")!.offsetHeight * 0.65;
-}
 
 // Includes both scroll and arrow events. Negative means scroll up,
 // positive means scroll down.
@@ -56,7 +55,7 @@ export function message_viewport_info(): MessageViewportInfo {
     let visible_top = $element_just_above_us.outerHeight() ?? 0;
 
     const $sticky_header = $(".sticky_header");
-    if ($sticky_header.length) {
+    if ($sticky_header.length > 0) {
         visible_top += $sticky_header.outerHeight() ?? 0;
     }
 
@@ -78,7 +77,7 @@ export function message_viewport_info(): MessageViewportInfo {
 export function at_rendered_bottom(): boolean {
     const bottom = scrollTop() + height();
     // This also includes bottom whitespace.
-    const full_height = $scroll_container[0]!.scrollHeight;
+    const full_height = util.the($scroll_container).scrollHeight;
 
     // We only know within a pixel or two if we're
     // exactly at the bottom, due to browser quirkiness,
@@ -94,7 +93,7 @@ export function bottom_rendered_message_visible(): boolean {
     const $last_row = rows.last_visible();
     if ($last_row[0] !== undefined) {
         const message_bottom = $last_row[0].getBoundingClientRect().bottom;
-        const bottom_of_feed = $("#compose")[0]!.getBoundingClientRect().top;
+        const bottom_of_feed = util.the($("#compose")).getBoundingClientRect().top;
         return bottom_of_feed > message_bottom;
     }
     return false;
@@ -160,8 +159,66 @@ export function set_message_position(
 
     const new_scroll_top = message_top - message_offset;
 
+    // Ensure we will scroll before we disable updating selection.
+    // This avoids a bug where message selection doesn't change on user scroll.
+    if (
+        // Can't scroll up if we are already at top.
+        (new_scroll_top <= 0 && window.scrollY === 0) ||
+        // Can't scroll down if we are already at bottom.
+        (new_scroll_top >= height() && window.scrollY === height())
+    ) {
+        return;
+    }
     message_scroll_state.set_update_selection_on_next_scroll(false);
     scrollTop(new_scroll_top);
+}
+
+export function simulated_recenter_scroll_delta(
+    $message: JQuery,
+    viewport_info: MessageViewportInfo,
+): number {
+    // Returns the scroll delta (positive = down, negative = up) that
+    // recenter_view would apply if select_id were called now with
+    // {then_scroll: true, from_scroll: true} and force_center=false.
+    // Returns 0 when recenter_view would short-circuit or when no
+    // scroll is needed. The caller must have already updated
+    // last_movement_direction to match the navigation direction.
+    //
+    // Used by navigate.ts to substitute page_up / page_down when the
+    // simulated select-and-recenter would jump too far in one keypress.
+    const message_top = $message.get_offset_to_window().top;
+    const message_height = $message.outerHeight(true) ?? 0;
+    const message_bottom = message_top + message_height;
+
+    const is_above = message_top < viewport_info.visible_top;
+    const is_below = message_bottom > viewport_info.visible_bottom;
+
+    // Mirror recenter_view's from_scroll short-circuit.
+    if (is_above && last_movement_direction >= 0) {
+        return 0;
+    }
+    if (is_below && last_movement_direction <= 0) {
+        return 0;
+    }
+
+    let how_far_down_in_visible_page;
+    if (is_above) {
+        how_far_down_in_visible_page = viewport_info.visible_height * (1 / 2);
+    } else if (is_below) {
+        how_far_down_in_visible_page = viewport_info.visible_height * (1 / 7);
+    } else {
+        return 0;
+    }
+
+    // Mirror set_message_position's tall-message clamp.
+    if (how_far_down_in_visible_page + message_height > viewport_info.visible_height) {
+        how_far_down_in_visible_page = viewport_info.visible_height - message_height;
+        if (how_far_down_in_visible_page < 0) {
+            how_far_down_in_visible_page = 0;
+        }
+    }
+
+    return message_top - viewport_info.visible_top - how_far_down_in_visible_page;
 }
 
 function in_viewport_or_tall(
@@ -205,16 +262,16 @@ const top_of_feed = new util.CachedValue({
         let visible_top = $header.outerHeight() ?? 0;
 
         const $sticky_header = $(".sticky_header");
-        if ($sticky_header.length) {
+        if ($sticky_header.length > 0) {
             visible_top += $sticky_header.outerHeight() ?? 0;
         }
         return visible_top;
     },
 });
 
-const bottom_of_feed = new util.CachedValue({
+export const bottom_of_feed = new util.CachedValue({
     compute_value() {
-        return $("#compose")[0]!.getBoundingClientRect().top;
+        return util.the($("#compose")).getBoundingClientRect().top;
     },
 });
 
@@ -522,7 +579,7 @@ export function keep_pointer_in_view(): void {
 export function scroll_to_selected(): void {
     assert(message_lists.current !== undefined);
     const $selected_row = message_lists.current.selected_row();
-    if ($selected_row && $selected_row.length !== 0) {
+    if ($selected_row && $selected_row.length > 0) {
         recenter_view($selected_row);
     }
 }
@@ -542,6 +599,11 @@ export function maybe_scroll_to_selected(): void {
     }
 }
 
+export function can_scroll(): boolean {
+    const full_height = util.the($scroll_container).scrollHeight;
+    return full_height > window.innerHeight;
+}
+
 export function initialize(): void {
     // This handler must be placed before all resize handlers in our application
     $(window).on("resize", () => {
@@ -549,10 +611,7 @@ export function initialize(): void {
         cached_height.reset();
         top_of_feed.reset();
         bottom_of_feed.reset();
-    });
-
-    $(document).on("compose_started compose_canceled compose_finished", () => {
-        bottom_of_feed.reset();
+        window_resize_handler?.();
     });
 
     // We stop autoscrolling when the user is clearly in the middle of

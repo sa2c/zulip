@@ -1,23 +1,21 @@
 <div class="empty_feed_notice">
-    <h4 class="empty-feed-notice-title"> {{ title }} </h4>
-    <div class="empty-feed-notice-description">
-        {{#if search_data}}
-            {{#if search_data.has_stop_word}}{{t "Some common words were excluded from your search." }} <br/>{{/if}}{{t "You searched for:" }}
-            {{#if search_data.stream_query}}
-            <span>stream: {{search_data.stream_query}}</span>
-            {{/if}}
-            {{#if search_data.topic_query}}
-            <span>topic: {{search_data.topic_query}}</span>
-            {{/if}}
+    <h4 class="empty-feed-notice-title"> {{#if title_html}}{{{ title_html }}}{{else}}{{ title }}{{/if}} </h4>
+    {{#if search_data}}
+        {{#if search_data.has_stop_word}}
+        <div class="empty-feed-notice-description">
+            {{t "Common words were excluded from your search:" }} <br/>
             {{#each search_data.query_words}}
                 {{#if is_stop_word}}
                 <del>{{query_word}}</del>
                 {{else}}
-                <span>{{query_word}}</span>
+                <span class="search-query-word">{{query_word}}</span>
                 {{/if}}
             {{/each}}
-        {{else}}
-            {{{ html }}}
+        </div>
         {{/if}}
-    </div>
+    {{else if notice_html}}
+        <div class="empty-feed-notice-description">
+            {{{ notice_html }}}
+        </div>
+    {{/if}}
 </div>

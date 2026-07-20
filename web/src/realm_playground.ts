@@ -1,16 +1,12 @@
-import assert from "minimalistic-assert";
+import type * as z from "zod/mini";
 
-import * as typeahead from "../shared/src/typeahead";
+import {$t} from "./i18n.ts";
+import * as pygments_data from "./pygments_data.ts";
+import type {realm_playground_schema} from "./state_data.ts";
+import * as typeahead from "./typeahead.ts";
+import * as util from "./util.ts";
 
-import {$t} from "./i18n";
-import * as pygments_data from "./pygments_data";
-
-export type RealmPlayground = {
-    id: number;
-    name: string;
-    pygments_language: string;
-    url_template: string;
-};
+export type RealmPlayground = z.output<typeof realm_playground_schema>;
 
 const map_language_to_playground_info = new Map<string, RealmPlayground[]>();
 const map_pygments_pretty_name_to_aliases = new Map<string, string[]>();
@@ -40,11 +36,9 @@ export function get_playground_info_for_languages(lang: string): RealmPlayground
 function sort_pygments_pretty_names_by_priority(
     comparator_func: (a: string, b: string) => number,
 ): void {
-    const priority_sorted_pygments_data = Object.entries(pygments_data.langs).sort(([a], [b]) =>
-        comparator_func(a, b),
-    );
+    const priority_sorted_pygments_data = Object.entries(pygments_data.langs);
+    priority_sorted_pygments_data.sort(([a], [b]) => comparator_func(a, b));
     for (const [alias, data] of priority_sorted_pygments_data) {
-        assert(data !== undefined);
         const pretty_name = data.pretty_name;
         // JS Map remembers the original order of insertion of keys.
         if (map_pygments_pretty_name_to_aliases.has(pretty_name)) {
@@ -90,7 +84,8 @@ export function get_pygments_typeahead_list_for_settings(query: string): Map<str
     }
 
     for (const [key, values] of map_pygments_pretty_name_to_aliases) {
-        language_labels.set(key, key + " (" + values.join(", ") + ")");
+        const formatted_string = util.format_array_as_list_with_conjunction(values, "narrow");
+        language_labels.set(key, key + " (" + formatted_string + ")");
     }
 
     return language_labels;

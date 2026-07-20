@@ -1,116 +1,234 @@
 import $ from "jquery";
+import assert from "minimalistic-assert";
 
-import * as compose_actions from "./compose_actions";
-import {$t} from "./i18n";
-import * as message_lists from "./message_lists";
-import * as message_store from "./message_store";
-import * as message_util from "./message_util";
-import * as narrow_state from "./narrow_state";
-import * as people from "./people";
-import * as stream_data from "./stream_data";
+import render_reply_recipient_label from "../templates/reply_recipient_label.hbs";
 
-function format_stream_recipient_label(stream_id: number, topic: string): string {
+import * as compose_actions from "./compose_actions.ts";
+import {$t} from "./i18n.ts";
+import * as inbox_util from "./inbox_util.ts";
+import * as message_lists from "./message_lists.ts";
+import * as message_store from "./message_store.ts";
+import * as message_util from "./message_util.ts";
+import * as narrow_state from "./narrow_state.ts";
+import {page_params} from "./page_params.ts";
+import * as people from "./people.ts";
+import * as recent_view_util from "./recent_view_util.ts";
+import * as stream_data from "./stream_data.ts";
+import * as util from "./util.ts";
+
+type RecipientLabel = {
+    label_text: string;
+    has_empty_string_topic?: boolean;
+    stream_name?: string;
+    is_dm_with_self?: boolean;
+};
+
+function get_stream_recipient_label(stream_id: number, topic: string): RecipientLabel | undefined {
     const stream = stream_data.get_sub_by_id(stream_id);
+    const topic_display_name = util.get_final_topic_display_name(topic);
     if (stream) {
-        return "#" + stream.name + " > " + topic;
+        const recipient_label: RecipientLabel = {
+            label_text: "#" + stream.name + " > " + topic_display_name,
+            has_empty_string_topic: topic === "",
+            stream_name: stream.name,
+        };
+        return recipient_label;
     }
-    return "";
+    return undefined;
 }
 
-type ComposeClosedMessage = {
+function get_direct_message_recipient_label(user_ids: number[]): RecipientLabel {
+    let label_text = "";
+    let is_dm_with_self = false;
+    if (people.is_direct_message_conversation_with_self(user_ids)) {
+        is_dm_with_self = true;
+    } else {
+        label_text = message_store.get_pm_full_names(user_ids);
+    }
+    const recipient_label: RecipientLabel = {
+        label_text,
+        is_dm_with_self,
+    };
+    return recipient_label;
+}
+
+export type ReplyRecipientInformation = {
     stream_id?: number | undefined;
-    topic?: string;
+    topic?: string | undefined;
+    user_ids?: number[] | undefined;
     display_reply_to?: string | undefined;
 };
 
-export function get_recipient_label(message?: ComposeClosedMessage): string {
-    // TODO: This code path is bit of a type-checking disaster; we mix
-    // actual message objects with fake objects containing just a
-    // couple fields, both those constructed here and potentially
-    // passed in.
+export function get_recipient_label(
+    recipient_information?: ReplyRecipientInformation,
+): RecipientLabel | undefined {
+    if (recipient_information !== undefined) {
+        assert(recent_view_util.is_visible() || inbox_util.is_visible());
+        // When we're in either the Inbox or Recent Conversations view,
+        // we try to update the closed compose box button label with
+        // information about the reply target from the focused row in
+        // the view.
+        if (
+            recipient_information.stream_id !== undefined &&
+            recipient_information.topic !== undefined
+        ) {
+            return get_stream_recipient_label(
+                recipient_information.stream_id,
+                recipient_information.topic,
+            );
+        }
+        if (recipient_information.user_ids !== undefined) {
+            return get_direct_message_recipient_label(recipient_information.user_ids);
+        }
+        if (recipient_information.display_reply_to !== undefined) {
+            return {label_text: recipient_information.display_reply_to};
+        }
+    }
+
+    // Otherwise, we check the current message list for information
+    // about the reply target for the closed compose box button label.
     if (message_lists.current === undefined) {
-        return "";
+        return undefined;
     }
 
-    if (message === undefined) {
-        if (message_lists.current.visibly_empty()) {
-            // For empty narrows where there's a clear reply target,
-            // i.e. stream+topic or a single direct message conversation,
-            // we label the button as replying to the thread.
-            const stream_id = narrow_state.stream_sub()?.stream_id;
-            const topic = narrow_state.topic();
-            if (stream_id !== undefined && topic !== undefined) {
-                return format_stream_recipient_label(stream_id, topic);
-            } else if (narrow_state.pm_ids_string()) {
-                const user_ids = people.user_ids_string_to_ids_array(narrow_state.pm_ids_string()!);
-                return message_store.get_pm_full_names(user_ids);
+    if (message_lists.current.visibly_empty()) {
+        // For empty narrows where there's a clear reply target,
+        // i.e. channel and topic or a direct message conversation,
+        // we label the button as replying to the thread.
+        const stream_id = narrow_state.stream_id(narrow_state.filter(), true);
+        const topic = narrow_state.topic();
+        const user_ids_string = narrow_state.pm_ids_string();
+        if (stream_id !== undefined && topic !== undefined) {
+            return get_stream_recipient_label(stream_id, topic);
+        }
+        if (user_ids_string !== undefined) {
+            // Check for validity of user ids to avoid any errors in case user
+            // narrowed to an incorrect URL.
+            const user_ids = people.user_ids_string_to_ids_array(user_ids_string);
+            if (!people.is_valid_user_ids(user_ids)) {
+                return undefined;
             }
-        } else {
-            message = message_lists.current.selected_message();
+            return get_direct_message_recipient_label(user_ids);
         }
+        // Show the standard button text for empty narrows without
+        // a clear reply target, e.g., an empty search view.
+        return undefined;
     }
 
-    if (message) {
-        if (message.stream_id && message.topic) {
-            return format_stream_recipient_label(message.stream_id, message.topic);
-        } else if (message.display_reply_to) {
-            return message.display_reply_to;
+    const selected_message = message_lists.current.selected_message();
+    if (selected_message !== undefined) {
+        if (selected_message?.is_stream) {
+            return get_stream_recipient_label(selected_message.stream_id, selected_message.topic);
         }
+        const user_ids = people.user_ids_string_to_ids_array(selected_message.to_user_ids);
+        return get_direct_message_recipient_label(user_ids);
     }
-    return "";
+    // Fall through to show the standard button text.
+    return undefined;
 }
 
-function update_reply_button_state(disable = false): void {
+// Exported for tests
+export let update_reply_button_state = (disable = false): void => {
     $(".compose_reply_button").attr("disabled", disable ? "disabled" : null);
     if (disable) {
-        $("#compose_buttons .compose-reply-button-wrapper").attr(
-            "data-reply-button-type",
-            "direct_disabled",
-        );
+        if (maybe_get_selected_message_stream_id() !== undefined) {
+            $("#legacy-closed-compose-box .compose-reply-button-wrapper").attr(
+                "data-reply-button-type",
+                "stream_disabled",
+            );
+        } else {
+            $("#legacy-closed-compose-box .compose-reply-button-wrapper").attr(
+                "data-reply-button-type",
+                "direct_disabled",
+            );
+        }
         return;
     }
     if (narrow_state.is_message_feed_visible()) {
-        $("#compose_buttons .compose-reply-button-wrapper").attr(
+        $("#legacy-closed-compose-box .compose-reply-button-wrapper").attr(
             "data-reply-button-type",
             "selected_message",
         );
     } else {
-        $("#compose_buttons .compose-reply-button-wrapper").attr(
+        $("#legacy-closed-compose-box .compose-reply-button-wrapper").attr(
             "data-reply-button-type",
             "selected_conversation",
         );
     }
+};
+
+export function rewire_update_reply_button_state(value: typeof update_reply_button_state): void {
+    update_reply_button_state = value;
 }
 
-function update_buttons(disable_reply?: boolean): void {
-    update_reply_button_state(disable_reply);
+function update_new_conversation_button(
+    data_attribute_string: "direct" | "stream" | "non-specific",
+): void {
+    $("#new_conversation_button").attr("data-conversation-type", data_attribute_string);
 }
 
-export function update_buttons_for_private(): void {
+function maybe_get_selected_message_stream_id(): number | undefined {
+    if (message_lists.current?.visibly_empty()) {
+        return undefined;
+    }
+    const selected_message = message_lists.current?.selected_message();
+    if (!selected_message?.is_stream) {
+        return undefined;
+    }
+    return selected_message.stream_id;
+}
+
+function should_disable_compose_reply_button_for_stream(): boolean {
+    const stream_id = maybe_get_selected_message_stream_id();
+    if (stream_id !== undefined && !page_params.is_spectator) {
+        const stream = stream_data.get_sub_by_id(stream_id);
+        if (stream && !stream_data.can_post_messages_in_stream(stream)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Exported for tests
+export function should_disable_compose_reply_button_for_direct_message(): boolean {
     const pm_ids_string = narrow_state.pm_ids_string();
+    // If we can identify a direct message recipient, and the user can't
+    // reply to that recipient, then we disable the compose_reply_button.
+    if (pm_ids_string && !message_util.user_can_send_direct_message(pm_ids_string)) {
+        return true;
+    }
+    return false;
+}
 
-    let disable_reply;
-
-    if (!pm_ids_string || message_util.user_can_send_direct_message(pm_ids_string)) {
-        disable_reply = false;
+export function update_buttons(update_type?: string): void {
+    let disable_reply_button;
+    if (update_type === "direct") {
+        // Based on whether there's a direct message recipient for
+        // the current narrow_state.
+        disable_reply_button = should_disable_compose_reply_button_for_direct_message();
     } else {
-        // disable the [Message X] button when in a private narrow
-        // if the user cannot dm the current recipient
-        disable_reply = true;
+        // Based on whether there's a selected channel message in
+        // the current message list.
+        disable_reply_button = should_disable_compose_reply_button_for_stream();
     }
 
-    $("#new_conversation_button").attr("data-conversation-type", "direct");
-    update_buttons(disable_reply);
+    if (update_type === "direct" || update_type === "stream") {
+        update_new_conversation_button(update_type);
+        update_reply_button_state(disable_reply_button);
+        return;
+    }
+
+    // Default case for most views.
+    update_new_conversation_button("non-specific");
+    update_reply_button_state(disable_reply_button);
+    set_standard_text_for_reply_button();
 }
 
-export function update_buttons_for_stream_views(): void {
-    $("#new_conversation_button").attr("data-conversation-type", "stream");
-    update_buttons();
-}
-
-export function update_buttons_for_non_specific_views(): void {
-    $("#new_conversation_button").attr("data-conversation-type", "non-specific");
-    update_buttons();
+export function maybe_update_buttons_for_dm_recipient(): void {
+    const filter = narrow_state.filter();
+    if (filter?.contains_only_private_messages()) {
+        update_buttons("direct");
+    }
 }
 
 function set_reply_button_label(label: string): void {
@@ -121,15 +239,35 @@ export function set_standard_text_for_reply_button(): void {
     set_reply_button_label($t({defaultMessage: "Compose message"}));
 }
 
-export function update_reply_recipient_label(message?: ComposeClosedMessage): void {
-    const recipient_label = get_recipient_label(message);
-    if (recipient_label) {
-        set_reply_button_label(
-            $t({defaultMessage: "Message {recipient_label}"}, {recipient_label}),
-        );
+export function update_recipient_text_for_reply_button(
+    recipient_information?: ReplyRecipientInformation,
+): void {
+    const recipient_label = get_recipient_label(recipient_information);
+    if (recipient_label !== undefined) {
+        const empty_string_topic_display_name = util.get_final_topic_display_name("");
+        const rendered_recipient_label = render_reply_recipient_label({
+            has_empty_string_topic: recipient_label.has_empty_string_topic,
+            channel_name: recipient_label.stream_name,
+            is_dm_with_self: recipient_label.is_dm_with_self,
+            empty_string_topic_display_name,
+            label_text: recipient_label.label_text,
+        });
+        $("#left_bar_compose_reply_button_big").html(rendered_recipient_label);
     } else {
         set_standard_text_for_reply_button();
     }
+}
+
+function can_user_reply_to_message(message_id: number): boolean {
+    const selected_message = message_store.get(message_id);
+    if (selected_message === undefined) {
+        return false;
+    }
+    if (selected_message.is_stream) {
+        return !should_disable_compose_reply_button_for_stream();
+    }
+    assert(selected_message.is_private);
+    return message_util.user_can_send_direct_message(selected_message.to_user_ids);
 }
 
 export function initialize(): void {
@@ -139,7 +277,10 @@ export function initialize(): void {
             // message_selected events can occur with Recent Conversations
             // open due to the combined feed view loading in the background,
             // so we only update if message feed is visible.
-            update_reply_recipient_label();
+            update_recipient_text_for_reply_button();
+            update_reply_button_state(
+                !can_user_reply_to_message(message_lists.current!.selected_id()),
+            );
         }
     });
 

@@ -49,7 +49,7 @@ def backfill_message_edit_history_chunk(
     The range of message IDs to be processed is inclusive on both ends.
     """
     messages = (
-        message_model.objects.select_for_update()
+        message_model.objects.select_for_update(no_key=True)
         .only(
             "recipient",
             "recipient__type",
@@ -62,11 +62,11 @@ def backfill_message_edit_history_chunk(
 
     for message in messages:
         legacy_edit_history: list[LegacyEditHistoryEvent] = orjson.loads(message.edit_history)
-        message_type = message.recipient.type
+        recipient_type = message.recipient.type
         modern_edit_history: list[EditHistoryEvent] = []
 
         # Only Stream messages have topic / stream edit history data.
-        if message_type == STREAM:
+        if recipient_type == STREAM:
             topic = message.subject
             stream_id = message.recipient.type_id
 
@@ -83,7 +83,7 @@ def backfill_message_edit_history_chunk(
                     "prev_rendered_content_version"
                 ]
 
-            if message_type == STREAM:
+            if recipient_type == STREAM:
                 if "prev_subject" in edit_history_event:
                     # Add topic edit key/value pairs from legacy format.
                     modern_entry["topic"] = topic
@@ -164,5 +164,6 @@ class Migration(migrations.Migration):
         migrations.RunPython(
             copy_and_update_message_edit_history,
             reverse_code=migrations.RunPython.noop,
+            elidable=True,
         ),
     ]

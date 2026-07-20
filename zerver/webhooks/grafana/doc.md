@@ -6,17 +6,17 @@ See your Grafana dashboard alerts in Zulip!
 
 {start_tabs}
 
-1. {!create-channel.md!}
-
 1. {!create-an-incoming-webhook.md!}
 
 1. {!generate-webhook-url-basic.md!}
 
 {end_tabs}
 
-### Instructions for Grafana 8.3 and above
+### Instructions for Grafana
 
 {start_tabs}
+
+{tab|grafana-latest}
 
 1. In Grafana, go to **Alerting**. Click on **Contact points**, and then
    **Add contact point**.
@@ -39,11 +39,7 @@ See your Grafana dashboard alerts in Zulip!
    evaluation behavior**, and other conditions for your alerts. When
    you're done, click **Save rule**.
 
-{end_tabs}
-
-### Instructions for Grafana 8.2 and below
-
-{start_tabs}
+{tab|grafana-older-version}
 
 1. In Grafana, go to **Alerting**. Click on **Notification channels**.
 

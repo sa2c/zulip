@@ -2,7 +2,7 @@ from typing import Annotated
 
 import orjson
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.http import HttpRequest, HttpResponse
 from django.utils.translation import gettext as _
 from pydantic import Json, StringConstraints
@@ -52,7 +52,7 @@ def validate_field_name_and_hint(name: str, hint: str) -> None:
 
 def validate_custom_field_data(field_type: int, field_data: ProfileFieldData) -> None:
     try:
-        if field_type == CustomProfileField.SELECT:
+        if field_type == CustomProfileField.DROPDOWN:
             # Choice type field must have at least have one choice
             if len(field_data) < 1:
                 raise JsonableError(_("Field must have at least one choice."))
@@ -69,11 +69,18 @@ def validate_display_in_profile_summary_field(
     if not display_in_profile_summary:
         return
 
-    # The LONG_TEXT field type doesn't make sense visually for profile
-    # field summaries. The USER field type will require some further
-    # client support.
-    if field_type in (CustomProfileField.LONG_TEXT, CustomProfileField.USER):
+    # The USER field type will require some further client support.
+    if field_type == CustomProfileField.USER:
         raise JsonableError(_("Field type not supported for display in profile summary."))
+
+
+def validate_use_for_user_matching_field(field_type: int, use_for_user_matching: bool) -> None:
+    if not use_for_user_matching:
+        return
+
+    # Only SHORT_TEXT and EXTERNAL_ACCOUNT field types are supported for user matching.
+    if field_type not in (CustomProfileField.SHORT_TEXT, CustomProfileField.EXTERNAL_ACCOUNT):
+        raise JsonableError(_("Field type not supported for use for user matching."))
 
 
 def is_default_external_field(field_type: int, field_data: ProfileFieldData) -> bool:
@@ -90,6 +97,7 @@ def validate_custom_profile_field(
     field_type: int,
     field_data: ProfileFieldData,
     display_in_profile_summary: bool,
+    use_for_user_matching: bool,
 ) -> None:
     # Validate field data
     validate_custom_field_data(field_type, field_data)
@@ -106,6 +114,8 @@ def validate_custom_profile_field(
 
     validate_display_in_profile_summary_field(field_type, display_in_profile_summary)
 
+    validate_use_for_user_matching_field(field_type, use_for_user_matching)
+
 
 def validate_custom_profile_field_update(
     field: CustomProfileField,
@@ -113,6 +123,7 @@ def validate_custom_profile_field_update(
     field_data: ProfileFieldData | None = None,
     name: str | None = None,
     hint: str | None = None,
+    use_for_user_matching: bool | None = None,
 ) -> None:
     if name is None:
         name = field.name
@@ -127,14 +138,12 @@ def validate_custom_profile_field_update(
             field_data = orjson.loads(field.field_data)
     if display_in_profile_summary is None:
         display_in_profile_summary = field.display_in_profile_summary
+    if use_for_user_matching is None:
+        use_for_user_matching = field.use_for_user_matching
 
     assert field_data is not None
     validate_custom_profile_field(
-        name,
-        hint,
-        field.field_type,
-        field_data,
-        display_in_profile_summary,
+        name, hint, field.field_type, field_data, display_in_profile_summary, use_for_user_matching
     )
 
 
@@ -171,12 +180,14 @@ def create_realm_custom_profile_field(
     request: HttpRequest,
     user_profile: UserProfile,
     *,
-    name: Annotated[str, StringConstraints(strip_whitespace=True)] = "",
-    hint: str = "",
+    display_in_profile_summary: Json[bool] = False,
+    editable_by_user: Json[bool] = True,
     field_data: Json[ProfileFieldData] | None = None,
     field_type: Json[int],
-    display_in_profile_summary: Json[bool] = False,
+    hint: str = "",
+    name: Annotated[str, StringConstraints(strip_whitespace=True)] = "",
     required: Json[bool] = False,
+    use_for_user_matching: Json[bool] = False,
 ) -> HttpResponse:
     if field_data is None:
         field_data = {}
@@ -185,7 +196,9 @@ def create_realm_custom_profile_field(
             _("Only 2 custom profile fields can be displayed in the profile summary.")
         )
 
-    validate_custom_profile_field(name, hint, field_type, field_data, display_in_profile_summary)
+    validate_custom_profile_field(
+        name, hint, field_type, field_data, display_in_profile_summary, use_for_user_matching
+    )
     try:
         if is_default_external_field(field_type, field_data):
             field_subtype = field_data["subtype"]
@@ -195,6 +208,8 @@ def create_realm_custom_profile_field(
                 field_subtype=field_subtype,
                 display_in_profile_summary=display_in_profile_summary,
                 required=required,
+                editable_by_user=editable_by_user,
+                use_for_user_matching=use_for_user_matching,
             )
             return json_success(request, data={"id": field.id})
         else:
@@ -206,6 +221,8 @@ def create_realm_custom_profile_field(
                 hint=hint,
                 display_in_profile_summary=display_in_profile_summary,
                 required=required,
+                editable_by_user=editable_by_user,
+                use_for_user_matching=use_for_user_matching,
             )
             return json_success(request, data={"id": field.id})
     except IntegrityError:
@@ -217,7 +234,7 @@ def delete_realm_custom_profile_field(
     request: HttpRequest, user_profile: UserProfile, field_id: int
 ) -> HttpResponse:
     try:
-        field = CustomProfileField.objects.get(id=field_id)
+        field = CustomProfileField.objects.get(realm_id=user_profile.realm_id, id=field_id)
     except CustomProfileField.DoesNotExist:
         raise JsonableError(_("Field id {id} not found.").format(id=field_id))
 
@@ -231,12 +248,14 @@ def update_realm_custom_profile_field(
     request: HttpRequest,
     user_profile: UserProfile,
     *,
-    field_id: PathOnly[int],
-    name: Annotated[str, StringConstraints(strip_whitespace=True)] | None = None,
-    hint: str | None = None,
-    field_data: Json[ProfileFieldData] | None = None,
-    required: Json[bool] | None = None,
     display_in_profile_summary: Json[bool] | None = None,
+    editable_by_user: Json[bool] | None = None,
+    field_data: Json[ProfileFieldData] | None = None,
+    field_id: PathOnly[int],
+    hint: str | None = None,
+    name: Annotated[str, StringConstraints(strip_whitespace=True)] | None = None,
+    required: Json[bool] | None = None,
+    use_for_user_matching: Json[bool] | None = None,
 ) -> HttpResponse:
     realm = user_profile.realm
     try:
@@ -266,7 +285,9 @@ def update_realm_custom_profile_field(
     ):
         raise JsonableError(_("Default custom field cannot be updated."))
 
-    validate_custom_profile_field_update(field, display_in_profile_summary, field_data, name, hint)
+    validate_custom_profile_field_update(
+        field, display_in_profile_summary, field_data, name, hint, use_for_user_matching
+    )
     try:
         try_update_realm_custom_profile_field(
             realm=realm,
@@ -276,6 +297,8 @@ def update_realm_custom_profile_field(
             field_data=field_data,
             display_in_profile_summary=display_in_profile_summary,
             required=required,
+            editable_by_user=editable_by_user,
+            use_for_user_matching=use_for_user_matching,
         )
     except IntegrityError:
         raise JsonableError(_("A field with that label already exists."))
@@ -302,8 +325,11 @@ def remove_user_custom_profile_data(
     *,
     data: Json[list[int]],
 ) -> HttpResponse:
-    for field_id in data:
-        check_remove_custom_profile_field_value(user_profile, field_id)
+    with transaction.atomic(durable=True):
+        for field_id in data:
+            check_remove_custom_profile_field_value(
+                user_profile, field_id, acting_user=user_profile, notify=False
+            )
     return json_success(request)
 
 
@@ -315,7 +341,8 @@ def update_user_custom_profile_data(
     *,
     data: Json[list[ProfileDataElementUpdateDict]],
 ) -> HttpResponse:
-    validate_user_custom_profile_data(user_profile.realm.id, data)
-    do_update_user_custom_profile_data_if_changed(user_profile, data)
+    validate_user_custom_profile_data(user_profile.realm.id, data, acting_user=user_profile)
+    with transaction.atomic(durable=True):
+        do_update_user_custom_profile_data_if_changed(user_profile, data, user_profile, notify=True)
     # We need to call this explicitly otherwise constraints are not check
     return json_success(request)

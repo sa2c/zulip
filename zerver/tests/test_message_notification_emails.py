@@ -1,3 +1,4 @@
+import base64
 import random
 import re
 from collections.abc import Sequence
@@ -14,6 +15,7 @@ from django.test import override_settings
 from django_stubs_ext import StrPromise
 
 from zerver.actions.create_user import do_create_user
+from zerver.actions.message_send import internal_send_private_message
 from zerver.actions.user_groups import add_subgroups_to_user_group, check_add_user_group
 from zerver.actions.user_settings import do_change_user_setting
 from zerver.actions.user_topics import do_set_user_topic_visibility_policy
@@ -23,14 +25,16 @@ from zerver.lib.email_notifications import (
     fix_spoilers_in_html,
     handle_missedmessage_emails,
     include_realm_name_in_missedmessage_emails_subject,
+    prepare_synthetic_root_message_id,
     relative_to_full_url,
 )
 from zerver.lib.emoji import get_emoji_file_name
 from zerver.lib.send_email import FromAddress
 from zerver.lib.test_classes import ZulipTestCase
-from zerver.models import UserMessage, UserProfile, UserTopic
+from zerver.models import Message, UserMessage, UserProfile, UserTopic
 from zerver.models.realm_emoji import get_name_keyed_dict_for_active_realm_emoji
 from zerver.models.realms import get_realm
+from zerver.models.recipients import Recipient, get_or_create_direct_message_group
 from zerver.models.scheduled_jobs import NotificationTriggers
 from zerver.models.streams import get_stream
 
@@ -89,6 +93,29 @@ class TestMessageNotificationEmails(ZulipTestCase):
             )
         m.assert_not_called()
 
+    def test_demo_organization_owner_email_not_set(self) -> None:
+        demo_organization_owner = self.create_demo_organization_owner()
+        realm = demo_organization_owner.realm
+
+        notification_bot = self.notification_bot(realm)
+        internal_send_private_message(
+            sender=notification_bot,
+            recipient_user=demo_organization_owner,
+            content="Notification bot message",
+        )
+        message = self.get_last_message()
+        self.assertEqual(message.sender.id, notification_bot.id)
+        self.assertEqual(message.content, "Notification bot message")
+
+        with mock.patch(
+            "zerver.lib.email_notifications.do_send_missedmessage_events_reply_in_zulip"
+        ) as m:
+            handle_missedmessage_emails(
+                demo_organization_owner.id,
+                {message.id: MissedMessageData(trigger=NotificationTriggers.DIRECT_MESSAGE)},
+            )
+        m.assert_not_called()
+
     def normalize_string(self, s: str | StrPromise) -> str:
         s = s.strip()
         return re.sub(r"\s+", " ", s)
@@ -110,7 +137,7 @@ class TestMessageNotificationEmails(ZulipTestCase):
         hamlet = self.example_user("hamlet")
         tokens = self._get_tokens()
         with patch("zerver.lib.email_mirror.generate_missed_message_token", side_effect=tokens):
-            handle_missedmessage_emails(
+            self.handle_missedmessage_emails(
                 hamlet.id,
                 {
                     msg_id: MissedMessageData(
@@ -190,8 +217,8 @@ class TestMessageNotificationEmails(ZulipTestCase):
         else:
             # Test in case if message content in missed email message are disabled.
             verify_body_include = [
-                "This email does not include message content because you have disabled message ",
-                "http://zulip.testserver/help/dm-mention-alert-notifications ",
+                "This email does not include message content because you have chosen to ",
+                "http://zulip.testserver/help/email-notifications#hide-message-content ",
                 "View or reply in Zulip Dev Zulip",
                 " Manage email preferences: http://zulip.testserver/#settings/notifications",
             ]
@@ -250,8 +277,8 @@ class TestMessageNotificationEmails(ZulipTestCase):
         else:
             # Test in case if message content in missed email message are disabled.
             verify_body_include = [
-                "This email does not include message content because you have disabled message ",
-                "http://zulip.testserver/help/dm-mention-alert-notifications ",
+                "This email does not include message content because you have chosen to ",
+                "http://zulip.testserver/help/email-notifications#hide-message-content ",
                 "View or reply in Zulip Dev Zulip",
                 " Manage email preferences: http://zulip.testserver/#settings/notifications",
             ]
@@ -290,8 +317,8 @@ class TestMessageNotificationEmails(ZulipTestCase):
         else:
             # Test in case if message content in missed email message are disabled.
             verify_body_include = [
-                "This email does not include message content because you have disabled message ",
-                "http://zulip.testserver/help/dm-mention-alert-notifications ",
+                "This email does not include message content because you have chosen to ",
+                "http://zulip.testserver/help/email-notifications#hide-message-content ",
                 "View or reply in Zulip Dev Zulip",
                 " Manage email preferences: http://zulip.testserver/#settings/notifications",
             ]
@@ -349,8 +376,8 @@ class TestMessageNotificationEmails(ZulipTestCase):
         else:
             # Test in case if message content in missed email message are disabled.
             verify_body_include = [
-                "This email does not include message content because you have disabled message ",
-                "http://zulip.testserver/help/dm-mention-alert-notifications ",
+                "This email does not include message content because you have chosen to ",
+                "http://zulip.testserver/help/email-notifications#hide-message-content ",
                 "View or reply in Zulip Dev Zulip",
                 " Manage email preferences: http://zulip.testserver/#settings/notifications",
             ]
@@ -389,8 +416,8 @@ class TestMessageNotificationEmails(ZulipTestCase):
         else:
             # Test in case if message content in missed email message are disabled.
             verify_body_include = [
-                "This email does not include message content because you have disabled message ",
-                "http://zulip.testserver/help/dm-mention-alert-notifications ",
+                "This email does not include message content because you have chosen to ",
+                "http://zulip.testserver/help/email-notifications#hide-message-content ",
                 "View or reply in Zulip Dev Zulip",
                 " Manage email preferences: http://zulip.testserver/#settings/notifications",
             ]
@@ -497,15 +524,15 @@ class TestMessageNotificationEmails(ZulipTestCase):
         else:
             if message_content_disabled_by_realm:
                 verify_body_include = [
-                    "This email does not include message content because your organization has disabled",
+                    "This email does not include message content because your organization",
                     "http://zulip.testserver/help/hide-message-content-in-emails",
                     "View or reply in Zulip Dev Zulip",
                     " Manage email preferences: http://zulip.testserver/#settings/notifications",
                 ]
             elif message_content_disabled_by_user:
                 verify_body_include = [
-                    "This email does not include message content because you have disabled message ",
-                    "http://zulip.testserver/help/dm-mention-alert-notifications ",
+                    "This email does not include message content because you have chosen to ",
+                    "http://zulip.testserver/help/email-notifications#hide-message-content ",
                     "View or reply in Zulip Dev Zulip",
                     " Manage email preferences: http://zulip.testserver/#settings/notifications",
                 ]
@@ -565,8 +592,8 @@ class TestMessageNotificationEmails(ZulipTestCase):
             verify_body_does_not_include: list[str] = []
         else:
             verify_body_include = [
-                "This email does not include message content because you have disabled message ",
-                "http://zulip.testserver/help/dm-mention-alert-notifications ",
+                "This email does not include message content because you have chosen to ",
+                "http://zulip.testserver/help/email-notifications#hide-message-content ",
                 "View or reply in Zulip Dev Zulip",
                 " Manage email preferences: http://zulip.testserver/#settings/notifications",
             ]
@@ -679,10 +706,10 @@ class TestMessageNotificationEmails(ZulipTestCase):
         cordelia = self.example_user("cordelia")
 
         hamlet_only = check_add_user_group(
-            get_realm("zulip"), "hamlet_only", [hamlet], acting_user=None
+            get_realm("zulip"), "hamlet_only", [hamlet], acting_user=hamlet
         )
         hamlet_and_cordelia = check_add_user_group(
-            get_realm("zulip"), "hamlet_and_cordelia", [hamlet, cordelia], acting_user=None
+            get_realm("zulip"), "hamlet_and_cordelia", [hamlet, cordelia], acting_user=hamlet
         )
 
         hamlet_only_message_id = self.send_stream_message(othello, "Denmark", "@*hamlet_only*")
@@ -690,7 +717,7 @@ class TestMessageNotificationEmails(ZulipTestCase):
             othello, "Denmark", "@*hamlet_and_cordelia*"
         )
 
-        handle_missedmessage_emails(
+        self.handle_missedmessage_emails(
             hamlet.id,
             {
                 hamlet_only_message_id: MissedMessageData(
@@ -717,7 +744,7 @@ class TestMessageNotificationEmails(ZulipTestCase):
         othello = self.example_user("othello")
 
         hamlet_and_cordelia = check_add_user_group(
-            get_realm("zulip"), "hamlet_and_cordelia", [hamlet, cordelia], acting_user=None
+            get_realm("zulip"), "hamlet_and_cordelia", [hamlet, cordelia], acting_user=hamlet
         )
 
         user_group_mentioned_message_id = self.send_stream_message(
@@ -727,7 +754,7 @@ class TestMessageNotificationEmails(ZulipTestCase):
             othello, "Denmark", "@**King Hamlet**"
         )
 
-        handle_missedmessage_emails(
+        self.handle_missedmessage_emails(
             hamlet.id,
             {
                 user_group_mentioned_message_id: MissedMessageData(
@@ -754,7 +781,7 @@ class TestMessageNotificationEmails(ZulipTestCase):
         othello = self.example_user("othello")
 
         hamlet_and_cordelia = check_add_user_group(
-            get_realm("zulip"), "hamlet_and_cordelia", [hamlet, cordelia], acting_user=None
+            get_realm("zulip"), "hamlet_and_cordelia", [hamlet, cordelia], acting_user=hamlet
         )
 
         topic_wildcard_mentioned_in_followed_topic_message_id = self.send_stream_message(
@@ -764,7 +791,7 @@ class TestMessageNotificationEmails(ZulipTestCase):
             othello, "Denmark", "@*hamlet_and_cordelia*"
         )
 
-        handle_missedmessage_emails(
+        self.handle_missedmessage_emails(
             hamlet.id,
             {
                 topic_wildcard_mentioned_in_followed_topic_message_id: MissedMessageData(
@@ -798,7 +825,7 @@ class TestMessageNotificationEmails(ZulipTestCase):
             othello, "Denmark", "@**topic**"
         )
 
-        handle_missedmessage_emails(
+        self.handle_missedmessage_emails(
             hamlet.id,
             {
                 stream_wildcard_mentioned_in_followed_topic_message_id: MissedMessageData(
@@ -829,7 +856,7 @@ class TestMessageNotificationEmails(ZulipTestCase):
             othello, "Denmark", "@**all**"
         )
 
-        handle_missedmessage_emails(
+        self.handle_missedmessage_emails(
             hamlet.id,
             {
                 topic_wildcard_mentioned_message_id: MissedMessageData(
@@ -860,7 +887,7 @@ class TestMessageNotificationEmails(ZulipTestCase):
             othello, "Denmark", "@**topic**"
         )
 
-        handle_missedmessage_emails(
+        self.handle_missedmessage_emails(
             hamlet.id,
             {
                 stream_wildcard_mentioned_message_id: MissedMessageData(
@@ -889,7 +916,7 @@ class TestMessageNotificationEmails(ZulipTestCase):
             othello, "Denmark", "@**all**"
         )
 
-        handle_missedmessage_emails(
+        self.handle_missedmessage_emails(
             hamlet.id,
             {
                 followed_topic_mentioned_message_id: MissedMessageData(
@@ -916,7 +943,7 @@ class TestMessageNotificationEmails(ZulipTestCase):
         stream_mentioned_message_id = self.send_stream_message(othello, "Denmark", "0")
         followed_topic_mentioned_message_id = self.send_stream_message(othello, "Denmark", "1")
 
-        handle_missedmessage_emails(
+        self.handle_missedmessage_emails(
             hamlet.id,
             {
                 stream_mentioned_message_id: MissedMessageData(
@@ -1095,10 +1122,10 @@ class TestMessageNotificationEmails(ZulipTestCase):
         self._resolved_topic_missed_stream_messages_thread_friendly()
 
     @override_settings(EMAIL_GATEWAY_PATTERN="")
-    def test_reply_warning_in_missed_personal_messages(self) -> None:
+    def test_reply_warning_in_missed_personal_messages_with_direct_message_group(self) -> None:
         self._reply_warning_in_missed_personal_messages()
 
-    def test_extra_context_in_missed_personal_messages(self) -> None:
+    def test_extra_context_in_missed_personal_messages_with_direct_message_group(self) -> None:
         self._extra_context_in_missed_personal_messages()
 
     def test_extra_context_in_missed_group_direct_messages_two_others(self) -> None:
@@ -1128,16 +1155,12 @@ class TestMessageNotificationEmails(ZulipTestCase):
         realm.save(update_fields=["message_content_allowed_in_email_notifications"])
 
         # Emails have missed message content when message content is enabled by the user
-        do_change_user_setting(
-            user, "message_content_in_email_notifications", True, acting_user=None
-        )
+        self.set_user_setting(user, "message_content_in_email_notifications", True)
         mail.outbox = []
         self._extra_context_in_missed_personal_messages(show_message_content=True)
 
         # Emails don't have missed message content when message content is disabled by the user
-        do_change_user_setting(
-            user, "message_content_in_email_notifications", False, acting_user=None
-        )
+        self.set_user_setting(user, "message_content_in_email_notifications", False)
         mail.outbox = []
         self._extra_context_in_missed_personal_messages(
             show_message_content=False, message_content_disabled_by_user=True
@@ -1149,17 +1172,13 @@ class TestMessageNotificationEmails(ZulipTestCase):
         realm.message_content_allowed_in_email_notifications = False
         realm.save(update_fields=["message_content_allowed_in_email_notifications"])
 
-        do_change_user_setting(
-            user, "message_content_in_email_notifications", True, acting_user=None
-        )
+        self.set_user_setting(user, "message_content_in_email_notifications", True)
         mail.outbox = []
         self._extra_context_in_missed_personal_messages(
             show_message_content=False, message_content_disabled_by_realm=True
         )
 
-        do_change_user_setting(
-            user, "message_content_in_email_notifications", False, acting_user=None
-        )
+        self.set_user_setting(user, "message_content_in_email_notifications", False)
         mail.outbox = []
         self._extra_context_in_missed_personal_messages(
             show_message_content=False,
@@ -1183,7 +1202,7 @@ class TestMessageNotificationEmails(ZulipTestCase):
             f"http://zulip.testserver/user_avatars/{realm.id}/emoji/images/{realm_emoji_file_name}"
         )
         verify_body_include = [
-            f'<img alt=":green_tick:" src="{realm_emoji_url}" title="green tick" style="height: 20px;">'
+            f'<img alt=":green_tick:" src="{realm_emoji_url}" title="green tick" height="20" width="20">'
         ]
         email_subject = "DMs with Othello, the Moor of Venice"
         self._test_cases(
@@ -1203,7 +1222,7 @@ class TestMessageNotificationEmails(ZulipTestCase):
             "Extremely personal message with a hamburger :hamburger:!",
         )
         verify_body_include = [
-            '<img alt=":hamburger:" src="http://testserver/static/generated/emoji/images-twitter-64/1f354.png" title="hamburger" style="height: 20px;">'
+            '<img alt=":hamburger:" src="http://testserver/static/generated/emoji/images-twitter-64/1f354.png" title="hamburger" height="20" width="20">'
         ]
         email_subject = "DMs with Othello, the Moor of Venice"
         self._test_cases(
@@ -1220,7 +1239,7 @@ class TestMessageNotificationEmails(ZulipTestCase):
             "Come and join us in #**Verona**.",
         )
         stream_id = get_stream("Verona", get_realm("zulip")).id
-        href = f"http://zulip.testserver/#narrow/stream/{stream_id}-Verona"
+        href = f"http://zulip.testserver/#narrow/channel/{stream_id}-Verona"
         verify_body_include = [
             f'<a class="stream" href="{href}" data-stream-id="{stream_id}">#Verona</a'
         ]
@@ -1247,6 +1266,43 @@ class TestMessageNotificationEmails(ZulipTestCase):
         email_subject = "DMs with Cordelia, Lear's daughter"
         self._test_cases(msg_id, verify_body_include, email_subject)
 
+    def test_pm_link_in_missed_message_header_with_multiple_user_with_the_same_name(self) -> None:
+        hamlet = self.example_user("hamlet")
+        iago = self.example_user("iago")
+        iago_2 = self.example_user("ZOE")
+        iago_2.full_name = "iago"
+        iago_2.save()
+
+        msg_id = self.send_group_direct_message(
+            iago,
+            [hamlet, iago_2],
+            "Group personal message!",
+        )
+
+        verify_body_include = ["Iago: > Group personal message! -- Reply"]
+        email_subject = "Group DMs with iago and Iago"
+        self._test_cases(msg_id, verify_body_include, email_subject)
+
+    def test_group_dm_link_in_missed_message(self) -> None:
+        cordelia = self.example_user("cordelia")
+        hamlet = self.example_user("hamlet")
+        aaron = self.example_user("aaron")
+
+        msg_id = self.send_group_direct_message(
+            cordelia,
+            [hamlet, aaron, cordelia],
+            "Group DM link in email notifications",
+        )
+
+        other_users = sorted([aaron, cordelia], key=lambda user: user.id)
+        encoded_user_ids = ",".join([str(user.id) for user in other_users])
+        verify_body_include = [
+            f"view it in Zulip Dev Zulip: http://zulip.testserver/#narrow/dm/{encoded_user_ids}-group"
+        ]
+        group_display_name = " and ".join([user.full_name for user in other_users])
+        email_subject = "Group DMs with " + group_display_name
+        self._test_cases(msg_id, verify_body_include, email_subject)
+
     def test_sender_name_in_missed_message(self) -> None:
         hamlet = self.example_user("hamlet")
         msg_id_1 = self.send_stream_message(
@@ -1255,7 +1311,7 @@ class TestMessageNotificationEmails(ZulipTestCase):
         msg_id_2 = self.send_stream_message(self.example_user("iago"), "Verona", "* 1\n *2")
         msg_id_3 = self.send_personal_message(self.example_user("iago"), hamlet, "Hello")
 
-        handle_missedmessage_emails(
+        self.handle_missedmessage_emails(
             hamlet.id,
             {
                 msg_id_1: MissedMessageData(trigger=NotificationTriggers.MENTION),
@@ -1291,6 +1347,102 @@ class TestMessageNotificationEmails(ZulipTestCase):
             mail.outbox[2].alternatives[0][0],
         )
 
+    def test_sender_name_in_missed_pm(self) -> None:
+        hamlet = self.example_user("hamlet")
+        iago = self.example_user("iago")
+
+        get_or_create_direct_message_group(id_list=[hamlet.id, iago.id])
+
+        msg_id = self.send_personal_message(iago, hamlet, "Hello")
+
+        self.handle_missedmessage_emails(
+            hamlet.id,
+            {msg_id: MissedMessageData(trigger=NotificationTriggers.DIRECT_MESSAGE)},
+        )
+
+        assert isinstance(mail.outbox[0], EmailMultiAlternatives)
+        assert isinstance(mail.outbox[0].alternatives[0][0], str)
+        # Sender name is not appended for missed 1:1 direct messages
+        self.assertEqual("> Hello\n\n--\n\nReply", mail.outbox[0].body[:18])
+        self.assertIn(
+            ">\n                    \n                        <div><p>Hello</p></div>\n",
+            mail.outbox[0].alternatives[0][0],
+        )
+
+    def test_your_name_in_missed_pm_to_self(self) -> None:
+        hamlet = self.example_user("hamlet")
+
+        get_or_create_direct_message_group(id_list=[hamlet.id])
+
+        msg_id = self.send_personal_message(hamlet, hamlet, "Hello", read_by_sender=False)
+
+        self.handle_missedmessage_emails(
+            hamlet.id,
+            {msg_id: MissedMessageData(trigger=NotificationTriggers.DIRECT_MESSAGE)},
+        )
+
+        assert isinstance(mail.outbox[0], EmailMultiAlternatives)
+        self.assertEqual(mail.outbox[0].subject, "DMs with King Hamlet")
+        assert isinstance(mail.outbox[0].alternatives[0][0], str)
+        # Sender name is not appended for missed 1:1 direct messages
+        self.assertEqual("> Hello\n\n--\n\nReply", mail.outbox[0].body[:18])
+        self.assertIn(
+            ">\n                    \n                        <div><p>Hello</p></div>\n",
+            mail.outbox[0].alternatives[0][0],
+        )
+
+    def test_datetime_conversion_in_missed_message_content(self) -> None:
+        hamlet = self.example_user("hamlet")
+
+        get_or_create_direct_message_group(id_list=[hamlet.id])
+
+        # Normal message with timestamp.
+        msg_id = self.send_personal_message(
+            hamlet, hamlet, "Meeting at <time:2025-09-30T09:30:00-07:00>", read_by_sender=False
+        )
+
+        self.handle_missedmessage_emails(
+            hamlet.id,
+            {msg_id: MissedMessageData(trigger=NotificationTriggers.DIRECT_MESSAGE)},
+        )
+
+        assert isinstance(mail.outbox[0], EmailMultiAlternatives)
+        self.assertEqual(mail.outbox[0].subject, "DMs with King Hamlet")
+        assert isinstance(mail.outbox[0].alternatives[0][0], str)
+        # Sender name is not appended for missed 1:1 direct messages
+        self.assertEqual(
+            "> Meeting at <time:2025-09-30T09:30:00-07:00>\n\n--\n\nReply", mail.outbox[0].body[:56]
+        )
+        self.assertRegex(
+            mail.outbox[0].alternatives[0][0],
+            r'<p>Meeting at <time datetime="2025-09-30T16:30:00Z">Tue, Sep 30, 2025, 4:30[ \u202f]PM UTC</time></p>',
+        )
+
+        # The timestamp is not formatted correctly.
+        msg_id = self.send_personal_message(
+            hamlet, hamlet, "Meeting at <time:2025-09-30T09:30:00-07:00>", read_by_sender=False
+        )
+
+        with (
+            mock.patch(
+                "zerver.lib.email_notifications.format_datetime_to_string",
+                side_effect=ValueError("Invalid datetime format"),
+            ),
+            self.assertLogs(level="WARNING") as m,
+        ):
+            self.handle_missedmessage_emails(
+                hamlet.id,
+                {msg_id: MissedMessageData(trigger=NotificationTriggers.DIRECT_MESSAGE)},
+            )
+
+        self.assertEqual(
+            m.output,
+            [
+                "WARNING:zerver.lib.email_notifications:Failed to convert time element "
+                "'2025-09-30T16:30:00Z': Invalid datetime format",
+            ],
+        )
+
     def test_multiple_missed_personal_messages(self) -> None:
         hamlet = self.example_user("hamlet")
         msg_id_1 = self.send_personal_message(
@@ -1300,7 +1452,7 @@ class TestMessageNotificationEmails(ZulipTestCase):
             self.example_user("iago"), hamlet, "Personal Message 2"
         )
 
-        handle_missedmessage_emails(
+        self.handle_missedmessage_emails(
             hamlet.id,
             {
                 msg_id_1: MissedMessageData(trigger=NotificationTriggers.DIRECT_MESSAGE),
@@ -1326,7 +1478,7 @@ class TestMessageNotificationEmails(ZulipTestCase):
             msg_id = self.send_stream_message(iago, "Denmark", content=str(i))
             message_ids[msg_id] = MissedMessageData(trigger=NotificationTriggers.STREAM_EMAIL)
 
-        handle_missedmessage_emails(
+        self.handle_missedmessage_emails(
             hamlet.id,
             message_ids,
         )
@@ -1350,7 +1502,7 @@ class TestMessageNotificationEmails(ZulipTestCase):
             self.example_user("othello"), "Denmark", "@**King Hamlet**"
         )
 
-        handle_missedmessage_emails(
+        self.handle_missedmessage_emails(
             hamlet.id,
             {
                 msg_id_1: MissedMessageData(trigger=NotificationTriggers.STREAM_EMAIL),
@@ -1378,7 +1530,7 @@ class TestMessageNotificationEmails(ZulipTestCase):
 
         mention_msg_id = self.send_stream_message(user, stream_name, "@**King Hamlet**")
 
-        handle_missedmessage_emails(
+        self.handle_missedmessage_emails(
             late_subscribed_user.id,
             {mention_msg_id: MissedMessageData(trigger=NotificationTriggers.MENTION)},
         )
@@ -1405,7 +1557,7 @@ class TestMessageNotificationEmails(ZulipTestCase):
         )
         msg_id_3 = self.send_stream_message(cordelia, "Denmark", "Regular message")
 
-        handle_missedmessage_emails(
+        self.handle_missedmessage_emails(
             hamlet.id,
             {
                 msg_id_1: MissedMessageData(trigger=NotificationTriggers.MENTION),
@@ -1425,7 +1577,7 @@ class TestMessageNotificationEmails(ZulipTestCase):
             self.example_user("iago"), "Denmark", "Message2", topic_name="test2"
         )
 
-        handle_missedmessage_emails(
+        self.handle_missedmessage_emails(
             hamlet.id,
             {
                 msg_id_1: MissedMessageData(trigger=NotificationTriggers.STREAM_EMAIL),
@@ -1493,13 +1645,13 @@ class TestMessageNotificationEmails(ZulipTestCase):
 
         # A narrow URL which begins with a '#'.
         test_data = (
-            '<p><a href="#narrow/stream/test/topic/test.20topic/near/142"'
-            ' title="#narrow/stream/test/topic/test.20topic/near/142">Conversation</a></p>'
+            '<p><a href="#narrow/channel/test/topic/test.20topic/near/142"'
+            ' title="#narrow/channel/test/topic/test.20topic/near/142">Conversation</a></p>'
         )
         actual_output = convert(test_data)
         expected_output = (
-            '<div><p><a href="http://example.com/#narrow/stream/test/topic/test.20topic/near/142"'
-            ' title="http://example.com/#narrow/stream/test/topic/test.20topic/near/142">Conversation</a></p></div>'
+            '<div><p><a href="http://example.com/#narrow/channel/test/topic/test.20topic/near/142"'
+            ' title="http://example.com/#narrow/channel/test/topic/test.20topic/near/142">Conversation</a></p></div>'
         )
         self.assertEqual(actual_output, expected_output)
 
@@ -1590,7 +1742,7 @@ class TestMessageNotificationEmails(ZulipTestCase):
         expected_output = (
             '<p>See <img alt=":cloud_with_lightning_and_rain:"'
             ' src="http://testserver/static/generated/emoji/images-google-64/26c8.png"'
-            ' title="cloud with lightning and rain" style="height: 20px;">.</p>'
+            ' title="cloud with lightning and rain" height="20" width="20">.</p>'
         )
         self.assertEqual(actual_output, expected_output)
 
@@ -1628,14 +1780,14 @@ class TestMessageNotificationEmails(ZulipTestCase):
         # user groups having upto 'MAX_GROUP_SIZE_FOR_MENTION_REACTIVATION'
         # members are small user groups.
         small_user_group = check_add_user_group(
-            zulip_realm, "small_user_group", [hamlet, othello], acting_user=None
+            zulip_realm, "small_user_group", [hamlet, othello], acting_user=hamlet
         )
 
         large_user_group = check_add_user_group(
-            zulip_realm, "large_user_group", [hamlet], acting_user=None
+            zulip_realm, "large_user_group", [hamlet], acting_user=hamlet
         )
         subgroup = check_add_user_group(
-            zulip_realm, "subgroup", [othello, cordelia], acting_user=None
+            zulip_realm, "subgroup", [othello, cordelia], acting_user=hamlet
         )
         add_subgroups_to_user_group(large_user_group, [subgroup], acting_user=None)
 
@@ -1652,7 +1804,7 @@ class TestMessageNotificationEmails(ZulipTestCase):
         def send_personal_mention() -> None:
             mention = f"@**{hamlet.full_name}**"
             stream_mentioned_message_id = self.send_stream_message(othello, "Denmark", mention)
-            handle_missedmessage_emails(
+            self.handle_missedmessage_emails(
                 hamlet.id,
                 {
                     stream_mentioned_message_id: MissedMessageData(
@@ -1668,7 +1820,7 @@ class TestMessageNotificationEmails(ZulipTestCase):
         def send_direct_message() -> None:
             # Soft reactivate the user by sending a personal message
             personal_message_id = self.send_personal_message(othello, hamlet, "Message")
-            handle_missedmessage_emails(
+            self.handle_missedmessage_emails(
                 hamlet.id,
                 {
                     personal_message_id: MissedMessageData(
@@ -1698,7 +1850,7 @@ class TestMessageNotificationEmails(ZulipTestCase):
         def send_topic_wildcard_mention() -> None:
             mention = "@**topic**"
             stream_mentioned_message_id = self.send_stream_message(othello, "Denmark", mention)
-            handle_missedmessage_emails(
+            self.handle_missedmessage_emails(
                 hamlet.id,
                 {
                     stream_mentioned_message_id: MissedMessageData(
@@ -1714,7 +1866,7 @@ class TestMessageNotificationEmails(ZulipTestCase):
         def send_stream_wildcard_mention() -> None:
             mention = "@**all**"
             stream_mentioned_message_id = self.send_stream_message(othello, "Denmark", mention)
-            handle_missedmessage_emails(
+            self.handle_missedmessage_emails(
                 hamlet.id,
                 {
                     stream_mentioned_message_id: MissedMessageData(
@@ -1747,7 +1899,7 @@ class TestMessageNotificationEmails(ZulipTestCase):
         def send_small_group_mention() -> None:
             mention = "@*small_user_group*"
             stream_mentioned_message_id = self.send_stream_message(othello, "Denmark", mention)
-            handle_missedmessage_emails(
+            self.handle_missedmessage_emails(
                 hamlet.id,
                 {
                     stream_mentioned_message_id: MissedMessageData(
@@ -1764,7 +1916,7 @@ class TestMessageNotificationEmails(ZulipTestCase):
         def send_large_group_mention() -> None:
             mention = "@*large_user_group*"
             stream_mentioned_message_id = self.send_stream_message(othello, "Denmark", mention)
-            handle_missedmessage_emails(
+            self.handle_missedmessage_emails(
                 hamlet.id,
                 {
                     stream_mentioned_message_id: MissedMessageData(
@@ -1782,7 +1934,7 @@ class TestMessageNotificationEmails(ZulipTestCase):
         othello = self.example_user("othello")
         msg_id = self.send_stream_message(othello, "Denmark")
 
-        handle_missedmessage_emails(
+        self.handle_missedmessage_emails(
             hamlet.id,
             {msg_id: MissedMessageData(trigger=NotificationTriggers.FOLLOWED_TOPIC_EMAIL)},
         )
@@ -1794,3 +1946,114 @@ class TestMessageNotificationEmails(ZulipTestCase):
             "You are receiving this because you have email notifications enabled for topics you follow.",
             email_body,
         )
+
+    def test_empty_string_topic_missed_message(self) -> None:
+        hamlet = self.example_user("hamlet")
+        othello = self.example_user("othello")
+
+        message_id = self.send_stream_message(
+            othello,
+            "Denmark",
+            content="@**topic**",
+            topic_name="",
+        )
+
+        self.handle_missedmessage_emails(
+            hamlet.id,
+            {
+                message_id: MissedMessageData(trigger=NotificationTriggers.TOPIC_WILDCARD_MENTION),
+            },
+        )
+
+        expected_email_subject = f"#Denmark > {Message.EMPTY_TOPIC_FALLBACK_NAME}"
+        expected_email_body_includes = f"You are receiving this because all topic participants were mentioned in #Denmark > {Message.EMPTY_TOPIC_FALLBACK_NAME}."
+        self.assertEqual(mail.outbox[0].subject, expected_email_subject)
+        self.assertIn(expected_email_body_includes, self.normalize_string(mail.outbox[0].body))
+
+    def test_prepare_synthetic_root_message_id(self) -> None:
+        hamlet = self.example_user("hamlet")
+        aaron = self.example_user("aaron")
+        cordelia = self.example_user("cordelia")
+        othello = self.example_user("othello")
+
+        # Verify different `synthetic_root_message_id` for different 1:1 DM to hamlet.
+        message_id = self.send_personal_message(aaron, hamlet)
+        recipient_id = Message.objects.get(id=message_id).recipient_id
+        synthetic_root_message_id = prepare_synthetic_root_message_id(
+            Recipient.DIRECT_MESSAGE_GROUP, recipient_id
+        )
+        self.assertEqual(synthetic_root_message_id, f"<{recipient_id}@testserver>")
+
+        message_id = self.send_personal_message(cordelia, hamlet)
+        recipient_id = Message.objects.get(id=message_id).recipient_id
+        synthetic_root_message_id = prepare_synthetic_root_message_id(
+            Recipient.DIRECT_MESSAGE_GROUP, recipient_id
+        )
+        self.assertEqual(synthetic_root_message_id, f"<{recipient_id}@testserver>")
+
+        # Verify different `synthetic_root_message_id` for different group-DM to hamlet.
+        message_id = self.send_group_direct_message(aaron, [hamlet, cordelia], "Group DM!")
+        recipient_id = Message.objects.get(id=message_id).recipient_id
+        synthetic_root_message_id = prepare_synthetic_root_message_id(
+            Recipient.DIRECT_MESSAGE_GROUP, recipient_id
+        )
+        self.assertEqual(synthetic_root_message_id, f"<{recipient_id}@testserver>")
+
+        message_id = self.send_group_direct_message(aaron, [hamlet, cordelia, othello], "Group DM!")
+        recipient_id = Message.objects.get(id=message_id).recipient_id
+        synthetic_root_message_id = prepare_synthetic_root_message_id(
+            Recipient.DIRECT_MESSAGE_GROUP, recipient_id
+        )
+        expected_synthetic_root_message_id = f"<{recipient_id}@testserver>"
+        self.assertEqual(synthetic_root_message_id, expected_synthetic_root_message_id)
+
+        # Changing the sender in a group DM doesn't alter `synthetic_root_message_id`.
+        message_id = self.send_group_direct_message(othello, [hamlet, cordelia, aaron], "Group DM!")
+        recipient_id = Message.objects.get(id=message_id).recipient_id
+        synthetic_root_message_id = prepare_synthetic_root_message_id(
+            Recipient.DIRECT_MESSAGE_GROUP, recipient_id
+        )
+        self.assertEqual(synthetic_root_message_id, expected_synthetic_root_message_id)
+
+        # Verify different `synthetic_root_message_id` for different topics.
+        topic_name = "test"
+        message_id = self.send_stream_message(othello, "Denmark", topic_name=topic_name)
+        recipient_id = Message.objects.get(id=message_id).recipient_id
+        synthetic_root_message_id = prepare_synthetic_root_message_id(
+            Recipient.STREAM, recipient_id, topic_name=topic_name
+        )
+        topic_name_base64 = base64.b64encode(topic_name.encode("utf-8")).decode("utf-8")
+        self.assertEqual(
+            synthetic_root_message_id, f"<{recipient_id}.{topic_name_base64}@testserver>"
+        )
+
+        topic_name = "hello world"
+        message_id = self.send_stream_message(aaron, "Verona", topic_name=topic_name)
+        recipient_id = Message.objects.get(id=message_id).recipient_id
+        synthetic_root_message_id = prepare_synthetic_root_message_id(
+            Recipient.STREAM, recipient_id, topic_name=topic_name
+        )
+        topic_name_base64 = base64.b64encode(topic_name.encode("utf-8")).decode("utf-8")
+        expected_synthetic_root_message_id = f"<{recipient_id}.{topic_name_base64}@testserver>"
+        self.assertEqual(synthetic_root_message_id, expected_synthetic_root_message_id)
+
+        # Same `synthetic_root_message_id` for messages in the same conversation.
+        message_id = self.send_stream_message(cordelia, "Verona", topic_name=topic_name)
+        recipient_id = Message.objects.get(id=message_id).recipient_id
+        synthetic_root_message_id = prepare_synthetic_root_message_id(
+            Recipient.STREAM, recipient_id, topic_name=topic_name
+        )
+        self.assertEqual(synthetic_root_message_id, expected_synthetic_root_message_id)
+
+        # Verify only Printable US-ASCII, exactly one '@', no spaces.
+        topic_name = "中文 @ zulip 🐙"
+        message_id = self.send_stream_message(othello, "Denmark", topic_name=topic_name)
+        recipient_id = Message.objects.get(id=message_id).recipient_id
+        synthetic_root_message_id = prepare_synthetic_root_message_id(
+            Recipient.STREAM, recipient_id, topic_name=topic_name
+        )
+        self.assertTrue(
+            synthetic_root_message_id.isascii() and synthetic_root_message_id.isprintable()
+        )
+        self.assertEqual(synthetic_root_message_id.count("@"), 1)
+        self.assertNotIn(" ", synthetic_root_message_id)

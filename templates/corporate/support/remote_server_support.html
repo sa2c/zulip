@@ -46,7 +46,7 @@
                     {% if remote_server.plan_type == SPONSORED_PLAN_TYPE %}
                         <p class="support-section-header">On 100% sponsored Zulip Community plan 🎉</p>
                     {% endif %}
-                    {% if remote_servers_support_data[remote_server.id].sponsorship_data.default_discount %}
+                    {% if remote_servers_support_data[remote_server.id].sponsorship_data.has_discount %}
                         <p class="support-section-header">Has a discount 💸</p>
                     {% endif %}
                     <b>Contact email</b>: {{ remote_server.contact_email }}
@@ -76,6 +76,7 @@
                     <b>Plan type</b>: {{ get_plan_type_name(remote_server.plan_type) }}<br />
                     <b>Non-guest user count</b>: {{ remote_servers_support_data[remote_server.id].user_data.non_guest_user_count }}<br />
                     <b>Guest user count</b>: {{ remote_servers_support_data[remote_server.id].user_data.guest_user_count }}<br />
+                    <a target="_blank" rel="noopener noreferrer" href="/activity/remote/logs/server/{{ remote_server.uuid }}/">View audit logs</a><br />
                     <br />
                     <b>Total mobile user count</b>: {{ remote_servers_support_data[remote_server.id].mobile_push_data.total_mobile_users }}<br />
                     {% if remote_realms[remote_server.id] != [] %}
@@ -91,16 +92,17 @@
                 {% endwith %}
 
                 {% if remote_server.deactivated %}
-                <div class="remote-support-sponsorship-container">
+                <div class="support-sponsorship-container">
                     {% with %}
                         {% set sponsorship_data = remote_servers_support_data[remote_server.id].sponsorship_data %}
                         {% include 'corporate/support/sponsorship_details.html' %}
                     {% endwith %}
                 </div>
                 {% elif remote_server.plan_type != SPONSORED_PLAN_TYPE %}
-                <div class="remote-support-sponsorship-container">
+                <div class="support-sponsorship-container">
                     {% with %}
                         {% set sponsorship_data = remote_servers_support_data[remote_server.id].sponsorship_data %}
+                        {% set PLAN_TYPES = REMOTE_PLAN_TIERS %}
                         {% set remote_id = remote_server.id %}
                         {% set remote_type = "remote_server_id" %}
                         {% set has_fixed_price = remote_servers_support_data[remote_server.id].plan_data.has_fixed_price %}
@@ -139,7 +141,7 @@
                 {% elif not remote_server.deactivated %}
                 <div class="next-plan-container">
                     {% with %}
-                        {% set is_current_plan_billable = remote_servers_support_data[remote_server.id].plan_data.is_current_plan_billable %}
+                        {% set plan_data = remote_servers_support_data[remote_server.id].plan_data %}
                         {% set remote_id = remote_server.id %}
                         {% set remote_type = "remote_server_id" %}
                         {% include 'corporate/support/next_plan_forms_support.html' %}
@@ -148,19 +150,39 @@
                 {% endif %}
 
                 {% if remote_server.deactivated %}
-                <form method="POST" class="reactivate-remote-server-form">
-                    {{ csrf_input }}
-                    <input type="hidden" name="remote_server_id" value="{{ remote_server.id }}" />
-                    <input type="hidden" name="remote_server_status" value="active" />
-                    <button class="reactivate-remote-server-button"><b>Reactivate</b>: {{ remote_server.hostname }}</button>
-                </form>
+                <div class="deactivation-information-container">
+                    {% with %}
+                        {% set deactivation_data = remote_servers_support_data[remote_server.id].deactivation_data %}
+                        {% include 'corporate/support/deactivation_data.html' %}
+                    {% endwith %}
+                    <form method="POST" class="reactivate-remote-server-form">
+                        {{ csrf_input }}
+                        <input type="hidden" name="remote_server_id" value="{{ remote_server.id }}" />
+                        <input type="hidden" name="remote_server_status" value="active" />
+                        <button class="reactivate-remote-server-button"><b>Reactivate</b>: {{ remote_server.hostname }}</button>
+                    </form>
+                </div>
                 {% else %}
-                <form method="POST" class="deactivate-remote-server-form">
-                    {{ csrf_input }}
-                    <input type="hidden" name="remote_server_id" value="{{ remote_server.id }}" />
-                    <input type="hidden" name="remote_server_status" value="deactivated" />
-                    <button class="deactivate-remote-server-button"><b>Deactivate</b>: {{ remote_server.hostname }}</button>
-                </form>
+                <div class="deactivation-information-container">
+                    <p class="support-section-header">⚠️ Deactivate remote server:</p>
+                    <form method="POST" class="deactivate-remote-server-form">
+                        {{ csrf_input }}
+                        <input type="hidden" name="remote_server_id" value="{{ remote_server.id }}" />
+                        <input type="hidden" name="remote_server_status" value="deactivated" />
+                        <b>Deactivation reason</b>:<br />
+                        <select name="remote_server_deactivation_reason" id="remote_server_deactivation_reason">
+                            {% for reason in DEACTIVATION_REASONS %}
+                                {% if reason == "owner_request" %}
+                                    <option value="{{ reason }}" selected>{{ reason }}</option>
+                                {% else %}
+                                    <option value="{{ reason }}">{{ reason }}</option>
+                                {% endif %}
+                            {% endfor %}
+                        </select>
+                        <br />
+                        <button class="deactivate-remote-server-button"><b>Deactivate</b>: {{ remote_server.hostname }}</button>
+                    </form>
+                </div>
                 {% endif %}
             </div>
             <div class="remote-realms-section">

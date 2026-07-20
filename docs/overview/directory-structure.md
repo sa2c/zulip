@@ -1,11 +1,10 @@
 # Directory structure
 
-This page documents the Zulip directory structure, where to find
-things, and how to decide where to put a file.
-
-You may also find the [new application feature
-tutorial](../tutorials/new-feature-tutorial.md) helpful for understanding the
-flow through these files.
+This page documents the directory structure of the [Zulip server and
+web app project](https://github.com/zulip/zulip). You may also find
+the [new application feature
+tutorial](../tutorials/new-feature-tutorial.md) helpful for
+understanding the flow through these files.
 
 ### Core Python files
 
@@ -25,12 +24,12 @@ paths will be familiar to Django developers.
 
 - `zerver/actions/*.py` Most code doing writes to user-facing
   database tables lives here. In particular, we have a policy that
-  all code calling `send_event` to trigger [pushing data to
+  all code calling `send_event_on_commit` to trigger [pushing data to
   clients](../subsystems/events-system.md) must live here.
 
 - `zerver/views/*.py` Most [Django views](https://docs.djangoproject.com/en/5.0/topics/http/views/).
 
-- `zerver/webhooks/` Webhook views and tests for [Zulip's incoming webhook integrations](https://zulip.com/api/incoming-webhooks-overview).
+- `zerver/webhooks/` Webhook views and tests for [Zulip's incoming webhook integrations](../webhooks/incoming-webhooks-overview.md).
 
 - `zerver/tornado/views.py` Tornado views.
 
@@ -68,7 +67,7 @@ templating systems.
 
 - `node_modules/` Third-party JavaScript installed via pnpm.
 
-- `web/shared/icons/` Icons placed in this directory are compiled
+- `web/icons/` Icons placed in this directory are compiled
   into an icon font.
 
 ---

@@ -9,8 +9,6 @@ Get Zulip notifications from your Trello boards!
 
 {start_tabs}
 
-1. {!create-channel.md!}
-
 1. {!create-an-incoming-webhook.md!}
 
 1. {!generate-webhook-url-basic.md!}
@@ -45,7 +43,7 @@ Get Zulip notifications from your Trello boards!
 
     !!! tip ""
 
-        <kbd>Ctrl</kbd> + <kbd>s</kbd> or <kbd>Cmd</kbd> + <kbd>s</kbd>
+        <kbd>Ctrl</kbd> + <kbd>S</kbd> or <kbd>Cmd</kbd> + <kbd>S</kbd>
         on that page should work in most browsers.
 
 1. Run the `zulip-trello` script in a terminal, after replacing the all

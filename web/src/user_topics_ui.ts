@@ -1,26 +1,29 @@
 import $ from "jquery";
+import assert from "minimalistic-assert";
 
-import * as inbox_util from "./inbox_util";
-import * as message_lists from "./message_lists";
-import type {Message} from "./message_store";
-import * as narrow_state from "./narrow_state";
-import * as overlays from "./overlays";
-import * as popover_menus from "./popover_menus";
-import * as recent_view_ui from "./recent_view_ui";
-import * as settings_user_topics from "./settings_user_topics";
-import * as stream_list from "./stream_list";
-import * as sub_store from "./sub_store";
-import * as unread_ui from "./unread_ui";
-import * as user_topics from "./user_topics";
-import type {ServerUserTopic} from "./user_topics";
+import * as inbox_util from "./inbox_util.ts";
+import type {MessageList} from "./message_list.ts";
+import * as message_lists from "./message_lists.ts";
+import type {Message} from "./message_store.ts";
+import * as narrow_state from "./narrow_state.ts";
+import * as overlays from "./overlays.ts";
+import * as popover_menus from "./popover_menus.ts";
+import * as recent_view_ui from "./recent_view_ui.ts";
+import * as settings_user_topics from "./settings_user_topics.ts";
+import * as stream_data from "./stream_data.ts";
+import * as stream_list from "./stream_list.ts";
+import * as sub_store from "./sub_store.ts";
+import * as unread_ui from "./unread_ui.ts";
+import * as user_topics from "./user_topics.ts";
+import type {ServerUserTopic} from "./user_topics.ts";
 
-function should_add_topic_update_delay(visibility_policy: number): boolean | undefined {
+function should_add_topic_update_delay(visibility_policy: number): boolean {
     // If topic visibility related popovers are active, add a delay to all methods that
     // hide the topic on mute. This allows the switching animations to complete before the
     // popover is force closed due to the reference element being removed from view.
     const is_topic_muted = visibility_policy === user_topics.all_visibility_policies.MUTED;
     const is_relevant_popover_open =
-        popover_menus.is_topic_menu_popover_displayed() ??
+        popover_menus.is_topic_menu_popover_displayed() ||
         popover_menus.is_visibility_policy_popover_displayed();
 
     // Don't add delay if the user is in inbox view or topics narrow, since
@@ -31,7 +34,15 @@ function should_add_topic_update_delay(visibility_policy: number): boolean | und
     return is_topic_muted && is_relevant_popover_open && !is_inbox_view && !is_topic_narrow;
 }
 
-export function handle_topic_updates(user_topic_event: ServerUserTopic): void {
+export function handle_topic_updates(
+    user_topic_event: ServerUserTopic,
+    refreshed_current_narrow = false,
+    rerender_combined_feed_callback?: (combined_feed_msg_list: MessageList) => void,
+): void {
+    const was_topic_visible_in_home = user_topics.is_topic_visible_in_home(
+        user_topic_event.stream_id,
+        user_topic_event.topic_name,
+    );
     // Update the UI after changes in topic visibility policies.
     user_topics.set_user_topic(user_topic_event);
 
@@ -39,11 +50,30 @@ export function handle_topic_updates(user_topic_event: ServerUserTopic): void {
         () => {
             stream_list.update_streams_sidebar();
             unread_ui.update_unread_counts();
-            message_lists.current?.update_muting_and_rerender();
             recent_view_ui.update_topic_visibility_policy(
                 user_topic_event.stream_id,
                 user_topic_event.topic_name,
             );
+
+            if (!refreshed_current_narrow) {
+                if (message_lists.current?.data.filter.is_in_home()) {
+                    const is_topic_visible_in_home = user_topics.is_topic_visible_in_home(
+                        user_topic_event.stream_id,
+                        user_topic_event.topic_name,
+                    );
+                    if (
+                        rerender_combined_feed_callback &&
+                        !was_topic_visible_in_home &&
+                        is_topic_visible_in_home
+                    ) {
+                        rerender_combined_feed_callback(message_lists.current);
+                    } else {
+                        message_lists.current.update_muting_and_rerender();
+                    }
+                } else {
+                    message_lists.current?.update_muting_and_rerender();
+                }
+            }
         },
         should_add_topic_update_delay(user_topic_event.visibility_policy) ? 500 : 0,
     );
@@ -56,7 +86,7 @@ export function handle_topic_updates(user_topic_event: ServerUserTopic): void {
         // Find the row with the specified stream_id and topic_name
         const $row = $('tr[data-stream-id="' + stream_id + '"][data-topic="' + topic_name + '"]');
 
-        if ($row.length) {
+        if ($row.length > 0) {
             // If the row exists, update the status only.
             // We don't call 'populate_list' in this case as it re-creates the panel (re-sorts by date updated +
             // removes topics with status set to 'Default for channel'), making it hard to review the changes
@@ -74,14 +104,34 @@ export function handle_topic_updates(user_topic_event: ServerUserTopic): void {
     setTimeout(() => {
         // Defer updates for any background-rendered messages lists until the visible one has been updated.
         for (const list of message_lists.all_rendered_message_lists()) {
-            if (list.preserve_rendered_state && message_lists.current !== list) {
-                list.update_muting_and_rerender();
+            if (message_lists.current !== list) {
+                if (list.data.filter.is_in_home()) {
+                    const is_topic_visible_in_home = user_topics.is_topic_visible_in_home(
+                        user_topic_event.stream_id,
+                        user_topic_event.topic_name,
+                    );
+                    if (!was_topic_visible_in_home && is_topic_visible_in_home) {
+                        message_lists.delete_message_list(list);
+                    } else {
+                        list.update_muting_and_rerender();
+                    }
+                } else {
+                    list.update_muting_and_rerender();
+                }
             }
         }
     }, 0);
 }
 
-export function toggle_topic_visibility_policy(message: Message): void {
+export function toggle_topic_visibility_policy(
+    message:
+        | Message
+        | {
+              type: Message["type"];
+              stream_id: number;
+              topic: string;
+          },
+): void {
     if (message.type !== "stream") {
         return;
     }
@@ -89,21 +139,35 @@ export function toggle_topic_visibility_policy(message: Message): void {
     const stream_id = message.stream_id;
     const topic = message.topic;
 
-    if (
-        user_topics.is_topic_muted(stream_id, topic) ||
-        user_topics.is_topic_unmuted(stream_id, topic)
-    ) {
-        user_topics.set_user_topic_visibility_policy(
-            stream_id,
-            topic,
-            user_topics.all_visibility_policies.INHERIT,
-        );
-    } else {
-        if (sub_store.get(stream_id)?.is_muted) {
+    if (!stream_data.is_subscribed(stream_id)) {
+        return;
+    }
+
+    const sub = sub_store.get(stream_id);
+    assert(sub !== undefined);
+
+    if (sub.is_muted) {
+        if (user_topics.is_topic_unmuted_or_followed(stream_id, topic)) {
+            user_topics.set_user_topic_visibility_policy(
+                stream_id,
+                topic,
+                user_topics.all_visibility_policies.INHERIT,
+                true,
+            );
+        } else {
             user_topics.set_user_topic_visibility_policy(
                 stream_id,
                 topic,
                 user_topics.all_visibility_policies.UNMUTED,
+                true,
+            );
+        }
+    } else {
+        if (user_topics.is_topic_muted(stream_id, topic)) {
+            user_topics.set_user_topic_visibility_policy(
+                stream_id,
+                topic,
+                user_topics.all_visibility_policies.INHERIT,
                 true,
             );
         } else {

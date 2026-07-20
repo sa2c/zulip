@@ -5,31 +5,42 @@ import type {PanZoom} from "panzoom";
 
 import render_lightbox_overlay from "../templates/lightbox_overlay.hbs";
 
-import * as blueslip from "./blueslip";
-import * as message_store from "./message_store";
-import * as overlays from "./overlays";
-import * as people from "./people";
-import * as popovers from "./popovers";
-import * as rows from "./rows";
-import * as util from "./util";
+import * as blueslip from "./blueslip.ts";
+import * as message_store from "./message_store.ts";
+import * as overlays from "./overlays.ts";
+import * as people from "./people.ts";
+import * as popovers from "./popovers.ts";
+import * as rows from "./rows.ts";
+import * as util from "./util.ts";
 
-type Payload = {
+type MediaType = "image" | "inline-video" | "youtube-video" | "vimeo-video" | "embed-video";
+
+type Media = {
+    // Sender's full name
     user: string | undefined;
-    title: string | undefined;
-    type: string;
+    // aria-label (or url, as fallback) of media
+    title: string;
+    type: MediaType;
+    // URL to use in message list or carousel
     preview: string;
+    // URL to use for display in the lightbox
     source: string;
+    // URL to the original resource for download
     url: string;
     original_width_px: number | undefined;
     original_height_px: number | undefined;
 };
 
 let is_open = false;
+let open_image: ($media: JQuery<HTMLImageElement>) => void;
+let open_video: ($media: JQuery<HTMLMediaElement>) => void;
+let overlay_restore_callback: (() => void) | undefined;
 
 // The asset map is a map of all retrieved images and YouTube videos that are memoized instead of
-// being looked up multiple times.  It is keyed by the asset's "canonical URL," which is likely the
-// `src` used in the message feed, but for thumbnailed images is the full-resolution original URL.
-const asset_map = new Map<string, Payload>();
+// being looked up multiple times. It is keyed by the message id with each value being the
+// message's assets map keyed by the asset's "canonical URL," which is likely the `src` used in
+// the message feed, but for thumbnailed images is the full-resolution original URL.
+const asset_map = new Map<number, Map<string, Media>>();
 
 export class PanZoomControl {
     // Class for both initializing and controlling the
@@ -98,9 +109,6 @@ export class PanZoomControl {
                 case "-":
                     this.zoomOut();
                     break;
-                case "v":
-                    overlays.close_overlay("lightbox");
-                    break;
             }
             e.preventDefault();
             e.stopPropagation();
@@ -118,12 +126,12 @@ export class PanZoomControl {
         // See https://github.com/anvaka/panzoom/issues/112 for upstream discussion.
 
         const {scale, x, y} = e.getTransform();
-        const image_width = $(".zoom-element > img")[0]!.clientWidth * scale;
-        const image_height = $(".zoom-element > img")[0]!.clientHeight * scale;
-        const zoom_element_width = $(".zoom-element")[0]!.clientWidth * scale;
-        const zoom_element_height = $(".zoom-element")[0]!.clientHeight * scale;
-        const max_translate_x = $(".image-preview")[0]!.clientWidth;
-        const max_translate_y = $(".image-preview")[0]!.clientHeight;
+        const image_width = util.the($(".zoom-element > img")).clientWidth * scale;
+        const image_height = util.the($(".zoom-element > img")).clientHeight * scale;
+        const zoom_element_width = util.the($(".zoom-element")).clientWidth * scale;
+        const zoom_element_height = util.the($(".zoom-element")).clientHeight * scale;
+        const max_translate_x = util.the($(".image-preview")).clientWidth;
+        const max_translate_y = util.the($(".image-preview")).clientHeight;
 
         // When the image is dragged out of the image-preview container
         // (max_translate) it will be "snapped" back so that the number
@@ -202,9 +210,20 @@ export class PanZoomControl {
 export function clear_for_testing(): void {
     is_open = false;
     asset_map.clear();
+    overlay_restore_callback = undefined;
 }
 
-export function canonical_url_of_media(media: HTMLMediaElement): string {
+export function invalidate_asset_map_of_message(message_id: number): void {
+    asset_map.delete(message_id);
+}
+
+function set_selected_media_element($media: JQuery<HTMLMediaElement | HTMLImageElement>): void {
+    // Clear out any previously selected element
+    $(".media-to-select-in-lightbox-list").removeClass("media-to-select-in-lightbox-list");
+    $media.addClass("media-to-select-in-lightbox-list");
+}
+
+export function canonical_url_of_media(media: HTMLMediaElement | HTMLImageElement): string {
     let media_string = media.src;
     if (!media_string) {
         return "";
@@ -223,17 +242,16 @@ export function canonical_url_of_media(media: HTMLMediaElement): string {
     return media_string;
 }
 
-export function render_lightbox_media_list(displayed_source: string): void {
+export function render_lightbox_media_list(): void {
     if (!is_open) {
-        const message_media_list = $<HTMLMediaElement>(
-            ".focused-message-list .message_inline_image img, .focused-message-list .message_inline_video video",
+        const message_media_list = $<HTMLMediaElement | HTMLImageElement>(
+            ".focused-message-list .message-media-inline-image img, .focused-message-list .message-media-preview-image img, .focused-message-list .message_inline_video:not(.video-format-unsupported) video",
         ).toArray();
         const $lightbox_media_list = $("#lightbox_overlay .image-list").empty();
-        const canonical_displayed_source = new URL(displayed_source, window.location.origin).href;
         for (const media of message_media_list) {
-            const message_media_list_src = canonical_url_of_media(media);
-            const className =
-                message_media_list_src === canonical_displayed_source ? "image selected" : "image";
+            const className = media.classList.contains("media-to-select-in-lightbox-list")
+                ? "image selected"
+                : "image";
             const is_video = media.tagName === "VIDEO";
 
             // We parse the data for each image to show in the list,
@@ -251,7 +269,6 @@ export function render_lightbox_media_list(displayed_source: string): void {
 
                 const $video = $("<video>");
                 $video.attr("src", payload.source);
-                $video.attr("controls", "false");
 
                 $node.append($video);
             } else {
@@ -266,13 +283,11 @@ export function render_lightbox_media_list(displayed_source: string): void {
             $lightbox_media_list.append($node);
         }
     }
+    update_arrow_visibility();
 }
 
-function display_image(payload: Payload): void {
-    render_lightbox_media_list(payload.source);
-
-    $(".player-container, .video-player").hide();
-    $(".image-preview, .media-actions, .media-description, .download, .lightbox-zoom-reset").show();
+function display_image(payload: Media): void {
+    $(".image-preview, .media-actions, .lightbox-zoom-reset").show();
 
     const $img_container = $("#lightbox_overlay .image-preview > .zoom-element");
     const $img = $("<img>");
@@ -289,121 +304,102 @@ function display_image(payload: Payload): void {
     }
     $img_container.empty();
     $img_container.append($img).show();
-
-    const filename = payload.url?.split("/").pop();
-    $(".media-description .title")
-        .text(payload.title ?? "N/A")
-        .attr("aria-label", payload.title ?? "N/A")
-        .attr("data-filename", filename ?? "N/A");
-    if (payload.user !== undefined) {
-        $(".media-description .user").text(payload.user).prop("title", payload.user);
-    }
-
-    $(".media-actions .open").attr("href", payload.source);
-
-    const url = new URL(payload.source, window.location.href);
-    const same_origin = url.origin === window.location.origin;
-    if (same_origin && url.pathname.startsWith("/user_uploads/")) {
-        // Switch to the "download" handler, so S3 URLs set their Content-Disposition
-        url.pathname = "/user_uploads/download/" + url.pathname.slice("/user_uploads/".length);
-        $(".media-actions .download").attr("href", url.href);
-    } else if (same_origin) {
-        $(".media-actions .download").attr("href", payload.source);
-    } else {
-        // If it's not same-origin, and we don't know how to tell the remote service to put a
-        // content-disposition on it, the download can't possibly download, just show -- so hide the
-        // element.
-        $(".media-actions .download").hide();
-    }
 }
 
-function display_video(payload: Payload): void {
-    render_lightbox_media_list(payload.source);
-
-    $(
-        "#lightbox_overlay .image-preview, .media-description, .download, .lightbox-zoom-reset, .video-player",
-    ).hide();
-    $(".player-container").show();
-
+function display_video(payload: Media): void {
     if (payload.type === "inline-video") {
-        $(".player-container").hide();
-        $(".video-player, .media-description").show();
+        $(".video-player").show();
         const $video = $("<video>");
         $video.attr("src", payload.source);
         $video.attr("controls", "true");
         $(".video-player").empty();
         $(".video-player").append($video);
-        $(".media-actions .open").attr("href", payload.source);
-
-        const filename = payload.url?.split("/").pop();
-        $(".media-description .title")
-            .text(payload.title ?? "N/A")
-            .attr("aria-label", payload.title ?? "N/A")
-            .attr("data-filename", filename ?? "N/A");
-        if (payload.user !== undefined) {
-            $(".media-description .user").text(payload.user).prop("title", payload.user);
-        }
         return;
     }
 
-    let source;
-    switch (payload.type) {
-        case "youtube-video":
-            source = "https://www.youtube.com/embed/" + payload.source;
-            break;
-        case "vimeo-video":
-            source = "https://player.vimeo.com/video/" + payload.source;
-            break;
-        case "embed-video":
-            // Use data: to load the player in a unique origin for security.
-            source =
-                "data:text/html," +
-                window.encodeURIComponent(
-                    "<!DOCTYPE html><style>iframe{position:absolute;left:0;top:0;width:100%;height:100%;box-sizing:border-box}</style>" +
-                        payload.source,
-                );
-            break;
-    }
+    $(".player-container").show();
 
     const $iframe = $("<iframe>");
     $iframe.attr(
         "sandbox",
         "allow-forms allow-modals allow-orientation-lock allow-pointer-lock allow-popups allow-popups-to-escape-sandbox allow-presentation allow-same-origin allow-scripts",
     );
-    assert(source !== undefined);
-    $iframe.attr("src", source);
+    assert(payload.source !== undefined);
+    $iframe.attr("src", payload.source);
     $iframe.attr("frameborder", 0);
     $iframe.attr("allowfullscreen", "true");
 
     $("#lightbox_overlay .player-container").empty();
     $("#lightbox_overlay .player-container").append($iframe);
-    $(".media-actions .open").attr("href", payload.url);
+}
+
+function invoke_overlay_restore_callback(): void {
+    const callback = overlay_restore_callback;
+    overlay_restore_callback = undefined;
+    if (callback) {
+        callback();
+    }
 }
 
 export function build_open_media_function(
-    on_close: (() => void) | undefined,
-): ($media: JQuery<HTMLMediaElement>) => void {
-    if (on_close === undefined) {
-        on_close = function () {
-            remove_video_players();
-            is_open = false;
-            assert(document.activeElement instanceof HTMLElement);
-            document.activeElement.blur();
-        };
-    }
-
-    return function ($media: JQuery<HTMLMediaElement>): void {
+    on_close = (): void => {
+        remove_video_players();
+        is_open = false;
+        assert(document.activeElement instanceof HTMLElement);
+        document.activeElement.blur();
+        invoke_overlay_restore_callback();
+    },
+): ($media: JQuery<HTMLMediaElement | HTMLImageElement>) => void {
+    return function ($media: JQuery<HTMLMediaElement | HTMLImageElement>): void {
         // This is used both for clicking on media in the messagelist, as well as clicking on images
         // in the media list under the lightbox when it is open.
-        const payload = parse_media_data($media[0]!);
+        const payload = parse_media_data(util.the($media));
 
         assert(payload !== undefined);
-        if (payload.type.match("-video")) {
-            display_video(payload);
-        } else if (payload.type === "image") {
-            display_image(payload);
-        }
+        render_lightbox_media_list();
 
+        $(
+            "#lightbox_overlay .image-preview, .lightbox-zoom-reset, .player-container, .video-player",
+        ).hide();
+
+        if (payload.type === "image") {
+            display_image(payload);
+        } else {
+            display_video(payload);
+        }
+        $(".media-actions .open").attr("href", payload.url);
+        if (payload.type === "image" || payload.type === "inline-video") {
+            $(".media-description").show();
+
+            const filename = payload.url?.split("/").pop();
+            $(".media-description .title")
+                .text(payload.title ?? "N/A")
+                .attr("aria-label", payload.title ?? "N/A")
+                .attr("data-filename", filename ?? "N/A");
+
+            if (payload.user !== undefined) {
+                $(".media-description .user").text(payload.user).prop("title", payload.user);
+            }
+
+            const url = new URL(payload.url, window.location.href);
+            const same_origin = url.origin === window.location.origin;
+            if (same_origin && url.pathname.startsWith("/user_uploads/")) {
+                // Switch to the "download" handler, so S3 URLs set their Content-Disposition
+                url.pathname =
+                    "/user_uploads/download/" + url.pathname.slice("/user_uploads/".length);
+                $(".media-actions .download").attr("href", url.href).show();
+            } else if (same_origin) {
+                $(".media-actions .download").attr("href", payload.url).show();
+            } else {
+                // If it's not same-origin, and we don't know how to tell the remote service to put a
+                // content-disposition on it, the download can't possibly download, just show -- so hide the
+                // element.
+                $(".media-actions .download").hide();
+            }
+        } else {
+            // It's an external embed (YouTube/Vimeo) - hide the metadata and download button
+            $(".media-description, .media-actions .download").hide();
+        }
         if (is_open) {
             return;
         }
@@ -424,9 +420,9 @@ export function show_from_selected_message(): void {
     const $message_selected = $(".selected_message");
     let $message = $message_selected;
     // This is a function to satisfy eslint unicorn/no-array-callback-reference
-    const media_classes: () => string = () =>
-        ".message_inline_image img, .message_inline_image video";
-    let $media = $message.find<HTMLMediaElement>(media_classes());
+    const media_classes = (): string =>
+        ".message-media-inline-image img, .message-media-preview-image img, .message-media-preview-video:not(.video-format-unsupported) video";
+    let $media = $message.find<HTMLMediaElement | HTMLImageElement>(media_classes());
     let $prev_traverse = false;
 
     // First, we walk upwards/backwards, starting with the current
@@ -444,12 +440,12 @@ export function show_from_selected_message(): void {
                 break;
             } else {
                 $message = rows.last_message_in_group($prev_message_group);
-                $media = $message.find<HTMLMediaElement>(media_classes());
+                $media = $message.find<HTMLMediaElement | HTMLImageElement>(media_classes());
                 continue;
             }
         }
         $message = $message.prev();
-        $media = $message.find<HTMLMediaElement>(media_classes());
+        $media = $message.find<HTMLMediaElement | HTMLImageElement>(media_classes());
     }
 
     if ($prev_traverse) {
@@ -460,47 +456,87 @@ export function show_from_selected_message(): void {
                     break;
                 } else {
                     $message = rows.first_message_in_group($next_message_group);
-                    $media = $message.find<HTMLMediaElement>(media_classes());
+                    $media = $message.find<HTMLMediaElement | HTMLImageElement>(media_classes());
                     continue;
                 }
             }
             $message = $message.next();
-            $media = $message.find<HTMLMediaElement>(media_classes());
+            $media = $message.find<HTMLMediaElement | HTMLImageElement>(media_classes());
         }
     }
 
-    if ($media.length !== 0) {
+    if ($media.length > 0) {
         const open_media = build_open_media_function(undefined);
-        open_media($media);
+        // Since this function is only called from the "show_lightbox"
+        // hotkey, we don't have a selected image to load. Therefore,
+        // we show the first one returned from the traversal above.
+        set_selected_media_element($media.first());
+        open_media($media.first());
     }
 }
 
-// retrieve the metadata from the DOM and store into the asset_map.
-export function parse_media_data(media: HTMLMediaElement): Payload {
-    const canonical_url = canonical_url_of_media(media);
-    if (asset_map.has(canonical_url)) {
-        // Use the cached value
-        const payload = asset_map.get(canonical_url);
-        assert(payload !== undefined);
-        return payload;
+function supports_heic(): boolean {
+    if (!util.is_client_safari()) {
+        return false;
     }
+    const match = /Version\/(\d+)/.exec(navigator.userAgent);
+    if (!match?.[1]) {
+        return false;
+    }
+    const version = Number.parseInt(match[1], 10);
+    return !Number.isNaN(version) && version >= 17;
+}
 
+// retrieve the metadata from the DOM and store into the asset_map.
+export function parse_media_data(media: HTMLMediaElement | HTMLImageElement): Media {
     const $media = $(media);
+    const canonical_url = canonical_url_of_media(media);
+    let message_id;
+
+    // This includes the preview feature in the message-edit UI as well as compose.
+    const is_compose_preview_media = $media.closest(".preview_content").length > 0;
+    const $message_row = rows.get_closest_row($media);
+    let use_asset_map;
+    let sender_full_name;
+
+    if (is_compose_preview_media || rows.is_overlay_row($message_row)) {
+        // We don't use the asset map cache in compose/edit UIs or
+        // overlays, since the content is not stable.
+        sender_full_name = people.my_full_name();
+        use_asset_map = false;
+    } else if ($message_row.length > 0) {
+        use_asset_map = true;
+        message_id = rows.id($message_row);
+
+        if (asset_map.has(message_id) && asset_map.get(message_id)?.has(canonical_url)) {
+            // Use the cached value
+            const payload = asset_map.get(message_id)!.get(canonical_url);
+            assert(payload !== undefined);
+            return payload;
+        }
+
+        const message = message_store.get(message_id);
+        if (message === undefined) {
+            blueslip.error("Lightbox for unknown message", {message_id});
+        } else {
+            sender_full_name = message.sender_full_name;
+        }
+    }
 
     // if wrapped in the .youtube-video class, it will be length = 1, and therefore
     // cast to true.
-    const is_youtube_video = Boolean($media.closest(".youtube-video").length);
-    const is_vimeo_video = Boolean($media.closest(".vimeo-video").length);
-    const is_embed_video = Boolean($media.closest(".embed-video").length);
-    const is_inline_video = Boolean($media.closest(".message_inline_video").length);
-
-    // check if media is descendent of #compose .preview_content
-    const is_compose_preview_media = $media.closest("#compose .preview_content").length === 1;
+    const is_youtube_video = $media.closest(".youtube-video").length > 0;
+    const is_vimeo_video = $media.closest(".vimeo-video").length > 0;
+    const is_embed_video = $media.closest(".embed-video").length > 0;
+    const is_inline_video = $media.closest(".message_inline_video").length > 0;
 
     const $parent = $media.parent();
-    let type: string;
+    let type: MediaType;
     let source;
-    const url = $parent.attr("href");
+    // Client-rendered images (e.g., in drafts) are bare <img> tags
+    // not wrapped in an <a>, so fall back to the image's src.
+    const url = $parent.attr("href") ?? $media.attr("src");
+    assert(url !== undefined);
 
     let preview_src = $media.attr("src");
     const is_loading_placeholder = $media.hasClass("image-loading-placeholder");
@@ -511,67 +547,76 @@ export function parse_media_data(media: HTMLMediaElement): Payload {
     let original_width_px;
     let original_height_px;
     if (original_dimensions) {
-        const found = original_dimensions.match(/^(\d+)x(\d+)$/);
+        const found = /^(\d+)x(\d+)$/.exec(original_dimensions);
         if (found) {
             original_width_px = Number(found[1]);
             original_height_px = Number(found[2]);
         }
     }
 
+    const transcoded_image = $media.attr("data-transcoded-image");
+
     if (is_inline_video) {
         type = "inline-video";
-        // Render video from original source to reduce load on our own servers.
-        const original_video_url = $media.attr("data-video-original-url");
-        // `data-video-original-url` is only defined for external URLs in
-        // organizations which have camo enabled.
-        if (!original_video_url) {
-            source = preview_src;
-        } else {
-            source = encodeURI(original_video_url);
-        }
+        // Render video from original source to reduce load on our own servers.  The `url` is the
+        // non-Camo'd version; `preview` is the Camo'd URL.
+        source = url;
     } else if (is_youtube_video) {
         type = "youtube-video";
-        source = $parent.attr("data-id");
+        source = "https://www.youtube.com/embed/" + $parent.attr("data-id");
+        // YouTube URLs support a `start` parameter that can be either
+        // an integer or a string-encoded time offset like
+        // "1h20m12s". The embed API only supports the integer format,
+        // so we may need to convert the format.
+        const start_time = util.parse_youtube_start_time(url);
+        if (start_time !== undefined) {
+            source += "?start=" + start_time;
+        }
     } else if (is_vimeo_video) {
         type = "vimeo-video";
-        source = $parent.attr("data-id");
+        source = "https://player.vimeo.com/video/" + $parent.attr("data-id");
     } else if (is_embed_video) {
         type = "embed-video";
-        source = $parent.attr("data-id");
+        source =
+            "data:text/html," +
+            window.encodeURIComponent(
+                "<!DOCTYPE html><style>iframe{position:absolute;left:0;top:0;width:100%;height:100%;box-sizing:border-box}</style>" +
+                    $parent.attr("data-id"),
+            );
     } else {
         type = "image";
         if ($media.attr("data-src-fullsize")) {
             source = $media.attr("data-src-fullsize");
+        } else if (transcoded_image && preview_src) {
+            if ($media.attr("data-original-content-type") === "image/heic" && supports_heic()) {
+                // It's an HEIC and we support it -- don't use the transcoded version
+                source = url;
+            } else {
+                source = preview_src.replace(/\/[^/]+$/, "/" + transcoded_image);
+            }
         } else {
             source = url;
-        }
-    }
-    let sender_full_name;
-    if (is_compose_preview_media) {
-        sender_full_name = people.my_full_name();
-    } else {
-        const message_id = rows.get_message_id(media);
-        const message = message_store.get(message_id);
-        if (message === undefined) {
-            blueslip.error("Lightbox for unknown message", {message_id});
-        } else {
-            sender_full_name = message.sender_full_name;
         }
     }
 
     const payload = {
         user: sender_full_name,
-        title: $parent.attr("aria-label") ?? $parent.attr("href"),
+        title: $parent.attr("aria-label") ?? url,
         type,
         preview: preview_src && util.is_valid_url(preview_src) ? preview_src : "",
         original_width_px,
         original_height_px,
         source: source && util.is_valid_url(source) ? source : "",
-        url: url && util.is_valid_url(url) ? url : "",
+        url: util.is_valid_url(url) ? url : "",
     };
 
-    if (!is_loading_placeholder && canonical_url !== "") {
-        asset_map.set(canonical_url, payload);
+    if (use_asset_map && !is_loading_placeholder && canonical_url !== "") {
+        // Update the asset_map, if we had a message ID involved.
+        assert(message_id !== undefined);
+        if (!asset_map.has(message_id)) {
+            asset_map.set(message_id, new Map<string, Media>());
+        }
+        asset_map.get(message_id)!.set(canonical_url, payload);
     }
     return payload;
 }
@@ -584,11 +629,50 @@ export function next(): void {
     $(".image-list .image.selected").next().trigger("click");
 }
 
+function update_arrow_visibility(): void {
+    const $selected = $(".image-list .image.selected");
+    const has_prev = $selected.prev(".image").length > 0;
+    const has_next = $selected.next(".image").length > 0;
+    $("#lightbox_overlay .center .arrow[data-direction='prev']").toggleClass(
+        "invisible",
+        !has_prev,
+    );
+    $("#lightbox_overlay .center .arrow[data-direction='next']").toggleClass(
+        "invisible",
+        !has_next,
+    );
+}
+
 function remove_video_players(): void {
     // Remove video players from the DOM. Used when closing lightbox
     // so that videos doesn't keep playing in the background.
     $(".player-container iframe").remove();
     $("#lightbox_overlay .video-player").html("");
+}
+
+export function handle_inline_media_element_click(
+    $media: JQuery<HTMLMediaElement> | JQuery<HTMLImageElement>,
+    hide_navigation_arrows = false,
+): void {
+    set_selected_media_element($media);
+
+    const media_element = $media[0];
+    assert(media_element !== undefined);
+
+    if (media_element instanceof HTMLImageElement) {
+        open_image($(media_element));
+    } else {
+        open_video($(media_element));
+    }
+    $("#lightbox_overlay .center").toggleClass("invisible", hide_navigation_arrows);
+}
+
+export function handle_overlay_media_element_click(
+    $media: JQuery<HTMLMediaElement> | JQuery<HTMLImageElement>,
+    on_lightbox_close: () => void,
+): void {
+    overlay_restore_callback = on_lightbox_close;
+    handle_inline_media_element_click($media, true);
 }
 
 // this is a block of events that are required for the lightbox to work.
@@ -599,7 +683,7 @@ export function initialize(): void {
 
     // Bind the pan/zoom control the newly created element.
     const pan_zoom_control = new PanZoomControl(
-        $("#lightbox_overlay .image-preview > .zoom-element")[0]!,
+        util.the($("#lightbox_overlay .image-preview > .zoom-element")),
     );
 
     const reset_lightbox_state = function (): void {
@@ -610,21 +694,22 @@ export function initialize(): void {
         if (pan_zoom_control.isActive()) {
             pan_zoom_control.reset();
         }
+        invoke_overlay_restore_callback();
     };
 
-    const open_image = build_open_media_function(reset_lightbox_state);
-    const open_video = build_open_media_function(undefined);
+    open_image = build_open_media_function(reset_lightbox_state);
+    open_video = build_open_media_function(undefined);
 
     $("#main_div, #compose .preview_content").on(
         "click",
-        ".message_inline_image:not(.message_inline_video) a, .message_inline_animated_image_still",
+        ".message-media-inline-image a, .message-media-preview-image:not(.message_inline_video) a, .message_inline_animated_image_still",
         function (e) {
             // prevent the link from opening in a new page.
             e.preventDefault();
             // prevent the message compose dialog from happening.
             e.stopPropagation();
-            const $img = $(this).find<HTMLMediaElement>("img");
-            open_image($img);
+            const $img = $(this).find<HTMLImageElement>("img");
+            handle_inline_media_element_click($img);
         },
     );
 
@@ -633,7 +718,7 @@ export function initialize(): void {
         e.stopPropagation();
 
         const $video = $(e.currentTarget).find<HTMLMediaElement>("video");
-        open_video($video);
+        handle_inline_media_element_click($video);
     });
 
     $("#lightbox_overlay .download").on("click", function () {
@@ -641,20 +726,49 @@ export function initialize(): void {
     });
 
     $("#lightbox_overlay").on("click", ".image-list .image", function (this: HTMLElement) {
+        // Remove any video players so sound does not continue when
+        // navigating away from a video that might be playing
+        remove_video_players();
         const $media_list = $(this).parent();
         let $original_media_element;
         const is_video = $(this).hasClass("lightbox_video");
+        // Because multiple media elements may match on the same data-url,
+        // we capture the first of these
         if (is_video) {
             $original_media_element = $<HTMLMediaElement>(
                 `.message_row a[href='${CSS.escape($(this).attr("data-url")!)}'] video`,
-            );
+            )?.first();
         } else {
-            $original_media_element = $<HTMLMediaElement>(
+            $original_media_element = $<HTMLImageElement>(
                 `.message_row a[href='${CSS.escape($(this).attr("data-url")!)}'] img`,
-            );
+            )?.first();
         }
 
-        open_image($original_media_element);
+        // If $original_media_element comes with a 0 length, that means that
+        // something in the message list has changed (e.g., a moved or
+        // deleted message, or the deletion of a media element that was
+        // available when the lightbox opened). In that event, we continue
+        // to display whatever media is up in the lightbox, and remove
+        // the thumbnail from the media list.
+        if ($original_media_element.length === 0) {
+            $(this).remove();
+            return;
+        }
+
+        // Because a user could conceivably copy and paste a media reference
+        // from another message, and because we are selecting the original
+        // element above based on a data-url value that is therefore not
+        // guaranteed to be unique, we pass the first (possibly only) media
+        // element returned. The logic below for removing and adding the
+        // "selected" class ensures that the correct thumbnail will
+        // still be highlighted.
+        const media_element = $original_media_element[0];
+        if (media_element instanceof HTMLImageElement) {
+            open_image($(media_element));
+        } else {
+            assert(media_element instanceof HTMLMediaElement);
+            open_video($(media_element));
+        }
 
         if (!$(".image-list .image.selected").hasClass("lightbox_video") || !is_video) {
             pan_zoom_control.reset();
@@ -662,6 +776,7 @@ export function initialize(): void {
 
         $(".image-list .image.selected").removeClass("selected");
         $(this).addClass("selected");
+        update_arrow_visibility();
 
         const parentOffset = this.parentElement!.clientWidth + this.parentElement!.scrollLeft;
         // this is the left and right of the image compared to its parent.
@@ -696,8 +811,6 @@ export function initialize(): void {
 
     $("#lightbox_overlay").on("click", ".lightbox-zoom-reset", () => {
         if (!$("#lightbox_overlay .lightbox-zoom-reset").hasClass("disabled")) {
-            const $img = $("#lightbox_overlay").find<HTMLMediaElement>(".image-preview img");
-            open_image($img);
             pan_zoom_control.reset();
         }
     });

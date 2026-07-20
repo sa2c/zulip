@@ -2,7 +2,6 @@ import time
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 
-from django.conf import settings
 from django.db import transaction
 from django.db.models import F
 from django.utils.timezone import now as timezone_now
@@ -15,12 +14,12 @@ from zerver.lib.message import (
     format_unread_message_details,
     get_raw_unread_data,
 )
-from zerver.lib.queue import queue_json_publish
+from zerver.lib.queue import mobile_notifications_queue_name, queue_event_on_commit
 from zerver.lib.stream_subscription import get_subscribed_stream_recipient_ids_for_user
 from zerver.lib.topic import filter_by_topic_name_via_message
 from zerver.lib.user_message import DEFAULT_HISTORICAL_FLAGS, create_historical_user_messages
-from zerver.models import Message, Recipient, UserMessage, UserProfile
-from zerver.tornado.django_api import send_event
+from zerver.models import Device, Message, PushDeviceToken, Recipient, UserMessage, UserProfile
+from zerver.tornado.django_api import send_event_on_commit, send_event_rollback_unsafe
 
 
 @dataclass
@@ -38,7 +37,7 @@ def do_mark_all_as_read(user_profile: UserProfile, *, timeout: float | None = No
 
     # First, we clear mobile push notifications.  This is safer in the
     # event that the below logic times out and we're killed.
-    all_push_message_ids = (
+    all_push_message_ids = list(
         UserMessage.objects.filter(
             user_profile=user_profile,
         )
@@ -55,7 +54,7 @@ def do_mark_all_as_read(user_profile: UserProfile, *, timeout: float | None = No
         if timeout is not None and time.monotonic() >= start_time + timeout:
             return None
 
-        with transaction.atomic(savepoint=False):
+        with transaction.atomic(durable=True):
             query = (
                 UserMessage.select_for_update_query()
                 .filter(user_profile=user_profile)
@@ -96,40 +95,40 @@ def do_mark_all_as_read(user_profile: UserProfile, *, timeout: float | None = No
             all=True,
         )
     )
-    send_event(user_profile.realm, event, [user_profile.id])
+    send_event_rollback_unsafe(user_profile.realm, event, [user_profile.id])
 
     return count
 
 
+@transaction.atomic(durable=True)
 def do_mark_stream_messages_as_read(
     user_profile: UserProfile, stream_recipient_id: int, topic_name: str | None = None
 ) -> int:
-    with transaction.atomic(savepoint=False):
-        query = (
-            UserMessage.select_for_update_query()
-            .filter(
-                user_profile=user_profile,
-                message__recipient_id=stream_recipient_id,
-            )
-            .extra(  # noqa: S610
-                where=[UserMessage.where_unread()],
-            )
+    query = (
+        UserMessage.select_for_update_query()
+        .filter(
+            user_profile=user_profile,
+            message__recipient_id=stream_recipient_id,
+        )
+        .extra(  # noqa: S610
+            where=[UserMessage.where_unread()],
+        )
+    )
+
+    if topic_name:
+        query = filter_by_topic_name_via_message(
+            query=query,
+            topic_name=topic_name,
         )
 
-        if topic_name:
-            query = filter_by_topic_name_via_message(
-                query=query,
-                topic_name=topic_name,
-            )
+    message_ids = list(query.values_list("message_id", flat=True))
 
-        message_ids = list(query.values_list("message_id", flat=True))
+    if len(message_ids) == 0:
+        return 0
 
-        if len(message_ids) == 0:
-            return 0
-
-        count = query.update(
-            flags=F("flags").bitor(UserMessage.flags.read),
-        )
+    count = query.update(
+        flags=F("flags").bitor(UserMessage.flags.read),
+    )
 
     event = asdict(
         ReadMessagesEvent(
@@ -139,7 +138,7 @@ def do_mark_stream_messages_as_read(
     )
     event_time = timezone_now()
 
-    send_event(user_profile.realm, event, [user_profile.id])
+    send_event_on_commit(user_profile.realm, event, [user_profile.id])
     do_clear_mobile_push_notifications_for_ids([user_profile.id], message_ids)
 
     do_increment_logging_stat(
@@ -155,24 +154,24 @@ def do_mark_stream_messages_as_read(
     return count
 
 
+@transaction.atomic(savepoint=False)
 def do_mark_muted_user_messages_as_read(
     user_profile: UserProfile,
     muted_user: UserProfile,
 ) -> int:
-    with transaction.atomic(savepoint=False):
-        query = (
-            UserMessage.select_for_update_query()
-            .filter(user_profile=user_profile, message__sender=muted_user)
-            .extra(where=[UserMessage.where_unread()])  # noqa: S610
-        )
-        message_ids = list(query.values_list("message_id", flat=True))
+    query = (
+        UserMessage.select_for_update_query()
+        .filter(user_profile=user_profile, message__sender=muted_user)
+        .extra(where=[UserMessage.where_unread()])  # noqa: S610
+    )
+    message_ids = list(query.values_list("message_id", flat=True))
 
-        if len(message_ids) == 0:
-            return 0
+    if len(message_ids) == 0:
+        return 0
 
-        count = query.update(
-            flags=F("flags").bitor(UserMessage.flags.read),
-        )
+    count = query.update(
+        flags=F("flags").bitor(UserMessage.flags.read),
+    )
 
     event = asdict(
         ReadMessagesEvent(
@@ -182,7 +181,7 @@ def do_mark_muted_user_messages_as_read(
     )
     event_time = timezone_now()
 
-    send_event(user_profile.realm, event, [user_profile.id])
+    send_event_on_commit(user_profile.realm, event, [user_profile.id])
     do_clear_mobile_push_notifications_for_ids([user_profile.id], message_ids)
 
     do_increment_logging_stat(
@@ -212,7 +211,7 @@ def do_update_mobile_push_notification(
     # in a sent notification if a message was edited to mention a
     # group rather than a user (or vice versa), though it is likely
     # not worth the effort to do such a change.
-    if not message.is_stream_message():
+    if not message.is_channel_message:
         return
 
     remove_notify_users = prior_mention_user_ids - mentions_user_ids - stream_push_user_ids
@@ -220,46 +219,94 @@ def do_update_mobile_push_notification(
 
 
 def do_clear_mobile_push_notifications_for_ids(
-    user_profile_ids: list[int], message_ids: list[int]
+    user_profile_ids: list[int] | None, message_ids: list[int]
 ) -> None:
     if len(message_ids) == 0:
         return
 
-    # This function supports clearing notifications for several users
-    # only for the message-edit use case where we'll have a single message_id.
-    assert len(user_profile_ids) == 1 or len(message_ids) == 1
+    if user_profile_ids is not None:
+        # This block gets executed in the following cases:
+        # * Message(s) marked as read by a user
+        # * A message edited to remove mention(s)
+        if len(user_profile_ids) == 0:
+            return
+
+        # This supports clearing notifications for several users only for
+        # the message-edit use case where we'll have a single message_id.
+        assert len(user_profile_ids) == 1 or len(message_ids) == 1
+
+        notifications_to_update = (
+            UserMessage.objects.filter(
+                message_id__in=message_ids,
+                user_profile_id__in=user_profile_ids,
+            )
+            .extra(  # noqa: S610
+                where=[UserMessage.where_active_push_notification()],
+            )
+            .values_list("id", "user_profile_id", "message_id")
+        )
+    else:
+        # This block handles clearing notifications when message(s) get deleted.
+        notifications_to_update = (
+            # Uses index: zerver_usermessage_message_active_mobile_push_notification_idx
+            UserMessage.objects.filter(
+                message_id__in=message_ids,
+            )
+            .extra(  # noqa: S610
+                where=[UserMessage.where_active_push_notification()],
+            )
+            .values_list("id", "user_profile_id", "message_id")
+        )
 
     messages_by_user = defaultdict(list)
-    notifications_to_update = (
-        UserMessage.objects.filter(
-            message_id__in=message_ids,
-            user_profile_id__in=user_profile_ids,
-        )
-        .extra(  # noqa: S610
-            where=[UserMessage.where_active_push_notification()],
-        )
-        .values_list("user_profile_id", "message_id")
-    )
-
-    for user_id, message_id in notifications_to_update:
+    for unused, user_id, message_id in notifications_to_update:
         messages_by_user[user_id].append(message_id)
 
+    clear_notifications_user_ids = set(messages_by_user.keys())
+    push_device_registered_user_ids = set(
+        PushDeviceToken.objects.filter(user_id__in=clear_notifications_user_ids)
+        .values_list("user_id", flat=True)
+        .union(
+            # Uses index "zerver_device_user_push_token_id_idx".
+            Device.objects.filter(
+                user_id__in=clear_notifications_user_ids, push_token_id__isnull=False
+            ).values_list("user_id", flat=True)
+        )
+    )
+    push_device_not_registered_user_ids = (
+        clear_notifications_user_ids - push_device_registered_user_ids
+    )
+
+    usermessages_to_update_ids = []
+    for um_id, user_id, unused in notifications_to_update:
+        if user_id in push_device_not_registered_user_ids:
+            usermessages_to_update_ids.append(um_id)
+
+    if usermessages_to_update_ids:
+        BATCH_SIZE = 1000
+        for i in range(0, len(usermessages_to_update_ids), BATCH_SIZE):
+            with transaction.atomic(savepoint=False):
+                UserMessage.select_for_update_query().filter(
+                    id__in=usermessages_to_update_ids[i : i + BATCH_SIZE]
+                ).update(
+                    flags=F("flags").bitand(~UserMessage.flags.active_mobile_push_notification)
+                )
+
     for user_profile_id, event_message_ids in messages_by_user.items():
+        if user_profile_id in push_device_not_registered_user_ids:
+            continue
+
         notice = {
             "type": "remove",
             "user_profile_id": user_profile_id,
             "message_ids": event_message_ids,
         }
-        if settings.MOBILE_NOTIFICATIONS_SHARDS > 1:  # nocoverage
-            shard_id = user_profile_id % settings.MOBILE_NOTIFICATIONS_SHARDS + 1
-            queue_json_publish(f"missedmessage_mobile_notifications_shard{shard_id}", notice)
-        else:
-            queue_json_publish("missedmessage_mobile_notifications", notice)
+        queue_event_on_commit(mobile_notifications_queue_name(user_profile_id), notice)
 
 
 def do_update_message_flags(
     user_profile: UserProfile, operation: str, flag: str, messages: list[int]
-) -> int:
+) -> tuple[int, list[int]]:
     valid_flags = [item for item in UserMessage.flags if item not in UserMessage.NON_API_FLAGS]
     if flag not in valid_flags:
         raise JsonableError(_("Invalid flag: '{flag}'").format(flag=flag))
@@ -273,7 +320,8 @@ def do_update_message_flags(
     flagattr = getattr(UserMessage.flags, flag)
     flag_target = flagattr if is_adding else 0
 
-    with transaction.atomic(savepoint=False):
+    ignored_because_not_subscribed_channels = []
+    with transaction.atomic(durable=True):
         if flag == "read" and not is_adding:
             # We have an invariant that all stream messages marked as
             # unread must be in streams the user is subscribed to.
@@ -283,12 +331,20 @@ def do_update_message_flags(
             # currently subscribed to.
             subscribed_recipient_ids = get_subscribed_stream_recipient_ids_for_user(user_profile)
 
-            message_ids_in_unsubscribed_streams = set(
+            messages_in_unsubscribed_streams = set(
                 # Uses index: zerver_message_pkey
                 Message.objects.select_related("recipient")
                 .filter(id__in=messages, recipient__type=Recipient.STREAM)
                 .exclude(recipient_id__in=subscribed_recipient_ids)
-                .values_list("id", flat=True)
+                .values_list("id", "recipient__type_id")
+            )
+
+            message_ids_in_unsubscribed_streams = {
+                message[0] for message in messages_in_unsubscribed_streams
+            }
+
+            ignored_because_not_subscribed_channels = list(
+                {message[1] for message in messages_in_unsubscribed_streams}
             )
 
             messages = [
@@ -340,6 +396,7 @@ def do_update_message_flags(
                         "recipient"
                     )
                 ),
+                is_modifying_message=False,
             )
             if len(historical_messages) != len(historical_message_ids):
                 raise JsonableError(_("Invalid message(s)"))
@@ -359,38 +416,40 @@ def do_update_message_flags(
         else:
             to_update.update(flags=F("flags").bitand(~flagattr))
 
-    event = {
-        "type": "update_message_flags",
-        "op": operation,
-        "operation": operation,
-        "flag": flag,
-        "messages": messages,
-        "all": False,
-    }
+        event = {
+            "type": "update_message_flags",
+            "op": operation,
+            "operation": operation,
+            "flag": flag,
+            "messages": messages,
+            "all": False,
+        }
 
-    if flag == "read" and not is_adding:
-        # When removing the read flag (i.e. marking messages as
-        # unread), extend the event with an additional object with
-        # details on the messages required to update the client's
-        # `unread_msgs` data structure.
-        raw_unread_data = get_raw_unread_data(user_profile, messages)
-        event["message_details"] = format_unread_message_details(user_profile.id, raw_unread_data)
+        if flag == "read" and not is_adding:
+            # When removing the read flag (i.e. marking messages as
+            # unread), extend the event with an additional object with
+            # details on the messages required to update the client's
+            # `unread_msgs` data structure.
+            raw_unread_data = get_raw_unread_data(user_profile, messages)
+            event["message_details"] = format_unread_message_details(
+                user_profile.id, raw_unread_data
+            )
 
-    send_event(user_profile.realm, event, [user_profile.id])
+        send_event_on_commit(user_profile.realm, event, [user_profile.id])
 
-    if flag == "read" and is_adding:
-        event_time = timezone_now()
-        do_clear_mobile_push_notifications_for_ids([user_profile.id], messages)
+        if flag == "read" and is_adding:
+            event_time = timezone_now()
+            do_clear_mobile_push_notifications_for_ids([user_profile.id], messages)
 
-        do_increment_logging_stat(
-            user_profile, COUNT_STATS["messages_read::hour"], None, event_time, increment=count
-        )
-        do_increment_logging_stat(
-            user_profile,
-            COUNT_STATS["messages_read_interactions::hour"],
-            None,
-            event_time,
-            increment=min(1, count),
-        )
+            do_increment_logging_stat(
+                user_profile, COUNT_STATS["messages_read::hour"], None, event_time, increment=count
+            )
+            do_increment_logging_stat(
+                user_profile,
+                COUNT_STATS["messages_read_interactions::hour"],
+                None,
+                event_time,
+                increment=min(1, count),
+            )
 
-    return count
+    return (count, ignored_because_not_subscribed_channels)

@@ -1,6 +1,6 @@
 # See https://zulip.readthedocs.io/en/latest/subsystems/caching.html for docs
 import logging
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from datetime import timedelta
 from typing import Any
 
@@ -9,7 +9,6 @@ from django.contrib.sessions.models import Session
 from django.db import connection
 from django.db.models import QuerySet
 from django.utils.timezone import now as timezone_now
-from django_stubs_ext import ValuesQuerySet
 
 # This file needs to be different from cache.py because cache.py
 # cannot import anything from zerver.models or we'd have an import
@@ -19,26 +18,27 @@ from zerver.lib.cache import (
     cache_set_many,
     get_remote_cache_requests,
     get_remote_cache_time,
-    user_profile_by_api_key_cache_key,
-    user_profile_cache_key_id,
+    user_profile_narrow_by_id_cache_key,
 )
 from zerver.lib.safe_session_cached_db import SessionStore
 from zerver.lib.sessions import session_engine
-from zerver.lib.users import get_all_api_keys
 from zerver.models import Client, UserProfile
 from zerver.models.clients import get_client_cache_key
+from zerver.models.users import base_get_user_narrow_queryset
 
 
-def user_cache_items(
+def get_narrow_users() -> Iterator[UserProfile]:
+    return (
+        base_get_user_narrow_queryset()
+        .filter(long_term_idle=False, realm__in=get_active_realm_ids())
+        .iterator()
+    )
+
+
+def user_narrow_cache_items(
     items_for_remote_cache: dict[str, tuple[UserProfile]], user_profile: UserProfile
 ) -> None:
-    for api_key in get_all_api_keys(user_profile):
-        items_for_remote_cache[user_profile_by_api_key_cache_key(api_key)] = (user_profile,)
-    items_for_remote_cache[user_profile_cache_key_id(user_profile.email, user_profile.realm_id)] = (
-        user_profile,
-    )
-    # We have other user_profile caches, but none of them are on the
-    # core serving path for lots of requests.
+    items_for_remote_cache[user_profile_narrow_by_id_cache_key(user_profile.id)] = (user_profile,)
 
 
 def client_cache_items(items_for_remote_cache: dict[str, tuple[Client]], client: Client) -> None:
@@ -58,7 +58,7 @@ def session_cache_items(
     items_for_remote_cache[store.cache_key] = store.decode(session.session_data)
 
 
-def get_active_realm_ids() -> ValuesQuerySet[RealmCount, int]:
+def get_active_realm_ids() -> QuerySet[RealmCount, int]:
     """For installations like Zulip Cloud hosting a lot of realms, it only makes
     sense to do cache-filling work for realms that have any currently
     active users/clients.  Otherwise, we end up with every single-user
@@ -68,15 +68,15 @@ def get_active_realm_ids() -> ValuesQuerySet[RealmCount, int]:
     """
     date = timezone_now() - timedelta(days=2)
     return (
-        RealmCount.objects.filter(end_time__gte=date, property="1day_actives::day", value__gt=0)
+        RealmCount.objects.filter(
+            end_time__gte=date,
+            property="1day_actives::day",
+            # Filtering on subgroup is important to ensure we use the good indexes.
+            subgroup=None,
+            value__gt=0,
+        )
         .distinct("realm_id")
         .values_list("realm_id", flat=True)
-    )
-
-
-def get_users() -> QuerySet[UserProfile]:
-    return UserProfile.objects.select_related("realm", "bot_owner").filter(
-        long_term_idle=False, realm__in=get_active_realm_ids()
     )
 
 
@@ -89,14 +89,19 @@ def get_users() -> QuerySet[UserProfile]:
 cache_fillers: dict[
     str, tuple[Callable[[], Iterable[Any]], Callable[[dict[str, Any], Any], None], int, int]
 ] = {
-    "user": (get_users, user_cache_items, 3600 * 24 * 7, 10000),
+    "user_narrow": (get_narrow_users, user_narrow_cache_items, 3600 * 24 * 7, 10000),
     "client": (
-        Client.objects.all,
+        lambda: Client.objects.all().iterator(),
         client_cache_items,
         3600 * 24 * 7,
         10000,
     ),
-    "session": (Session.objects.all, session_cache_items, 3600 * 24 * 7, 10000),
+    "session": (
+        lambda: Session.objects.all().iterator(),
+        session_cache_items,
+        3600 * 24 * 7,
+        10000,
+    ),
 }
 
 
@@ -128,9 +133,9 @@ def fill_remote_cache(cache: str) -> None:
             items_filler(items_for_remote_cache, obj)
             count += 1
             if count % batch_size == 0:
-                cache_set_many(items_for_remote_cache, timeout=3600 * 24)
+                cache_set_many(items_for_remote_cache, timeout=timeout)
                 items_for_remote_cache = {}
-        cache_set_many(items_for_remote_cache, timeout=3600 * 24 * 7)
+        cache_set_many(items_for_remote_cache, timeout=timeout)
     logging.info(
         "Successfully populated %s cache: %d items, %d DB queries, %d memcached sets, %.2f seconds",
         cache,

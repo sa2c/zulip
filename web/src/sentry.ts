@@ -1,5 +1,7 @@
 import * as Sentry from "@sentry/browser";
-import {z} from "zod";
+import * as z from "zod/mini";
+
+import {is_browser_unsupported_old_version} from "./browser_support.ts";
 
 type UserInfo = {
     id?: string;
@@ -14,7 +16,7 @@ const sentry_params_schema = z.object({
     sample_rate: z.number(),
     server_version: z.string(),
     trace_rate: z.number(),
-    user: z.object({id: z.number(), role: z.string()}).optional(),
+    user: z.optional(z.object({id: z.number(), role: z.string()})),
 });
 
 const sentry_params_json =
@@ -45,7 +47,11 @@ export function shouldCreateSpanForRequest(url: string): boolean {
     return parsed.pathname !== "/json/events";
 }
 
-if (sentry_params !== undefined) {
+if (
+    sentry_params !== undefined &&
+    !is_browser_unsupported_old_version() &&
+    !window.navigator.userAgent.includes("HeadlessChrome")
+) {
     const sample_rates = new Map([
         // This is controlled by shouldCreateSpanForRequest, above, but also put here for consistency
         ["call GET /json/events", 0],
@@ -61,9 +67,9 @@ if (sentry_params !== undefined) {
 
         release: "zulip-server@" + ZULIP_VERSION,
         integrations: [
-            new Sentry.BrowserTracing({
-                startTransactionOnLocationChange: false,
-                beforeNavigate(context) {
+            Sentry.browserTracingIntegration({
+                instrumentNavigation: false,
+                beforeStartSpan(context) {
                     return {
                         ...context,
                         metadata: {source: "custom"},
@@ -79,7 +85,7 @@ if (sentry_params !== undefined) {
         sampleRate: sentry_params.sample_rate,
         tracesSampler(samplingContext) {
             const base_rate = sentry_params.trace_rate;
-            const name = samplingContext.transactionContext.name;
+            const name = samplingContext.name;
             return base_rate * (sample_rates.get(name) ?? 1);
         },
         initialScope(scope) {
@@ -99,10 +105,11 @@ if (sentry_params !== undefined) {
             scope.setUser(user_info);
             return scope;
         },
+        ignoreErrors: [
+            // https://github.com/tus/tus-js-client/issues/808
+            "ERR_UPLOAD_TERMINATION_REJECTED",
+        ],
     });
 } else {
-    // Always add the tracing extensions, so Sentry doesn't throw runtime errors if one calls
-    // startTransaction without having created the Sentry.BrowserTracing object.
-    Sentry.addTracingExtensions();
     Sentry.init({});
 }

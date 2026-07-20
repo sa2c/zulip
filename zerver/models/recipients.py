@@ -3,7 +3,7 @@ from collections import defaultdict
 from typing import TYPE_CHECKING
 
 from django.db import models, transaction
-from django_stubs_ext import ValuesQuerySet
+from django.db.models import QuerySet
 from typing_extensions import override
 
 from zerver.lib.display_recipient import get_display_recipient
@@ -21,19 +21,14 @@ class Recipient(models.Model):
     of audiences Zulip supports for a message.
 
     Recipient has just two attributes: The enum type, and a type_id,
-    which is the ID of the UserProfile/Stream/DirectMessageGroup object
-    containing all the metadata for the audience. There are 3 recipient
-    types:
+    which is the ID of the Stream/DirectMessageGroup object containing
+    all the metadata for the audience. There are 2 recipient types:
 
-    1. 1:1 direct message: The type_id is the ID of the UserProfile
-       who will receive any message to this Recipient. The sender
-       of such a message is represented separately.
-    2. Stream message: The type_id is the ID of the associated Stream.
-    3. Group direct message: In Zulip, group direct messages are
-       represented by DirectMessageGroup objects, which encode the set of
-       users in the conversation. The type_id is the ID of the associated
-       DirectMessageGroup object; the set of users is usually retrieved
-       via the Subscription table. See the DirectMessageGroup model for
+    1. Stream message: The type_id is the ID of the associated Stream.
+    2. Direct message: The type_id is the ID of the associated
+       DirectMessageGroup object, which encodes the set of users in
+       the conversation. The set of users is usually retrieved via the
+       Subscription table. See the DirectMessageGroup model for
        details.
 
     See also the Subscription model, which stores which UserProfile
@@ -43,20 +38,15 @@ class Recipient(models.Model):
     id = models.AutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")
     type_id = models.IntegerField(db_index=True)
     type = models.PositiveSmallIntegerField(db_index=True)
-    # Valid types are {personal, stream, huddle}
+    # Valid types are {stream, direct_message_group}
 
-    # The type for 1:1 direct messages.
-    PERSONAL = 1
     # The type for stream messages.
     STREAM = 2
-    # The type group direct messages.
+    # The type for direct messages (both 1:1 and group).
     DIRECT_MESSAGE_GROUP = 3
 
     class Meta:
         unique_together = ("type", "type_id")
-
-    # N.B. If we used Django's choice=... we would get this for free (kinda)
-    _type_names = {PERSONAL: "personal", STREAM: "stream", DIRECT_MESSAGE_GROUP: "huddle"}
 
     @override
     def __str__(self) -> str:
@@ -70,12 +60,8 @@ class Recipient(models.Model):
         else:
             return str(get_display_recipient(self))
 
-    def type_name(self) -> str:
-        # Raises KeyError if invalid
-        return self._type_names[self.type]
 
-
-def get_direct_message_group_user_ids(recipient: Recipient) -> ValuesQuerySet["Subscription", int]:
+def get_direct_message_group_user_ids(recipient: Recipient) -> QuerySet["Subscription", int]:
     from zerver.models import Subscription
 
     assert recipient.type == Recipient.DIRECT_MESSAGE_GROUP
@@ -91,12 +77,13 @@ def get_direct_message_group_user_ids(recipient: Recipient) -> ValuesQuerySet["S
 
 def bulk_get_direct_message_group_user_ids(recipient_ids: list[int]) -> dict[int, set[int]]:
     """
-    Takes a list of huddle-type recipient_ids, returns a dict
-    mapping recipient id to list of user ids in the huddle.
+    Takes a list of direct_message_group type recipient_ids, returns
+    a dictmapping recipient id to list of user ids in the direct
+    message group.
 
     We rely on our caller to pass us recipient_ids that correspond
-    to huddles, but technically this function is valid for any type
-    of subscription.
+    to direct_message_group, but technically this function is valid
+    for any typeof subscription.
     """
     from zerver.models import Subscription
 
@@ -129,17 +116,22 @@ class DirectMessageGroup(models.Model):
     corresponding DirectMessageGroup object.
     """
 
-    # TODO: We should consider whether using
-    # CommaSeparatedIntegerField would be better.
-    huddle_hash = models.CharField(max_length=40, db_index=True, unique=True)
+    # We omit db_index and unique, as that also results in a useless
+    # varchar_pattern_ops index; see Meta, below.
+    huddle_hash = models.CharField(max_length=40)
     # Foreign key to the Recipient object for this DirectMessageGroup.
-    recipient = models.ForeignKey(Recipient, null=True, on_delete=models.SET_NULL)
+    recipient = models.OneToOneField(Recipient, null=True, on_delete=models.SET_NULL)
+
+    group_size = models.IntegerField()
 
     # TODO: The model still uses the old "zerver_huddle" database table.
     # As a part of the migration of "Huddle" to "DirectMessageGroup"
     # it needs to be renamed to "zerver_directmessagegroup".
     class Meta:
         db_table = "zerver_huddle"
+        constraints = [
+            models.UniqueConstraint(fields=["huddle_hash"], name="zerver_huddle_huddle_hash_key")
+        ]
 
 
 def get_direct_message_group_hash(id_list: list[int]) -> str:
@@ -157,10 +149,12 @@ def get_or_create_direct_message_group(id_list: list[int]) -> DirectMessageGroup
     """
     from zerver.models import Subscription, UserProfile
 
+    assert len(id_list) == len(set(id_list))
     direct_message_group_hash = get_direct_message_group_hash(id_list)
-    with transaction.atomic():
+    with transaction.atomic(savepoint=False):
         (direct_message_group, created) = DirectMessageGroup.objects.get_or_create(
-            huddle_hash=direct_message_group_hash
+            huddle_hash=direct_message_group_hash,
+            group_size=len(id_list),
         )
         if created:
             recipient = Recipient.objects.create(
@@ -180,3 +174,21 @@ def get_or_create_direct_message_group(id_list: list[int]) -> DirectMessageGroup
             ]
             Subscription.objects.bulk_create(subs_to_create)
         return direct_message_group
+
+
+def get_direct_message_group(id_list: list[int]) -> DirectMessageGroup | None:
+    """
+    Takes a list of user IDs and returns the DirectMessageGroup
+    object for the group consisting of these users if exists. If
+    the DirectMessageGroup object does not yet exist, it will
+    return None.
+    """
+    assert len(id_list) == len(set(id_list))
+    try:
+        direct_message_group_hash = get_direct_message_group_hash(id_list)
+        return DirectMessageGroup.objects.get(
+            huddle_hash=direct_message_group_hash,
+            group_size=len(id_list),
+        )
+    except DirectMessageGroup.DoesNotExist:
+        return None

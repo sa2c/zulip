@@ -6,13 +6,12 @@ Harbor's webhooks feature is available in version 1.9 and later.
 
 {start_tabs}
 
-1. {!create-channel.md!}
-
 1. {!create-an-incoming-webhook.md!}
 
 1. {!generate-webhook-url-basic.md!}
 
-1. Go to your Harbor **Projects** page, open a project, and click on the **Webhooks** tab.
+1. Go to your Harbor **Projects** page, open a project, and click on the
+   **Webhooks** tab.
 
 1. Set **Endpoint URL** to the URL generated above, and click on **Continue**.
 

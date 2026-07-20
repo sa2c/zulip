@@ -1,17 +1,21 @@
-import {isValid} from "date-fns";
+import {getUnixTime, isValid} from "date-fns";
 import katex from "katex";
 import _ from "lodash";
 import assert from "minimalistic-assert";
-import type {Template} from "url-template";
+import type Template from "uri-template-lite";
 
-import * as fenced_code from "../shared/src/fenced_code";
-import marked from "../third/marked/lib/marked";
-import type {LinkifierMatch, ParseOptions, RegExpOrStub} from "../third/marked/lib/marked";
+import render_channel_message_link from "../templates/channel_message_link.hbs";
+import render_topic_link from "../templates/topic_link.hbs";
+import marked from "../third/marked/lib/marked.cjs";
+import type {LinkifierMatch, ParseOptions, RegExpOrStub} from "../third/marked/lib/marked.cjs";
+
+import * as fenced_code from "./fenced_code.ts";
+import * as util from "./util.ts";
 
 // This contains zulip's frontend Markdown implementation; see
 // docs/subsystems/markdown.md for docs on our Markdown syntax.  The other
 // main piece in rendering Markdown client-side is
-// web/third/marked/lib/marked.js, which we have significantly
+// web/third/marked/lib/marked.cjs, which we have significantly
 // modified from the original implementation.
 
 // Docs: https://zulip.readthedocs.io/en/latest/subsystems/markdown.html
@@ -19,21 +23,21 @@ import type {LinkifierMatch, ParseOptions, RegExpOrStub} from "../third/marked/l
 // If we see preview-related syntax in our content, we will need the
 // backend to render it.
 const preview_regexes = [
-    // Inline image and video previews, check for contiguous chars ending in image and video suffix
+    // Inline media previews, check for contiguous chars ending in media suffix
     // To keep the below regexes simple, split them out for the end-of-message case
 
-    /\S*(?:\.bmp|\.gif|\.jpg|\.jpeg|\.png|\.webp|\.mp4|\.webm)\)?(\s+|$)/m,
+    /\S*(?:\.bmp|\.gif|\.jpg|\.jpeg|\.png|\.webp|\.mp4|\.webm|\.aac|\.flac|\.mp3|\.mpeg|\.wav)\)?(\s+|$)/m,
 
-    // Twitter and youtube links are given previews
+    // YouTube links are given previews
 
-    /\S*(?:twitter|youtube)\.com\/\S*/,
+    /\S*youtube\.com\/\S*/,
 ];
 
 function contains_preview_link(content: string): boolean {
     return preview_regexes.some((re) => re.test(content));
 }
 
-let web_app_helpers: MarkdownHelpers | undefined;
+export let web_app_helpers: MarkdownHelpers | undefined;
 
 export type AbstractMap<K, V> = {
     keys: () => IterableIterator<K>;
@@ -58,7 +62,7 @@ export type MarkdownHelpers = {
 
     // user groups
     get_user_group_from_name: (name: string) => {id: number; name: string} | undefined;
-    is_member_of_user_group: (user_id: number, user_group_id: number) => boolean;
+    is_member_of_user_group: (user_group_id: number, user_id: number) => boolean;
 
     // stream hashes
     get_stream_by_name: (stream_name: string) => {stream_id: number; name: string} | undefined;
@@ -200,13 +204,13 @@ function parse_with_options(
                 let classes;
                 let display_text;
                 if (silently) {
-                    classes = "user-mention silent";
+                    classes = "user-mention channel-wildcard-mention silent";
                     display_text = mention;
                 } else {
                     // Stream Wildcard mention
                     mentioned_stream_wildcard = true;
                     display_text = "@" + mention;
-                    classes = "user-mention";
+                    classes = "user-mention channel-wildcard-mention";
                 }
 
                 return `<span class="${classes}" data-user-id="*">${_.escape(display_text)}</span>`;
@@ -318,7 +322,7 @@ function parse_with_options(
                     display_text = "@" + group.name;
                     classes = "user-group-mention";
                     if (
-                        helper_config.is_member_of_user_group(helper_config.my_user_id(), group.id)
+                        helper_config.is_member_of_user_group(group.id, helper_config.my_user_id())
                     ) {
                         // Mentioned the current user's group.
                         mentioned_group = true;
@@ -334,8 +338,8 @@ function parse_with_options(
         silencedMentionHandler(quote: string): string {
             // Silence quoted personal and stream wildcard mentions.
             quote = quote.replaceAll(
-                /(<span class="user-mention)(" data-user-id="(\d+|\*)">)@/g,
-                "$1 silent$2",
+                /(<span class="user-mention( channel-wildcard-mention)?)(" data-user-id="(\d+|\*)">)@/g,
+                "$1 silent$3",
             );
 
             // Silence quoted topic wildcard mentions.
@@ -470,9 +474,8 @@ export function get_topic_links(topic: string): TopicLink[] {
     }
     // We need to sort applied_matches again because the links were previously ordered by precedence,
     // so that the links are displayed in the order their patterns are matched.
-    return applied_matches
-        .sort((a, b) => a.index - b.index)
-        .map((match) => ({url: match.url, text: match.text}));
+    applied_matches.sort((a, b) => a.index - b.index);
+    return applied_matches.map((match) => ({url: match.url, text: match.text}));
 }
 
 export function is_status_message(raw_content: string): boolean {
@@ -580,7 +583,7 @@ function handleTimestamp(time_string: string): string {
     }
 
     const escaped_time = _.escape(time_string);
-    if (!isValid(timeobject)) {
+    if (!isValid(timeobject) || getUnixTime(timeobject) < 0) {
         // Unsupported time format: rerender accordingly.
 
         // We do not show an error on these formats in local echo because
@@ -637,14 +640,48 @@ function handleStreamTopic({
     stream_topic_hash: (stream_id: number, topic: string) => string;
 }): string | undefined {
     const stream = get_stream_by_name(stream_name);
-    if (stream === undefined || !topic) {
+    if (stream === undefined) {
         return undefined;
     }
     const href = stream_topic_hash(stream.stream_id, topic);
-    const text = `#${stream.name} > ${topic}`;
-    return `<a class="stream-topic" data-stream-id="${_.escape(
-        stream.stream_id.toString(),
-    )}" href="/${_.escape(href)}">${_.escape(text)}</a>`;
+    return render_topic_link({
+        channel_id: stream.stream_id,
+        channel_name: stream.name,
+        topic_display_name: util.get_final_topic_display_name(topic),
+        is_empty_string_topic: topic === "",
+        href,
+    });
+}
+
+function handleStreamTopicMessage({
+    stream_name,
+    topic,
+    message_id,
+    get_stream_by_name,
+    stream_topic_hash,
+}: {
+    stream_name: string;
+    topic: string;
+    message_id: number;
+    get_stream_by_name: (stream_name: string) =>
+        | {
+              stream_id: number;
+              name: string;
+          }
+        | undefined;
+    stream_topic_hash: (stream_id: number, topic: string) => string;
+}): string | undefined {
+    const stream = get_stream_by_name(stream_name);
+    if (stream === undefined) {
+        return undefined;
+    }
+    const href = stream_topic_hash(stream.stream_id, topic) + "/near/" + message_id;
+    return render_channel_message_link({
+        channel_name: stream.name,
+        topic_display_name: util.get_final_topic_display_name(topic),
+        is_empty_string_topic: topic === "",
+        href,
+    });
 }
 
 function handleTex(tex: string, fullmatch: string): string {
@@ -755,6 +792,20 @@ export function parse({
         });
     }
 
+    function streamTopicMessageHandler(
+        stream_name: string,
+        topic: string,
+        message_id: number,
+    ): string | undefined {
+        return handleStreamTopicMessage({
+            stream_name,
+            topic,
+            message_id,
+            get_stream_by_name: helper_config.get_stream_by_name,
+            stream_topic_hash: helper_config.stream_topic_hash,
+        });
+    }
+
     function emojiHandler(emoji_name: string): string {
         return handleEmoji({
             emoji_name,
@@ -782,6 +833,7 @@ export function parse({
         unicodeEmojiHandler,
         streamHandler,
         streamTopicHandler,
+        streamTopicMessageHandler,
         texHandler: handleTex,
         timestampHandler: handleTimestamp,
         gfm: true,
@@ -809,7 +861,10 @@ export function initialize(helper_config: MarkdownHelpers): void {
     web_app_helpers = helper_config;
 }
 
-export function render(raw_content: string): {
+export function render(
+    raw_content: string,
+    helper_config?: MarkdownHelpers,
+): {
     content: string;
     flags: string[];
     is_me_message: boolean;
@@ -817,7 +872,7 @@ export function render(raw_content: string): {
     // This is generally only intended to be called by the web app. Most
     // other platforms should call parse().
     assert(web_app_helpers !== undefined);
-    const {content, flags} = parse({raw_content, helper_config: web_app_helpers});
+    const {content, flags} = parse({raw_content, helper_config: helper_config ?? web_app_helpers});
     return {
         content,
         flags,

@@ -4,12 +4,12 @@ import PlotlyBar from "plotly.js/lib/bar";
 import Plotly from "plotly.js/lib/core";
 import PlotlyPie from "plotly.js/lib/pie";
 import * as tippy from "tippy.js";
-import {z} from "zod";
+import * as z from "zod/mini";
 
-import * as blueslip from "../blueslip";
-import {$t, $t_html} from "../i18n";
+import * as blueslip from "../blueslip.ts";
+import {$t, $t_html} from "../i18n.ts";
 
-import {page_params} from "./page_params";
+import {page_params} from "./page_params.ts";
 
 Plotly.register([PlotlyBar, PlotlyPie]);
 
@@ -52,12 +52,12 @@ type DataByTime<T> = {
 };
 
 // Define zod schemas for plotly
-const datum_schema: z.ZodType<Plotly.Datum> = z.any();
+const datum_schema: z.ZodMiniType<Plotly.Datum> = z.any();
 
 // Define a schema factory function for the utility generic type
-// The inferred types from zod have to be used to type the return values
-// eslint-disable-next-line @typescript-eslint/explicit-function-return-type
-function instantiate_type_DataByEveryoneUser<T extends z.ZodTypeAny>(schema: T) {
+function instantiate_type_DataByEveryoneUser<T extends z.ZodMiniType>(
+    schema: T,
+): z.ZodMiniObject<{everyone: T; user: T}> {
     return z.object({
         everyone: schema,
         user: schema,
@@ -75,27 +75,31 @@ const active_user_data = z.object({
     all_time: z.array(datum_schema),
 });
 
-const read_data_schema = instantiate_type_DataByEveryoneUser(
-    z.object({read: z.array(z.number())}),
-).extend({...common_data_schema.shape});
+const read_data_schema = z.object({
+    ...instantiate_type_DataByEveryoneUser(z.object({read: z.array(z.number())})).shape,
+    ...common_data_schema.shape,
+});
 
-const sent_data_schema = instantiate_type_DataByEveryoneUser(
-    z.object({
-        human: z.array(z.number()),
-        bot: z.array(z.number()),
-    }),
-).extend({...common_data_schema.shape});
+const sent_data_schema = z.object({
+    ...instantiate_type_DataByEveryoneUser(
+        z.object({
+            human: z.array(z.number()),
+            bot: z.array(z.number()),
+        }),
+    ).shape,
+    ...common_data_schema.shape,
+});
 
-const ordered_sent_data_schema = instantiate_type_DataByEveryoneUser(
-    z.record(z.array(z.number())),
-).extend({
+const ordered_sent_data_schema = z.object({
+    ...instantiate_type_DataByEveryoneUser(z.record(z.string(), z.array(z.number()))).shape,
     ...common_data_schema.shape,
     display_order: z.array(z.string()),
 });
 
-const user_count_data_schema = z
-    .object({everyone: active_user_data})
-    .extend({...common_data_schema.shape});
+const user_count_data_schema = z.object({
+    ...z.object({everyone: active_user_data}).shape,
+    ...common_data_schema.shape,
+});
 
 // Inferred types used in nested functions
 type SentData = z.infer<typeof sent_data_schema>;
@@ -120,8 +124,8 @@ const font_12pt = {
 
 let last_full_update = Number.POSITIVE_INFINITY;
 
-function handle_parse_server_stats_result<_, T>(
-    result: z.SafeParseReturnType<_, T>,
+function handle_parse_server_stats_result<T>(
+    result: z.core.util.SafeParseResult<T>,
 ): T | undefined {
     if (!result.success) {
         blueslip.warn(
@@ -162,7 +166,7 @@ function partial_sums(array: number[]): number[] {
 
 // Assumes date is a round number of hours
 function floor_to_local_day(date: Date): Date {
-    const date_copy = new Date(date.getTime());
+    const date_copy = new Date(date);
     date_copy.setHours(0);
     return date_copy;
 }
@@ -678,7 +682,7 @@ function compute_summary_chart_data(
             values.push(0);
         }
     }
-    if (data.size !== 0) {
+    if (data.size > 0) {
         labels[labels.length - 1] = "Other";
         for (const sum of data.values()) {
             values[labels.length - 1]! += sum;
@@ -809,22 +813,22 @@ function populate_messages_sent_by_client(raw_data: unknown): void {
     }
 
     if (data.end_times.length < 365) {
-        $("#pie_messages_sent_by_client button[data-time='year']").remove();
+        $("#messages_sent_by_client button[data-time='year']").remove();
         if (data.end_times.length < 30) {
-            $("#pie_messages_sent_by_client button[data-time='month']").remove();
+            $("#messages_sent_by_client button[data-time='month']").remove();
             if (data.end_times.length < 7) {
-                $("#pie_messages_sent_by_client button[data-time='week']").remove();
+                $("#messages_sent_by_client button[data-time='week']").remove();
             }
         }
     }
 
     function draw_plot(): void {
-        $("#id_messages_sent_by_client > div").removeClass("spinner");
+        $("#messages_sent_by_client_chart > div").removeClass("spinner");
         const data_ = plot_data[user_button][time_button];
         layout.height = layout.margin!.b! + data_.trace.x.length * 30;
         layout.xaxis = {range: [0, Math.max(...data_.trace.x) * 1.3]};
         void Plotly.newPlot(
-            "id_messages_sent_by_client",
+            "messages_sent_by_client_chart",
             [data_.trace, data_.trace_annotations],
             layout,
             {displayModeBar: false, staticPlot: true},
@@ -835,16 +839,16 @@ function populate_messages_sent_by_client(raw_data: unknown): void {
 
     // Click handlers
     function set_user_button($button: JQuery): void {
-        $("#pie_messages_sent_by_client button[data-user]").removeClass("selected");
+        $("#messages_sent_by_client button[data-user]").removeClass("selected");
         $button.addClass("selected");
     }
 
     function set_time_button($button: JQuery): void {
-        $("#pie_messages_sent_by_client button[data-time]").removeClass("selected");
+        $("#messages_sent_by_client button[data-time]").removeClass("selected");
         $button.addClass("selected");
     }
 
-    $("#pie_messages_sent_by_client button").on("click", function () {
+    $("#messages_sent_by_client button").on("click", function () {
         if ($(this).attr("data-user")) {
             set_user_button($(this));
             user_button = user_button_schema.parse($(this).attr("data-user"));

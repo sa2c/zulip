@@ -67,17 +67,13 @@
         text-align: right;
     }
 
-    .hotkey {
-        font-weight: normal;
+    & td.definition .emoji-1f44d {
+        vertical-align: middle;
+        margin-bottom: 0.6em;
     }
 
-    .small_hotkey {
-        font-size: 0.9em !important;
-        line-height: 12px;
-
-        & kbd {
-            font-size: 0.9em;
-        }
+    .hotkey {
+        font-weight: normal;
     }
 
     .arrow-key {

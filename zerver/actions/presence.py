@@ -9,15 +9,14 @@ from psycopg2 import sql
 from zerver.actions.user_activity import update_user_activity_interval
 from zerver.lib.presence import (
     format_legacy_presence_dict,
+    get_modern_user_presence_info,
     user_presence_datetime_with_date_joined_default,
 )
-from zerver.lib.queue import queue_json_publish
-from zerver.lib.timestamp import datetime_to_timestamp
 from zerver.lib.users import get_user_ids_who_can_access_user
 from zerver.models import Client, UserPresence, UserProfile
 from zerver.models.clients import get_client
 from zerver.models.users import active_user_ids
-from zerver.tornado.django_api import send_event
+from zerver.tornado.django_api import send_event_rollback_unsafe
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +31,7 @@ def send_presence_changed(
     # sends a message, recipients may still see that user as offline!
     # We solve that by sending an immediate presence update clients.
     #
-    # See https://zulip.readthedocs.io/en/latest/subsystems/presence.html for
-    # internals documentation on presence.
+    # The API documentation explains this interaction in more detail.
     if settings.CAN_ACCESS_ALL_USERS_GROUP_LIMITS_PRESENCE:
         user_ids = get_user_ids_who_can_access_user(user_profile)
     else:
@@ -66,15 +64,17 @@ def send_presence_changed(
     # The mobile app handles these events so we need to use the old format.
     # The format of the event should also account for the slim_presence
     # API parameter when this becomes possible in the future.
-    presence_dict = format_legacy_presence_dict(last_active_time, last_connected_time)
+    legacy_presence_dict = format_legacy_presence_dict(last_active_time, last_connected_time)
+    modern_presence_dict = get_modern_user_presence_info(last_active_time, last_connected_time)
     event = dict(
         type="presence",
         email=user_profile.email,
         user_id=user_profile.id,
         server_timestamp=time.time(),
-        presence={presence_dict["client"]: presence_dict},
+        legacy_presence={legacy_presence_dict["client"]: legacy_presence_dict},
+        modern_presence=modern_presence_dict,
     )
-    send_event(user_profile.realm, event, user_ids)
+    send_event_rollback_unsafe(user_profile.realm, event, user_ids)
 
 
 def consolidate_client(client: Client) -> Client:
@@ -84,7 +84,7 @@ def consolidate_client(client: Client) -> Client:
     # to count as web users
 
     # Alias ZulipDesktop to website
-    if client.name in ["ZulipDesktop"]:
+    if client.name == "ZulipDesktop":
         return get_client("website")
     else:
         return client
@@ -123,7 +123,9 @@ def do_update_user_presence(
         defaults["last_active_time"] = log_time
 
     try:
-        presence = UserPresence.objects.select_for_update().get(user_profile=user_profile)
+        presence = UserPresence.objects.select_for_update(no_key=True).get(
+            user_profile=user_profile
+        )
         creating = False
     except UserPresence.DoesNotExist:
         # We're not ready to write until we know the next last_update_id value.
@@ -196,7 +198,7 @@ def do_update_user_presence(
 
     # Equivalent Python code:
     # if creating or len(update_fields) > 0:
-    #     presence_sequence = PresenceSequence.objects.select_for_update().get(realm_id=user_profile.realm_id)
+    #     presence_sequence = PresenceSequence.objects.select_for_update(no_key=True).get(realm_id=user_profile.realm_id)
     #     new_last_update_id = presence_sequence.last_update_id + 1
     #     presence_sequence.last_update_id = new_last_update_id
     #     if creating:
@@ -286,14 +288,13 @@ def update_user_presence(
     status: int,
     new_user_input: bool,
 ) -> None:
-    event = {
-        "user_profile_id": user_profile.id,
-        "status": status,
-        "time": datetime_to_timestamp(log_time),
-        "client": client.name,
-    }
-
-    queue_json_publish("user_presence", event)
-
+    logger.debug(
+        "Processing presence update for user %s, client %s, status %s",
+        user_profile.id,
+        client,
+        status,
+    )
+    if user_profile.presence_enabled:
+        do_update_user_presence(user_profile, client, log_time, status)
     if new_user_input:
         update_user_activity_interval(user_profile, log_time)

@@ -1,25 +1,42 @@
-"use strict";
+// @ts-check
 
-const path = require("path");
+import path from "node:path";
 
-const {media_breakpoints} = require("./src/css_variables");
+import postcssExtendRule from "postcss-extend-rule";
+import postcssImport from "postcss-import";
+import postcssPrefixWrap from "postcss-prefixwrap";
+import postcssPresetEnv from "postcss-preset-env";
+import postcssSimpleVars from "postcss-simple-vars";
 
-const config = ({file}) => ({
+import {container_breakpoints, media_breakpoints} from "./src/css_variables.ts";
+
+/**
+ * @param {object} ctx
+ * @returns {import("postcss-load-config").Config}
+ * @satisfies {import("postcss-load-config").ConfigFn & import("postcss-loader/dist/config").PostCSSLoaderOptions}
+ */
+const config = (ctx) => ({
     plugins: [
-        (file.basename ?? path.basename(file)) === "dark_theme.css" &&
+        "file" in ctx &&
+            (typeof ctx.file === "string"
+                ? path.basename(ctx.file)
+                : typeof ctx.file === "object" && ctx.file !== null && "basename" in ctx.file
+                  ? ctx.file.basename
+                  : undefined) === "dark_theme.css" &&
             // Add postcss-import plugin with postcss-prefixwrap to handle
             // the flatpickr dark theme. We do this because flatpickr themes
             // are not scoped. See https://github.com/flatpickr/flatpickr/issues/2168.
-            require("postcss-import")({
-                plugins: [require("postcss-prefixwrap")("%dark-theme")],
+            postcssImport({
+                plugins: [postcssPrefixWrap("%dark-theme")],
             }),
-        require("postcss-extend-rule"),
-        require("postcss-simple-vars")({variables: media_breakpoints}),
-        require("postcss-preset-env")({
+        postcssExtendRule,
+        postcssSimpleVars({variables: {...container_breakpoints, ...media_breakpoints}}),
+        postcssPresetEnv({
             features: {
+                "is-pseudo-class": true, // Needed for postcss-extend-rule
                 "nesting-rules": true,
             },
         }),
     ],
 });
-module.exports = config;
+export default config;

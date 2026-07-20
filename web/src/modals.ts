@@ -2,8 +2,11 @@ import $ from "jquery";
 import Micromodal from "micromodal";
 import assert from "minimalistic-assert";
 
-import * as blueslip from "./blueslip";
-import * as overlay_util from "./overlay_util";
+import * as blueslip from "./blueslip.ts";
+import * as mouse_drag from "./mouse_drag.ts";
+import * as overlay_util from "./overlay_util.ts";
+import * as overlays from "./overlays.ts";
+import * as popovers from "./popovers.ts";
 
 type Hook = () => void;
 
@@ -142,17 +145,33 @@ export function open(
         }
     });
 
+    // Micromodal registers a document-level keydown handler that closes
+    // the modal on Escape. When a popover is open inside the modal,
+    // Escape should close just the popover, not the modal behind it.
+    // We intercept the event here so that Micromodal's handler never
+    // sees it when a popover is active.
+    $micromodal.on("keydown", (e) => {
+        if (e.key === "Escape" && popovers.any_active()) {
+            popovers.hide_all();
+            e.stopPropagation();
+        }
+    });
+
     $micromodal.find(".modal__overlay").on("click", (e) => {
+        if (!$(e.target).is(".modal__overlay")) {
+            return;
+        }
+
+        if ($(e.target).hasClass("ignore-overlay-click")) {
+            return;
+        }
+
         /* Micromodal's data-micromodal-close feature doesn't check for
            range selections; this means dragging a selection of text in an
            input inside the modal too far will weirdly close the modal.
            See https://github.com/ghosh/Micromodal/issues/505.
            Work around this with our own implementation. */
-        if (!$(e.target).is(".modal__overlay")) {
-            return;
-        }
-
-        if (document.getSelection()?.type === "Range") {
+        if (mouse_drag.is_drag(e)) {
             return;
         }
         close(modal_id);
@@ -162,7 +181,14 @@ export function open(
         if (conf.on_show) {
             conf.on_show();
         }
-        overlay_util.disable_scrolling();
+        // We avoid toggling scrolling when opening a modal over an active overlay.
+        // This prevents a subtle UI shift, as reported in
+        // https://chat.zulip.org/#narrow/channel/9-issues/topic/A.20little.20right.20shift.20can.20be.20observed.20when.20confirm.20dialog.20ope/near/2026160
+        // There is no need to enable or disable the scrolling when modal is
+        // opened because it is already handled while opening and closing the overlay.
+        if (!overlays.any_active()) {
+            overlay_util.disable_scrolling();
+        }
         call_hooks(pre_open_hooks);
     }
 
@@ -170,7 +196,11 @@ export function open(
         if (conf.on_hide) {
             conf.on_hide();
         }
-        overlay_util.enable_scrolling();
+        // Since we are disabling scroll only when the modal is not
+        // opened over an overlay, we will enable it in that way only.
+        if (!overlays.any_active()) {
+            overlay_util.enable_scrolling();
+        }
         call_hooks(pre_close_hooks);
     }
 

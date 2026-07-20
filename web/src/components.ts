@@ -1,7 +1,9 @@
 import $ from "jquery";
+import assert from "minimalistic-assert";
 
-import * as blueslip from "./blueslip";
-import * as keydown_util from "./keydown_util";
+import * as blueslip from "./blueslip.ts";
+import * as keydown_util from "./keydown_util.ts";
+import * as ui_util from "./ui_util.ts";
 
 /* USAGE:
     Toggle x = components.toggle({
@@ -28,8 +30,10 @@ export type Toggle = {
 
 export function toggle(opts: {
     html_class?: string;
-    values: {label: string; label_html?: string; key: string}[];
-    callback?: (label: string, value: string) => void;
+    values: (({label: string; label_html?: never} | {label_html: string; label?: never}) & {
+        key: string;
+    })[];
+    callback?: (label: string | undefined, value: string) => void;
     child_wants_focus?: boolean;
     selected?: number;
 }): Toggle {
@@ -50,7 +54,7 @@ export function toggle(opts: {
         if (value.label_html !== undefined) {
             const html = value.label_html;
             $tab.html(html);
-        } else {
+        } else if (value.label !== undefined) {
             $tab.text(value.label);
         }
 
@@ -77,6 +81,10 @@ export function toggle(opts: {
         if ($elem.hasClass("disabled")) {
             return false;
         }
+        if ($elem.css("display") === "none") {
+            return false;
+        }
+
         meta.$ind_tab.removeClass("selected");
 
         $elem.addClass("selected");
@@ -130,6 +138,11 @@ export function toggle(opts: {
         handlers: {
             ArrowLeft: maybe_go_left,
             ArrowRight: maybe_go_right,
+            Enter(e?: JQuery.KeyDownEvent) {
+                assert(e !== undefined);
+                ui_util.convert_enter_to_click(e);
+                return true;
+            },
         },
     });
 
@@ -187,7 +200,7 @@ export function toggle(opts: {
 
             const idx = opts.values.indexOf(value);
 
-            if (idx >= 0) {
+            if (idx !== -1) {
                 select_tab(idx);
             }
         },

@@ -1,7 +1,7 @@
 # Roles and permissions
 
 Zulip offers several levels of permissions based on a
-[user's role](/help/roles-and-permissions) in a Zulip organization.
+[user's role](/help/user-roles) in a Zulip organization.
 
 Here are some important details to note when working with these
 roles and permissions in Zulip's API:
@@ -36,13 +36,9 @@ by the [events API](/api/get-events).
 
 Note that [`POST /register`](/api/register-queue) also returns an
 `is_moderator` boolean property specifying whether the current user is
-an organization moderator.
+at least an organization moderator. The property will be true for admins
+and owners too.
 
-Additionally, user account data include an `is_billing_admin` property
-specifying whether the user is a billing administrator for the Zulip
-organization, which is not related to one of the roles listed above,
-but rather allows for specific permissions related to billing
-administration in [paid Zulip Cloud plans](https://zulip.com/plans/).
 
 ### User account data in the API
 
@@ -75,9 +71,9 @@ event](/api/get-events#realm_user-add), and the
 
 Many areas of Zulip are customizable by the roles
 above, such as (but not limited to) [restricting message editing and
-deletion](/help/restrict-message-editing-and-deletion) and
-[channels permissions](/help/channel-permissions). The potential
-permission levels are:
+deletion](/help/restrict-message-editing-and-deletion) and various
+permissions for different [channel types](/help/channel-permissions).
+The potential permission levels are:
 
 * Everyone / Any user including Guests (least restrictive)
 

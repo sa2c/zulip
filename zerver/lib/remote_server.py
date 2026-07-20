@@ -1,4 +1,5 @@
 import logging
+import secrets
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urljoin
@@ -20,9 +21,11 @@ from zerver.actions.realm_settings import (
 )
 from zerver.lib import redis_utils
 from zerver.lib.exceptions import (
+    InvalidBouncerPublicKeyError,
     JsonableError,
     MissingRemoteRealmError,
     RemoteRealmServerMismatchError,
+    RequestExpiredError,
 )
 from zerver.lib.outgoing_http import OutgoingSession
 from zerver.lib.queue import queue_event_on_commit
@@ -189,42 +192,41 @@ def send_to_push_bouncer(
         # If JSON parsing errors, just let that exception happen
         result_dict = orjson.loads(res.content)
         msg = result_dict["msg"]
-        if "code" in result_dict and result_dict["code"] == "INVALID_ZULIP_SERVER":
+        code = result_dict["code"] if "code" in result_dict else None
+        if code == "INVALID_ZULIP_SERVER":
             # Invalid Zulip server credentials should email this server's admins
             raise PushNotificationBouncerError(
                 _("Push notifications bouncer error: {error}").format(error=msg)
             )
-        elif "code" in result_dict and result_dict["code"] == "PUSH_NOTIFICATIONS_DISALLOWED":
+        elif code == "PUSH_NOTIFICATIONS_DISALLOWED":
             from zerver.lib.push_notifications import PushNotificationsDisallowedByBouncerError
 
             raise PushNotificationsDisallowedByBouncerError(reason=msg)
-        elif (
-            endpoint == "push/test_notification"
-            and "code" in result_dict
-            and result_dict["code"] == "INVALID_REMOTE_PUSH_DEVICE_TOKEN"
-        ):
+        elif endpoint == "push/test_notification" and code == "INVALID_REMOTE_PUSH_DEVICE_TOKEN":
             # This error from the notification debugging endpoint should just be directly
             # communicated to the device.
             # TODO: Extend this to use a more general mechanism when we add more such error responses.
             from zerver.lib.push_notifications import InvalidRemotePushDeviceTokenError
 
             raise InvalidRemotePushDeviceTokenError
-        elif (
-            endpoint == "server/billing"
-            and "code" in result_dict
-            and result_dict["code"] == "MISSING_REMOTE_REALM"
-        ):  # nocoverage
+        elif endpoint == "server/billing" and code == "MISSING_REMOTE_REALM":  # nocoverage
             # The callers requesting this endpoint want the exception to propagate
             # so they can catch it.
             raise MissingRemoteRealmError
         elif (
-            endpoint == "server/billing"
-            and "code" in result_dict
-            and result_dict["code"] == "REMOTE_REALM_SERVER_MISMATCH_ERROR"
+            endpoint == "server/billing" and code == "REMOTE_REALM_SERVER_MISMATCH_ERROR"
         ):  # nocoverage
             # The callers requesting this endpoint want the exception to propagate
             # so they can catch it.
             raise RemoteRealmServerMismatchError
+        elif endpoint == "push/e2ee/register" and code == "INVALID_BOUNCER_PUBLIC_KEY":
+            raise InvalidBouncerPublicKeyError
+        elif endpoint == "push/e2ee/register" and code == "REQUEST_EXPIRED":
+            raise RequestExpiredError
+        elif endpoint == "push/e2ee/register" and code == "MISSING_REMOTE_REALM":
+            raise MissingRemoteRealmError
+        elif endpoint == "push/e2ee/notify" and code == "MISSING_REMOTE_REALM":
+            raise MissingRemoteRealmError
         else:
             # But most other errors coming from the push bouncer
             # server are client errors (e.g. never-registered token)
@@ -386,13 +388,17 @@ def should_send_analytics_data() -> bool:  # nocoverage
     return settings.ANALYTICS_DATA_UPLOAD_LEVEL > AnalyticsDataUploadLevel.NONE
 
 
-def send_server_data_to_push_bouncer(consider_usage_statistics: bool = True) -> None:
+def send_server_data_to_push_bouncer(
+    consider_usage_statistics: bool = True, raise_on_error: bool = False
+) -> None:
     logger = logging.getLogger("zulip.analytics")
     # first, check what's latest
     try:
         result = send_to_push_bouncer("GET", "server/analytics/status", {})
     except (JsonableError, orjson.JSONDecodeError) as e:
         maybe_mark_pushes_disabled(e, logger)
+        if raise_on_error:  # nocoverage
+            raise
         return
 
     # Gather only entries with IDs greater than the last ID received by the push bouncer.
@@ -451,6 +457,8 @@ def send_server_data_to_push_bouncer(consider_usage_statistics: bool = True) -> 
             "POST", "server/analytics", request.model_dump(round_trip=True)
         )
     except (JsonableError, orjson.JSONDecodeError) as e:
+        if raise_on_error:  # nocoverage
+            raise
         maybe_mark_pushes_disabled(e, logger)
         return
 
@@ -489,3 +497,19 @@ def maybe_enqueue_audit_log_upload(realm: Realm) -> None:
     if uses_notification_bouncer():
         event = {"type": "push_bouncer_update_for_realm", "realm_id": realm.id}
         queue_event_on_commit("deferred_work", event)
+
+
+SELF_HOSTING_REGISTRATION_TAKEOVER_CHALLENGE_TOKEN_REDIS_KEY = (
+    "self_hosting_domain_transfer_challenge_verify"
+)
+
+
+def prepare_for_registration_transfer_challenge(verification_secret: str) -> str:
+    access_token = secrets.token_urlsafe(32)
+    data_to_store = {"verification_secret": verification_secret, "access_token": access_token}
+    redis_client.set(
+        redis_utils.REDIS_KEY_PREFIX + SELF_HOSTING_REGISTRATION_TAKEOVER_CHALLENGE_TOKEN_REDIS_KEY,
+        orjson.dumps(data_to_store),
+        ex=10,
+    )
+    return access_token

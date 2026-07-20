@@ -2,10 +2,12 @@
     <div class="modal__overlay" tabindex="-1">
         <div class="modal__container" role="dialog" aria-modal="true" aria-labelledby="login_to_access_modal_label">
             <header class="modal__header">
-                <h1 class="modal__title" id="login_to_access_modal_label">
-                    {{t "Join {realm_name}" }}
-                </h1>
-                <button class="modal__close" aria-label="{{t 'Close modal' }}" data-micromodal-close></button>
+                <div class="modal__header-content">
+                    <h1 class="modal__title" id="login_to_access_modal_label">
+                        {{t "Join {realm_name}" }}
+                    </h1>
+                </div>
+                {{> components/icon_button icon="close" intent="neutral" custom_classes="modal__close" aria-label=(t 'Close modal') data-micromodal-close=true }}
             </header>
             <main class="modal__content">
                 {{#if empty_narrow}}
@@ -22,10 +24,10 @@
                 </p>
             </main>
             <footer class="modal__footer">
-                <a class="modal__btn dialog_submit_button" href="{{signup_link}}">
+                <a class="modal__button dialog_submit_button" href="{{signup_link}}">
                     <span>{{t "Sign up" }}</span>
                 </a>
-                <a class="modal__btn dialog_submit_button" href="{{login_link}}">
+                <a class="modal__button dialog_submit_button" href="{{login_link}}">
                     <span>{{t "Log in" }}</span>
                 </a>
             </footer>

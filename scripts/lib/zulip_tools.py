@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import platform
 import pwd
 import random
 import shlex
@@ -94,8 +95,7 @@ def parse_cache_script_args(description: str) -> argparse.Namespace:
         "--no-print-headings",
         dest="no_headings",
         action="store_true",
-        help="If specified then script will not print headings for "
-        "what will be deleted/kept back.",
+        help="If specified then script will not print headings for what will be deleted/kept back.",
     )
 
     args = parser.parse_args()
@@ -300,29 +300,33 @@ def get_environment() -> str:
     return "dev"
 
 
-def get_recent_deployments(threshold_days: int) -> set[str]:
+def get_recent_deployments(threshold_days: int | None) -> set[str]:
     # Returns a list of deployments not older than threshold days
     # including `/root/zulip` directory if it exists.
     recent = set()
-    threshold_date = datetime.now() - timedelta(days=threshold_days)  # noqa: DTZ005
-    for dir_name in os.listdir(DEPLOYMENTS_DIR):
-        target_dir = os.path.join(DEPLOYMENTS_DIR, dir_name)
-        if not os.path.isdir(target_dir):
-            # Skip things like uwsgi sockets, symlinks, etc.
-            continue
-        if not os.path.exists(os.path.join(target_dir, "zerver")):
-            # Skip things like "lock" that aren't actually a deployment directory
-            continue
-        try:
-            date = datetime.strptime(dir_name, TIMESTAMP_FORMAT)  # noqa: DTZ007
-            if date >= threshold_date:
+    if threshold_days is not None:
+        threshold_date = datetime.now() - timedelta(days=threshold_days)  # noqa: DTZ005
+    else:
+        threshold_date = None
+    if os.path.isdir(DEPLOYMENTS_DIR):
+        for dir_name in os.listdir(DEPLOYMENTS_DIR):
+            target_dir = os.path.join(DEPLOYMENTS_DIR, dir_name)
+            if not os.path.isdir(target_dir):
+                # Skip things like uwsgi sockets, symlinks, etc.
+                continue
+            if not os.path.exists(os.path.join(target_dir, "zerver")):
+                # Skip things like "lock" that aren't actually a deployment directory
+                continue
+            try:
+                date = datetime.strptime(dir_name, TIMESTAMP_FORMAT)  # noqa: DTZ007
+                if threshold_date is None or date >= threshold_date:
+                    recent.add(target_dir)
+            except ValueError:
+                # Always include deployments whose name is not in the format of a timestamp.
                 recent.add(target_dir)
-        except ValueError:
-            # Always include deployments whose name is not in the format of a timestamp.
-            recent.add(target_dir)
-            # If it is a symlink then include the target as well.
-            if os.path.islink(target_dir):
-                recent.add(os.path.realpath(target_dir))
+                # If it is a symlink then include the target as well.
+                if os.path.islink(target_dir):
+                    recent.add(os.path.realpath(target_dir))
     if os.path.exists("/root/zulip"):
         recent.add("/root/zulip")
     return recent
@@ -429,35 +433,6 @@ def maybe_perform_purging(
 
 
 @functools.lru_cache(None)
-def parse_os_release() -> dict[str, str]:
-    """
-    Example of the useful subset of the data:
-    {
-     'ID': 'ubuntu',
-     'VERSION_ID': '18.04',
-     'NAME': 'Ubuntu',
-     'VERSION': '18.04.3 LTS (Bionic Beaver)',
-     'PRETTY_NAME': 'Ubuntu 18.04.3 LTS',
-    }
-
-    VERSION_CODENAME (e.g. 'bionic') is nice and readable to Ubuntu
-    developers, but we avoid using it, as it is not available on
-    RHEL-based platforms.
-    """
-    distro_info: dict[str, str] = {}
-    with open("/etc/os-release") as fp:
-        for line in fp:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                # The line may be blank or a comment, see:
-                # https://www.freedesktop.org/software/systemd/man/os-release.html
-                continue
-            k, v = line.split("=", 1)
-            [distro_info[k]] = shlex.split(v)
-    return distro_info
-
-
-@functools.lru_cache(None)
 def os_families() -> set[str]:
     """
     Known families:
@@ -467,7 +442,7 @@ def os_families() -> set[str]:
     rhel (includes: rhel, centos)
     centos (includes: centos)
     """
-    distro_info = parse_os_release()
+    distro_info = platform.freedesktop_os_release()
     return {distro_info["ID"], *distro_info.get("ID_LIKE", "").split()}
 
 
@@ -475,7 +450,7 @@ def get_tzdata_zi() -> IO[str]:
     for path in zoneinfo.TZPATH:
         filename = os.path.join(path, "tzdata.zi")
         if os.path.exists(filename):
-            return open(filename)  # noqa: SIM115
+            return open(filename)
     raise RuntimeError("Missing time zone data (tzdata.zi)")
 
 
@@ -623,15 +598,6 @@ def get_deploy_options(config_file: configparser.RawConfigParser) -> list[str]:
     return shlex.split(get_config(config_file, "deployment", "deploy_options", ""))
 
 
-def run_psql_as_postgres(
-    config_file: configparser.RawConfigParser,
-    sql_query: str,
-) -> None:
-    dbname = get_config(config_file, "postgresql", "database_name", "zulip")
-    subcmd = shlex.join(["psql", "-v", "ON_ERROR_STOP=1", "-d", dbname, "-c", sql_query])
-    subprocess.check_call(["su", "postgres", "-c", subcmd])
-
-
 def get_tornado_ports(config_file: configparser.RawConfigParser) -> list[int]:
     ports = []
     if config_file.has_section("tornado_sharding"):
@@ -639,7 +605,7 @@ def get_tornado_ports(config_file: configparser.RawConfigParser) -> list[int]:
             {
                 int(port)
                 for key in config_file.options("tornado_sharding")
-                for port in (key[: -len("_regex")] if key.endswith("_regex") else key).split("_")
+                for port in key.removesuffix("_regex").split("_")
             }
         )
     if not ports:
@@ -691,10 +657,21 @@ def start_arg_parser(action: str, add_help: bool = False) -> argparse.ArgumentPa
     parser.add_argument(
         "--skip-checks", action="store_true", help="Skip syntax and database checks"
     )
-    parser.add_argument(
+    which_services = parser.add_mutually_exclusive_group()
+    which_services.add_argument(
         "--skip-client-reloads",
         action="store_true",
         help="Do not send reload events to web clients",
+    )
+    which_services.add_argument(
+        "--only-django",
+        action="store_true",
+        help=f"Only {action} Django (not Tornado or workers)",
+    )
+    which_services.add_argument(
+        "--tornado-reshard",
+        action="store_true",
+        help="Restart changed Tornado shards",
     )
     if action == "restart":
         parser.add_argument(
@@ -703,24 +680,6 @@ def start_arg_parser(action: str, add_help: bool = False) -> argparse.ArgumentPa
             help="Restart with more concern for expediency than minimizing availability interruption",
         )
     return parser
-
-
-def listening_publicly(port: int) -> list[str]:
-    filter = f"sport = :{port} and not src 127.0.0.1:{port} and not src [::1]:{port}"
-    # Parse lines that look like this:
-    # tcp    LISTEN     0          128             0.0.0.0:25672        0.0.0.0:*
-    lines = (
-        subprocess.check_output(
-            ["/bin/ss", "-Hnl", filter],
-            text=True,
-            # Hosts with IPv6 disabled will get "RTNETLINK answers: Invalid
-            # argument"; eat stderr to hide that
-            stderr=subprocess.DEVNULL,
-        )
-        .strip()
-        .splitlines()
-    )
-    return [line.split()[4] for line in lines]
 
 
 def atomic_nagios_write(
@@ -746,7 +705,15 @@ def atomic_nagios_write(
     with open(path + ".tmp", "w") as fh:
         fh.write("|".join([str(event_time), str(status_int), status, message]) + "\n")
     os.rename(path + ".tmp", path)
-    return status_int
+
+    # Return code should be if the cron job ran to completion
+    # successfully, not if the result of the check was outside of
+    # bounds ("ok" / "critical"); this prevents the Sentry cron
+    # wrapper from spamming with a "failure" email if the nagios check
+    # requires multiple failures in a row.
+    if status == "unknown":
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

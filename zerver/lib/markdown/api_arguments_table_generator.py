@@ -221,6 +221,11 @@ class APIArgumentsTablePreprocessor(Preprocessor):
 
         object_values = schema.get("properties", {})
         for value in object_values:
+            if object_values[value].get("readOnly", False):
+                # readOnly object properties are included in responses
+                # but not in requests.
+                continue
+
             description = ""
             if "description" in object_values[value]:
                 description = object_values[value]["description"]
@@ -268,6 +273,8 @@ class APIArgumentsTablePreprocessor(Preprocessor):
             details = ""
             if "object" in data_type and "properties" in object_values[value]:
                 details += self.render_object_details(object_values[value], str(value))
+            elif "items" in object_values[value] and "properties" in object_values[value]["items"]:
+                details += self.render_object_details(object_values[value]["items"], str(value))
             elif "oneOf" in object_values[value]:
                 details += self.render_oneof_block(object_values[value], str(value))
 
@@ -299,9 +306,7 @@ def makeExtension(*args: Any, **kwargs: str) -> MarkdownArgumentsTableGenerator:
 def generate_data_type(schema: Mapping[str, Any]) -> str:
     data_type = ""
     if "oneOf" in schema:
-        for item in schema["oneOf"]:
-            data_type = data_type + generate_data_type(item) + " | "
-        data_type = data_type[:-3]
+        data_type = " | ".join(generate_data_type(item) for item in schema["oneOf"])
     elif "items" in schema:
         data_type = "(" + generate_data_type(schema["items"]) + ")[]"
     else:

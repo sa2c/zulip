@@ -1,8 +1,8 @@
-import {strict as assert} from "assert";
+import assert from "node:assert/strict";
 
 import type {Page} from "puppeteer";
 
-import * as common from "./lib/common";
+import * as common from "./lib/common.ts";
 
 async function click_delete_and_return_last_msg_id(page: Page): Promise<string> {
     const msg = (await page.$$(".message-list .message_row")).at(-1);
@@ -43,4 +43,4 @@ async function delete_message_test(page: Page): Promise<void> {
     assert.equal((await page.$$(".message-list .message_row")).length, messages_quantity - 1);
 }
 
-common.run_test(delete_message_test);
+await common.run_test(delete_message_test);

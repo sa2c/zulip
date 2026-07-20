@@ -1,19 +1,20 @@
 import ClipboardJS from "clipboard";
 import $ from "jquery";
+import assert from "minimalistic-assert";
 import SimpleBar from "simplebar";
 import * as tippy from "tippy.js";
 
-import copy_to_clipboard_svg from "../../templates/copy_to_clipboard_svg.hbs";
-import * as common from "../common";
-
-import {activate_correct_tab} from "./tabbed-instructions";
+import zulip_copy_icon from "../../templates/zulip_copy_icon.hbs";
+import * as common from "../common.ts";
+import {show_copied_confirmation} from "../copied_tooltip.ts";
+import * as util from "../util.ts";
 
 function register_tabbed_section($tabbed_section: JQuery): void {
     const $li = $tabbed_section.find("ul.nav li");
     const $blocks = $tabbed_section.find(".blocks div");
 
     $li.on("click", function () {
-        const tab_key = this.dataset.tabKey;
+        const tab_key = this.getAttribute("data-tab-key");
 
         $li.removeClass("active");
         $li.filter("[data-tab-key=" + tab_key + "]").addClass("active");
@@ -30,14 +31,14 @@ function register_tabbed_section($tabbed_section: JQuery): void {
 }
 
 // Display the copy-to-clipboard button inside the .codehilite element
-// within the API and Help Center docs using clipboard.js
+// within the API and help center docs using clipboard.js
 function add_copy_to_clipboard_element($codehilite: JQuery): void {
-    const $copy_button = $("<button>").addClass("copy-codeblock");
-    $copy_button.html(copy_to_clipboard_svg());
+    const $copy_button = $("<span>").addClass("copy-button copy-codeblock");
+    $copy_button.html(zulip_copy_icon());
 
     $($codehilite).append($copy_button);
 
-    const clipboard = new ClipboardJS($copy_button[0]!, {
+    const clipboard = new ClipboardJS(util.the($copy_button), {
         text(copy_element) {
             // trim to remove trailing whitespace introduced
             // by additional elements inside <pre>
@@ -46,34 +47,23 @@ function add_copy_to_clipboard_element($codehilite: JQuery): void {
     });
 
     // Show a tippy tooltip when the button is hovered
-    const tooltip_copy = tippy.default($copy_button[0]!, {
+    tippy.default(util.the($copy_button), {
         content: "Copy code",
         trigger: "mouseenter",
         placement: "top",
     });
 
-    // Show a tippy tooltip when the code is copied
-    const tooltip_copied = tippy.default($copy_button[0]!, {
-        content: "Copied!",
-        trigger: "manual",
-        placement: "top",
-    });
-
     // Show "Copied!" tooltip when code is successfully copied
-    clipboard.on("success", () => {
-        tooltip_copy.hide();
-        tooltip_copied.show();
-
-        // Hide the "Copied!" tooltip after 1 second
-        setTimeout(() => {
-            tooltip_copied.hide();
-        }, 1000);
+    clipboard.on("success", (e) => {
+        assert(e.trigger instanceof HTMLElement);
+        show_copied_confirmation(e.trigger, {
+            show_check_icon: true,
+        });
     });
 }
 
 function render_tabbed_sections(): void {
     $(".tabbed-section").each(function () {
-        activate_correct_tab($(this));
         register_tabbed_section($(this));
     });
 
@@ -89,7 +79,9 @@ function render_tabbed_sections(): void {
     });
 }
 
-new SimpleBar($(".sidebar")[0]!, {tabIndex: -1});
+if ($(".sidebar").length > 0) {
+    new SimpleBar(util.the($(".sidebar")), {tabIndex: -1});
+}
 
 // Scroll to anchor link when clicked. Note that landing-page.js has a
 // similar function; this file and landing-page.js are never included
@@ -109,7 +101,7 @@ $(".hamburger").on("click", () => {
 });
 
 $(".markdown").on("click", () => {
-    if ($(".sidebar.show").length) {
+    if ($(".sidebar.show").length > 0) {
         $(".sidebar.show").toggleClass("show");
     }
 });

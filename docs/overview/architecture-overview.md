@@ -9,11 +9,10 @@ incoming webhook [integrations](https://zulip.com/integrations/)
 with other services and applications (see [the directory structure
 guide](directory-structure.md)).
 
-[Zulip Mobile](https://github.com/zulip/zulip-mobile) is the official
-mobile Zulip client supporting both iOS and Android, written in
-JavaScript with React Native, and [Zulip
-Desktop](https://github.com/zulip/zulip-desktop) is the official Zulip
-desktop client for macOS, Linux, and Windows.
+[Zulip Flutter](https://github.com/zulip/zulip-flutter) is the official
+mobile Zulip client supporting both iOS and Android, built with Flutter,
+and [Zulip Desktop](https://github.com/zulip/zulip-desktop) is the
+official Zulip desktop client for macOS, Linux, and Windows.
 [Zulip Terminal](https://github.com/zulip/zulip-terminal) is our
 official terminal-based client.
 
@@ -22,14 +21,13 @@ other glue code: [Python API
 bindings](https://github.com/zulip/python-zulip-api); [JavaScript API
 bindings](https://github.com/zulip/zulip-js); a [Hubot
 adapter](https://github.com/zulip/hubot-zulip); integrations with
-[Phabricator](https://github.com/zulip/phabricator-to-zulip),
 [Jenkins](https://github.com/zulip/zulip-jenkins-plugin),
 [Puppet](https://github.com/matthewbarr/puppet-zulip),
 [Redmine](https://github.com/zulip/zulip-redmine-plugin), and
 [Trello](https://github.com/zulip/trello-to-zulip);
 and [many more](https://github.com/zulip/).
 
-We use [Transifex](https://explore.transifex.com/zulip/zulip/) to do
+We use [Weblate](https://hosted.weblate.org/projects/zulip/) to do
 translations.
 
 In this overview, we'll mainly discuss the core Zulip server and web
@@ -54,9 +52,12 @@ chamber with its own users, channels, customizations, and so on. This
 means that one person might be a user of multiple Zulip realms. The
 administrators of an organization have a great deal of control over
 who can register an account, what permissions new users have, etc. For
-more on security considerations and options, see [the security model
-section](../production/security-model.md) and the [Zulip Help
-Center](https://zulip.com/help/).
+more on security considerations and options, see our [guide on securing
+your Zulip server][security-guide], [security overview][security-overview],
+and the [Zulip help center](https://zulip.com/help/).
+
+[security-overview]: https://zulip.com/security/
+[security-guide]: ../production/securing-your-zulip-server.md
 
 ## Components
 
@@ -120,9 +121,9 @@ For more details on the frontend, see our documentation on
 nginx is the front-end web server to all Zulip traffic; it serves static
 assets and proxies to Django and Tornado. It handles HTTP requests
 according to the rules laid down in the many config files found in
-`zulip/puppet/zulip/files/nginx/`.
+`puppet/zulip/files/nginx/` and `puppet/zulip/templates/nginx/`.
 
-`zulip/puppet/zulip/files/nginx/zulip-include-frontend/app` is the most
+`puppet/zulip/files/nginx/zulip-include-frontend/app` is the most
 important of these files. It explains what happens when requests come in
 from outside.
 
@@ -150,7 +151,7 @@ We use [supervisord](http://supervisord.org/) to start server processes,
 restart them automatically if they crash, and direct logging.
 
 The config file is
-`zulip/puppet/zulip/templates/supervisor/zulip.conf.template.erb`. This
+`puppet/zulip/templates/supervisor/zulip.conf.template.erb`. This
 is where Tornado and Django are set up, as well as a number of background
 processes that process event queues. We use event queues for the kinds
 of tasks that are best run in the background because they are
@@ -164,7 +165,7 @@ memcached is used to cache database model
 objects. `zerver/lib/cache.py` and `zerver/lib/cache_helpers.py`
 manage putting things into memcached, and invalidating the cache when
 values change. The memcached configuration is in
-`puppet/zulip/files/memcached.conf`. See our
+`puppet/zulip/templates/memcached.conf.template.erb`. See our
 [caching guide](../subsystems/caching.md) to learn how this works in
 detail.
 
@@ -173,12 +174,11 @@ detail.
 Redis is used for a few very short-term data stores, primarily
 our rate-limiting system.
 
-Redis is configured in `zulip/puppet/zulip/files/redis` and it's a
-pretty standard configuration except for the last line, which turns off
-persistence:
+Redis is configured in `puppet/zulip/templates/zulip-redis.template.erb` and
+the main contents are the following, which turns off persistence:
 
 ```text
-# Zulip-specific configuration: disable saving to disk.
+# Disable saving to disk to optimize performance
 save ""
 ```
 
@@ -206,8 +206,8 @@ materialize:
 ### RabbitMQ
 
 RabbitMQ is a queueing system. Its config files live in
-`zulip/puppet/zulip/files/rabbitmq`. Initial configuration happens in
-`zulip/scripts/setup/configure-rabbitmq`.
+`puppet/zulip/files/rabbitmq`. Initial configuration happens in
+`scripts/setup/configure-rabbitmq`.
 
 We use RabbitMQ for queuing expensive work (e.g., sending emails
 triggered by a message, push notifications, some analytics, etc.) that
@@ -216,7 +216,7 @@ thread. It's also used for communication between the application server
 and the Tornado push system.
 
 Two simple wrappers around `pika` (the Python RabbitMQ client) are in
-`zulip/zerver/lib/queue.py`. There's an asynchronous client for use in
+`zerver/lib/queue.py`. There's an asynchronous client for use in
 Tornado and a more general client for use elsewhere. Most of the
 processes started by Supervisor are queue processors that continually
 pull things out of a RabbitMQ queue and handle them; they are defined
@@ -250,15 +250,15 @@ to create the actual database with its schema.
 Nagios is an optional component used for notifications to the system
 administrator, e.g., in case of outages.
 
-`zulip/puppet/zulip/manifests/nagios.pp` installs Nagios plugins from
+`puppet/zulip/manifests/nagios_plugins.pp` installs Nagios plugins from
 `puppet/zulip/files/nagios_plugins/`.
 
 This component is intended to install Nagios plugins intended to be run
 on a Nagios server; most of the Zulip Nagios plugins are intended to be
 run on the Zulip servers themselves, and are included with the relevant
 component of the Zulip server (e.g.,
-`puppet/zulip/manifests/postgresql_backups.pp` installs a few under
-`/usr/lib/nagios/plugins/zulip_backups`).
+`puppet/zulip/manifests/app_frontend_base.pp` installs a few under
+`/usr/lib/nagios/plugins/zulip_app_frontend`).
 
 ## Glossary
 

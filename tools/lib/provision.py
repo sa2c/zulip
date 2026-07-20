@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import contextlib
 import hashlib
 import logging
 import os
@@ -22,10 +23,9 @@ from scripts.lib.zulip_tools import (
     WARNING,
     get_dev_uuid_var_path,
     os_families,
-    parse_os_release,
+    run,
     run_as_root,
 )
-from tools.setup import setup_venvs
 
 VAR_DIR_PATH = os.path.join(ZULIP_PATH, "var")
 
@@ -71,17 +71,21 @@ except OSError:
     )
     sys.exit(1)
 
-distro_info = parse_os_release()
+distro_info = platform.freedesktop_os_release()
 vendor = distro_info["ID"]
 os_version = distro_info["VERSION_ID"]
 if vendor == "debian" and os_version == "12":  # bookworm
     POSTGRESQL_VERSION = "15"
+elif vendor == "debian" and os_version == "13":  # trixie
+    POSTGRESQL_VERSION = "17"
 elif vendor == "ubuntu" and os_version == "22.04":  # jammy
     POSTGRESQL_VERSION = "14"
 elif vendor == "ubuntu" and os_version == "24.04":  # noble
     POSTGRESQL_VERSION = "16"
-elif vendor == "fedora" and os_version == "38":
-    POSTGRESQL_VERSION = "15"
+elif vendor == "ubuntu" and os_version == "26.04":  # resolute
+    POSTGRESQL_VERSION = "18"
+elif vendor == "fedora" and os_version == "43":
+    POSTGRESQL_VERSION = "17"
 elif vendor == "rhel" and os_version.startswith("7."):
     POSTGRESQL_VERSION = "10"
 elif vendor == "centos" and os_version == "7":
@@ -147,9 +151,8 @@ COMMON_YUM_DEPENDENCIES = [
     # Puppeteer dependencies end here.
 ]
 
-BUILD_GROONGA_FROM_SOURCE = False
 BUILD_PGROONGA_FROM_SOURCE = False
-if (vendor == "debian" and os_version in []) or (vendor == "ubuntu" and os_version in ["24.04"]):
+if (vendor == "debian" and os_version == "13") or (vendor == "ubuntu" and os_version == "26.04"):
     # For platforms without a PGroonga release, we need to build it
     # from source.
     BUILD_PGROONGA_FROM_SOURCE = True
@@ -157,10 +160,10 @@ if (vendor == "debian" and os_version in []) or (vendor == "ubuntu" and os_versi
         *UBUNTU_COMMON_APT_DEPENDENCIES,
         f"postgresql-{POSTGRESQL_VERSION}",
         # Dependency for building PGroonga from source
+        "meson",
         f"postgresql-server-dev-{POSTGRESQL_VERSION}",
         "libgroonga-dev",
         "libmsgpack-dev",
-        "clang",
         *VENV_DEPENDENCIES,
     ]
 elif "debian" in os_families():
@@ -193,10 +196,22 @@ elif "fedora" in os_families():
         f"postgresql{POSTGRESQL_VERSION}",
         f"postgresql{POSTGRESQL_VERSION}-devel",
         # Needed to build PGroonga from source
+        "groonga-devel",
         "msgpack-devel",
+        # PGroonga compiles against <xxhash.h>; on systems where
+        # `xxhash-libs` is already pulled in transitively (e.g. by
+        # blosc2 / pyarrow) but `xxhash-devel` is not, meson detects
+        # libxxhash via pkg-config and skips its vendored fallback,
+        # so we have to provide the header ourselves.
+        "xxhash-devel",
+        "meson",
+        # Provides /usr/lib/rpm/redhat/redhat-hardened-cc1 and
+        # redhat-annobin-cc1 spec files referenced by the CFLAGS that
+        # PostgreSQL's pg_config exports; without it the PGroonga
+        # compile fails with "cannot read spec file".
+        "redhat-rpm-config",
         *VENV_DEPENDENCIES,
     ]
-    BUILD_GROONGA_FROM_SOURCE = True
     BUILD_PGROONGA_FROM_SOURCE = True
 
 if "fedora" in os_families():
@@ -226,8 +241,6 @@ def install_system_deps() -> None:
 
     # For some platforms, there aren't published PGroonga
     # packages available, so we build them from source.
-    if BUILD_GROONGA_FROM_SOURCE:
-        run_as_root(["./scripts/lib/build-groonga"])
     if BUILD_PGROONGA_FROM_SOURCE:
         run_as_root(["./scripts/lib/build-pgroonga"])
 
@@ -357,11 +370,6 @@ def main(options: argparse.Namespace) -> NoReturn:
         with open("scripts/lib/setup-yum-repo", "rb") as fb:
             sha_sum.update(fb.read())
 
-    # hash the content of build-pgroonga if Groonga is built from source
-    if BUILD_GROONGA_FROM_SOURCE:
-        with open("scripts/lib/build-groonga", "rb") as fb:
-            sha_sum.update(fb.read())
-
     # hash the content of build-pgroonga if PGroonga is built from source
     if BUILD_PGROONGA_FROM_SOURCE:
         with open("scripts/lib/build-pgroonga", "rb") as fb:
@@ -397,7 +405,9 @@ def main(options: argparse.Namespace) -> NoReturn:
         "https_proxy=" + os.environ.get("https_proxy", ""),
         "no_proxy=" + os.environ.get("no_proxy", ""),
     ]
-    run_as_root([*proxy_env, "scripts/lib/install-node"], sudo_args=["-H"])
+    # Preserve PATH to catch mistaken extra installations of node in the user's
+    # home directory.
+    run_as_root([*proxy_env, "scripts/lib/install-node"], sudo_args=["--preserve-env=PATH"])
 
     try:
         setup_node_modules()
@@ -414,14 +424,24 @@ def main(options: argparse.Namespace) -> NoReturn:
             sys.exit(1)
 
     # Install shellcheck.
-    run_as_root([*proxy_env, "tools/setup/install-shellcheck"])
+    run_as_root([*proxy_env, "tools/setup/install-shellcheck"], sudo_args=["--preserve-env=PATH"])
     # Install shfmt.
-    run_as_root([*proxy_env, "tools/setup/install-shfmt"])
+    run_as_root([*proxy_env, "tools/setup/install-shfmt"], sudo_args=["--preserve-env=PATH"])
 
-    # Install transifex-cli.
-    run_as_root([*proxy_env, "tools/setup/install-transifex-cli"])
+    # Install tusd
+    run_as_root([*proxy_env, "tools/setup/install-tusd"], sudo_args=["--preserve-env=PATH"])
 
-    setup_venvs.main()
+    # Install Python environment
+    run_as_root([*proxy_env, "scripts/lib/install-uv"], sudo_args=["--preserve-env=PATH"])
+    run(
+        [*proxy_env, "uv", "sync", "--frozen", "--no-managed-python"],
+        env={k: v for k, v in os.environ.items() if k not in {"PYTHONDEVMODE", "PYTHONWARNINGS"}},
+    )
+    # Clean old symlinks used before uv migration
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink("zulip-py3-venv")
+    if os.path.lexists("/srv/zulip-py3-venv"):
+        run_as_root(["rm", "/srv/zulip-py3-venv"])
 
     run_as_root(["cp", REPO_STOPWORDS_PATH, TSEARCH_STOPWORDS_PATH])
 
@@ -448,13 +468,13 @@ def main(options: argparse.Namespace) -> NoReturn:
     # bad idea, and empirically it can cause Python to segfault on
     # certain cffi-related imports.  Instead, start a new Python
     # process inside the virtualenv.
-    activate_this = "/srv/zulip-py3-venv/bin/activate_this.py"
     provision_inner = os.path.join(ZULIP_PATH, "tools", "lib", "provision_inner.py")
-    with open(activate_this) as f:
-        exec(f.read(), dict(__file__=activate_this))  # noqa: S102
     os.execvp(
-        provision_inner,
+        "uv",
         [
+            "uv",
+            "run",
+            "--no-sync",
             provision_inner,
             *(["--force"] if options.is_force else []),
             *(["--build-release-tarball-only"] if options.is_build_release_tarball_only else []),

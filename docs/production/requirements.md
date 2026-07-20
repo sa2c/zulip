@@ -6,14 +6,17 @@ To run a Zulip server, you will need:
 - A supported OS:
   - Ubuntu 22.04
   - Ubuntu 24.04
+  - Ubuntu 26.04
   - Debian 12
+  - Debian 13
 - A supported CPU architecture:
   - x86-64
   - aarch64
-- At least 2 GB RAM, and 10 GB disk space
+- At least 2 GB RAM
+  - If you have < 5 GB RAM, we require some swap space; we recommend configuring
+    2 GB of swap
   - If you expect 100+ users: 4 GB RAM, and 2 CPUs
-  - If you intend to [upgrade from Git][upgrade-from-git]: 3 GB RAM, or
-    2G and at least 1G of swap configured.
+- 10GB free space (i.e. approximately a 25GB total disk, given OS requirements)
 - A hostname in DNS
 - Credentials for sending email
 
@@ -29,17 +32,17 @@ The installer expects Zulip to be the **only thing** running on the
 system; it will install system packages with `apt` (like nginx,
 PostgreSQL, and Redis) and configure them for its own use. We strongly
 recommend using either a fresh machine instance in a cloud provider, a
-fresh VM, [our Docker image][docker-zulip-homepage], or a dedicated
+fresh VM, [our Docker image](docker.md), or a dedicated
 machine. If you decide to disregard our advice and use a server that
 hosts other services, we can't support you, but [we do have some notes
 on issues you'll encounter](install-existing-server.md).
 
 #### Operating system
 
-Ubuntu 22.04, Ubuntu 24.04, and Debian 12
+Ubuntu 22.04, Ubuntu 24.04, Ubuntu 26.04, Debian 12, and Debian 13
 are supported for running Zulip in production. You can also
 run Zulip on other platforms that support Docker using
-[docker-zulip][docker-zulip-homepage].
+[our Docker image](docker.md).
 
 We recommend installing on the newest supported OS release you're
 comfortable with, to save a bit of future work [upgrading the
@@ -54,7 +57,6 @@ sudo add-apt-repository universe
 sudo apt update
 ```
 
-[docker-zulip-homepage]: https://github.com/zulip/docker-zulip#readme
 [upgrade-os]: upgrade.md#upgrading-the-operating-system
 [ubuntu-repositories]: https://help.ubuntu.com/community/Repositories/Ubuntu
 [enable-universe]: https://help.ubuntu.com/community/Repositories/CommandLine#Adding_the_Universe_and_Multiverse_Repositories
@@ -63,16 +65,15 @@ sudo apt update
 
 - CPU and memory: For installations with 100+ users you'll need a
   minimum of **2 CPUs** and **4 GB RAM**. For installations with fewer
-  users, 1 CPU and 2 GB RAM is sufficient. We strongly recommend against
-  installing with less than 2 GB of RAM, as you will likely experience
-  out of memory issues installing dependencies. We recommend against
-  using highly CPU-limited servers like the AWS `t2` style instances
-  for organizations with hundreds of users (active or no).
+  users, 1 CPU and 2 GB RAM with 2 GB of swap is sufficient. We
+  recommend against using highly CPU-limited servers like the AWS `t2`
+  style instances for organizations with hundreds of users (active or
+  no).
 
-- Disk space: You'll need at least 10 GB of free disk space for a
-  server with dozens of users. We recommend using an SSD and avoiding
-  cloud storage backends that limit the IOPS per second, since the
-  disk is primarily used for the Zulip database.
+- Disk space: You'll need at least 10 GB of dedicated free disk space
+  for a server with dozens of users. We recommend using an SSD and
+  avoiding cloud storage backends that limit the IOPS per second,
+  since the disk is primarily used for the Zulip database.
 
 See our [documentation on scalability](#scalability) below for advice
 on hardware requirements for larger organizations.
@@ -96,7 +97,7 @@ on hardware requirements for larger organizations.
   that Zulip can properly manage image and website previews and mobile
   push notifications. Outgoing Internet access is not required if you
   [disable those
-  features](https://zulip.com/help/allow-image-link-previews).
+  features](https://zulip.com/help/image-video-and-website-previews).
 - Outgoing SMTP access (usually port 587) to your [SMTP
   server](email.md) so that Zulip can send emails.
 - A domain name (e.g., `zulip.example.com`) that your users will use to
@@ -156,7 +157,11 @@ Zulip in production](install.md).
 
 This section details some basic guidelines for running a Zulip server
 for larger organizations (especially >1000 users or 500+ daily active
-users). Zulip's resource needs depend mainly on 3 parameters:
+users). These guidelines are conservative, since they are intended to
+be sufficient for a wide range of possible usage patterns that may not
+be applicable to your installation.
+
+Zulip's resource needs depend mainly on 3 parameters:
 
 - daily active users (e.g., number of employees if everyone's an
   employee)
@@ -167,17 +172,17 @@ In the following, we discuss a configuration with at most two types of
 servers: application servers (running Django, Tornado, RabbitMQ,
 Redis, Memcached, etc.) and database servers. Of the application
 server services, Django dominates the resource requirements. One can
-run every service on its own system (as
-[docker-zulip](https://github.com/zulip/docker-zulip) does) but for
-most use cases, there's little scalability benefit to doing so. See
-[deployment options](deployment.md) for details on
-installing Zulip with a dedicated database server.
+run every service on its own system (as [our Docker
+deployment](docker.md) does) but for most use cases, there's little
+scalability benefit to doing so. See [deployment
+options](deployment.md) for details on installing Zulip with a
+dedicated database server.
 
 - **Dedicated database**. For installations with hundreds of daily
   active users, we recommend using a [remote PostgreSQL
   database](postgresql.md), but it's not required.
 
-- **RAM:** We recommended more RAM for larger installations:
+- **RAM:** We recommend more RAM for larger installations:
 
   - With 25+ daily active users, 4 GB of RAM.
   - With 100+ daily active users, 8 GB of RAM.
@@ -225,23 +230,19 @@ installing Zulip with a dedicated database server.
   backend][s3-uploads].
 
 - **Sharding:** For servers with several thousand daily active users,
-  it is necessary to shard Zulip's Tornado service. Care must be taken
-  when dividing traffic for a single Zulip realm between multiple
-  Zulip application servers, which is why we recommend a hot spare
-  over load-balancing for most installations desiring extra
-  redundancy.
+  Zulip supports [sharding its real-time-push Tornado
+  service][tornado-sharding], both by realm/organization (for hosting many
+  organizations) and by user ID (for hosting single very large
+  organizations).
 
-  - Zulip 2.0 and later supports running multiple Tornado servers
-    sharded by realm/organization, which is how we scale Zulip Cloud.
-  - Zulip 6.0 and later supports running multiple Tornado servers
-    sharded by user ID, which is necessary for individual realms with
-    many thousands of daily active users.
+  Care must be taken when dividing traffic for a single Zulip realm
+  between multiple Zulip application servers, which is why we
+  recommend a hot spare over load-balancing for most installations
+  desiring extra redundancy.
 
-  [Contact us][contact-support] for help implementing the sharding policy.
-
-Scalability is an area of active development, so if you're unsure
-whether Zulip is a fit for your organization or need further advice
-[contact Zulip support][contact-support].
+If you have scalability questions or are unsure whether Zulip is a fit
+for your use case, contact [Zulip sales or support][contact-support]
+for assistance.
 
 For readers interested in technical details around what features
 impact Zulip's scalability, this [performance and scalability design
@@ -250,3 +251,4 @@ document](../subsystems/performance.md) may also be of interest.
 [s3-uploads]: upload-backends.md#s3-backend-configuration
 [streaming-replication]: postgresql.md#postgresql-warm-standby
 [contact-support]: https://zulip.com/help/contact-support
+[tornado-sharding]: system-configuration.md#tornado_sharding

@@ -1,9 +1,9 @@
 import $ from "jquery";
-import {z} from "zod";
+import * as z from "zod/mini";
 
-import * as loading from "../loading";
+import * as loading from "../loading.ts";
 
-import * as helpers from "./helpers";
+import * as helpers from "./helpers.ts";
 
 const billing_base_url = $("#data").attr("data-billing-base-url")!;
 
@@ -11,18 +11,18 @@ const stripe_response_schema = z.object({
     session: z.object({
         type: z.string(),
         status: z.string(),
-        is_manual_license_management_upgrade_session: z.boolean().optional(),
-        tier: z.number().nullable().optional(),
-        event_handler: z
-            .object({
+        is_manual_license_management_upgrade_session: z.optional(z.boolean()),
+        tier: z.optional(z.nullable(z.number())),
+        event_handler: z.optional(
+            z.object({
                 status: z.string(),
-                error: z
-                    .object({
+                error: z.optional(
+                    z.object({
                         message: z.string(),
-                    })
-                    .optional(),
-            })
-            .optional(),
+                    }),
+                ),
+            }),
+        ),
     }),
 });
 
@@ -87,16 +87,16 @@ export async function stripe_invoice_status_check(stripe_invoice_id: string): Pr
     const response_schema = z.object({
         stripe_invoice: z.object({
             status: z.string(),
-            event_handler: z
-                .object({
+            event_handler: z.optional(
+                z.object({
                     status: z.string(),
-                    error: z
-                        .object({
+                    error: z.optional(
+                        z.object({
                             message: z.string(),
-                        })
-                        .optional(),
-                })
-                .optional(),
+                        }),
+                    ),
+                }),
+            ),
         }),
     });
     const response_data = response_schema.parse(response);

@@ -44,9 +44,6 @@ from zerver.models.realms import get_realm
 from zerver.models.streams import get_stream
 from zerver.models.users import get_system_bot
 
-# Class with helper functions useful for testing archiving of reactions:
-from zerver.tornado.django_api import send_event
-
 ZULIP_REALM_DAYS = 30
 MIT_REALM_DAYS = 100
 
@@ -125,7 +122,7 @@ class ArchiveMessagesTestingBase(RetentionTestingBase):
         self, stream: Stream, retention_period: int | None
     ) -> None:
         stream.message_retention_days = retention_period
-        stream.save()
+        stream.save(update_fields=["message_retention_days"])
 
     def _change_messages_date_sent(self, msgs_ids: list[int], date_sent: datetime) -> None:
         Message.objects.filter(id__in=msgs_ids).update(date_sent=date_sent)
@@ -617,33 +614,24 @@ class MoveMessageToArchiveGeneral(MoveMessageToArchiveBase):
     def test_personal_messages_archiving(self) -> None:
         msg_ids = [self.send_personal_message(self.sender, self.recipient) for i in range(3)]
         usermsg_ids = self._get_usermessage_ids(msg_ids)
-
-        self._assert_archive_empty()
-        move_messages_to_archive(message_ids=msg_ids)
-        self._verify_archive_data(msg_ids, usermsg_ids)
-
-        restore_all_data_from_archive()
-        self._verify_restored_data(msg_ids, usermsg_ids)
-
-    def test_move_messages_to_archive_with_realm_argument(self) -> None:
-        realm = get_realm("zulip")
-        msg_ids = [self.send_personal_message(self.sender, self.recipient) for i in range(3)]
-        usermsg_ids = self._get_usermessage_ids(msg_ids)
+        realm = self.recipient.realm
 
         self._assert_archive_empty()
         move_messages_to_archive(message_ids=msg_ids, realm=realm)
         self._verify_archive_data(msg_ids, usermsg_ids)
-
         archive_transaction = ArchiveTransaction.objects.last()
         assert archive_transaction is not None
         self.assertEqual(archive_transaction.realm, realm)
+
+        restore_all_data_from_archive()
+        self._verify_restored_data(msg_ids, usermsg_ids)
 
     def test_stream_messages_archiving(self) -> None:
         msg_ids = [self.send_stream_message(self.sender, "Verona") for i in range(3)]
         usermsg_ids = self._get_usermessage_ids(msg_ids)
 
         self._assert_archive_empty()
-        move_messages_to_archive(message_ids=msg_ids)
+        move_messages_to_archive(message_ids=msg_ids, realm=self.sender.realm)
         self._verify_archive_data(msg_ids, usermsg_ids)
 
         restore_all_data_from_archive()
@@ -654,38 +642,19 @@ class MoveMessageToArchiveGeneral(MoveMessageToArchiveBase):
         usermsg_ids = self._get_usermessage_ids(msg_ids)
 
         self._assert_archive_empty()
-        move_messages_to_archive(message_ids=msg_ids)
+        move_messages_to_archive(message_ids=msg_ids, realm=self.sender.realm)
         self._verify_archive_data(msg_ids, usermsg_ids)
 
         with self.assertRaises(Message.DoesNotExist):
-            move_messages_to_archive(message_ids=msg_ids)
+            move_messages_to_archive(message_ids=msg_ids, realm=self.sender.realm)
 
-    def test_archiving_messages_multiple_realms(self) -> None:
-        """
-        Verifies that move_messages_to_archive works correctly
-        if called on messages in multiple realms.
-        """
-        iago = self.example_user("iago")
-        othello = self.example_user("othello")
-
-        cordelia = self.lear_user("cordelia")
-        king = self.lear_user("king")
-
-        zulip_msg_ids = [self.send_personal_message(iago, othello) for i in range(3)]
-        lear_msg_ids = [self.send_personal_message(cordelia, king) for i in range(3)]
-        msg_ids = zulip_msg_ids + lear_msg_ids
-        usermsg_ids = self._get_usermessage_ids(msg_ids)
-
-        self._assert_archive_empty()
-        move_messages_to_archive(message_ids=msg_ids)
-        self._verify_archive_data(msg_ids, usermsg_ids)
-
-        restore_all_data_from_archive()
-        self._verify_restored_data(msg_ids, usermsg_ids)
+    def test_archiving_noop(self) -> None:
+        move_messages_to_archive(message_ids=[], realm=get_realm("zulip"))
 
     def test_archiving_messages_with_attachment(self) -> None:
         self._create_attachments()
-        realm_id = get_realm("zulip").id
+        realm = get_realm("zulip")
+        realm_id = realm.id
         host = get_realm("zulip").host
         body1 = f"""Some files here ...[zulip.txt](
             http://{host}/user_uploads/{realm_id}/31/4CBjtTLYZhk66pZrF8hnYGwc/zulip.txt)
@@ -717,7 +686,7 @@ class MoveMessageToArchiveGeneral(MoveMessageToArchiveBase):
         usermsg_ids = self._get_usermessage_ids(msg_ids)
 
         self._assert_archive_empty()
-        move_messages_to_archive(message_ids=msg_ids)
+        move_messages_to_archive(message_ids=msg_ids, realm=realm)
         self._verify_archive_data(msg_ids, usermsg_ids)
 
         self.assertFalse(Attachment.objects.exists())
@@ -759,8 +728,9 @@ class MoveMessageToArchiveGeneral(MoveMessageToArchiveBase):
     def test_archiving_message_with_shared_attachment(self) -> None:
         # Make sure that attachments still in use in other messages don't get deleted:
         self._create_attachments()
-        realm_id = get_realm("zulip").id
-        host = get_realm("zulip").host
+        realm = get_realm("zulip")
+        realm_id = realm.id
+        host = realm.host
         body = f"""Some files here ...[zulip.txt](
             http://{host}/user_uploads/{realm_id}/31/4CBjtTLYZhk66pZrF8hnYGwc/zulip.txt)
             http://{host}/user_uploads/{realm_id}/31/4CBjtTLYZhk66pZrF8hnYGwc/temp_file.py ....
@@ -784,7 +754,7 @@ class MoveMessageToArchiveGeneral(MoveMessageToArchiveBase):
 
         self._assert_archive_empty()
         # Archive one of the messages:
-        move_messages_to_archive(message_ids=[msg_id])
+        move_messages_to_archive(message_ids=[msg_id], realm=realm)
         self._verify_archive_data([msg_id], usermsg_ids)
         # Attachments shouldn't have been deleted, as the second message links to them:
         self.assertEqual(Attachment.objects.count(), 5)
@@ -799,12 +769,12 @@ class MoveMessageToArchiveGeneral(MoveMessageToArchiveBase):
         # Restore the first message:
         restore_all_data_from_archive()
         # Archive the second:
-        move_messages_to_archive(message_ids=[reply_msg_id])
+        move_messages_to_archive(message_ids=[reply_msg_id], realm=realm)
         # The restored messages links to the Attachments, so they shouldn't be deleted:
         self.assertEqual(Attachment.objects.count(), 5)
 
         # Archive the first message again:
-        move_messages_to_archive(message_ids=[msg_id])
+        move_messages_to_archive(message_ids=[msg_id], realm=realm)
         # Now the attachment should have been deleted:
         self.assertEqual(Attachment.objects.count(), 0)
 
@@ -818,8 +788,9 @@ class MoveMessageToArchiveGeneral(MoveMessageToArchiveBase):
     def test_archiving_message_with_scheduled_message(self) -> None:
         # Make sure that attachments referenced by scheduledmessages do't get deleted
         self._create_attachments()
-        realm_id = get_realm("zulip").id
-        host = get_realm("zulip").host
+        realm = get_realm("zulip")
+        realm_id = realm.id
+        host = realm.host
         body = f"""Some files here ...[zulip.txt](
             http://{host}/user_uploads/{realm_id}/31/4CBjtTLYZhk66pZrF8hnYGwc/zulip.txt)
             http://{host}/user_uploads/{realm_id}/31/4CBjtTLYZhk66pZrF8hnYGwc/temp_file.py ....
@@ -848,7 +819,7 @@ class MoveMessageToArchiveGeneral(MoveMessageToArchiveBase):
 
         self._assert_archive_empty()
         # Archive one of the messages:
-        move_messages_to_archive(message_ids=[msg_id])
+        move_messages_to_archive(message_ids=[msg_id], realm=realm)
         self._verify_archive_data([msg_id], usermsg_ids)
         # Attachments shouldn't have been deleted, as the scheduled message links to them:
         self.assertEqual(Attachment.objects.count(), 5)
@@ -883,6 +854,7 @@ class MoveMessageToArchiveWithSubMessages(MoveMessageToArchiveBase):
         msg_id = self.send_stream_message(self.sender, "Verona")
         cordelia = self.example_user("cordelia")
         hamlet = self.example_user("hamlet")
+        realm = get_realm("zulip")
 
         do_add_submessage(
             realm=get_realm("zulip"),
@@ -904,7 +876,7 @@ class MoveMessageToArchiveWithSubMessages(MoveMessageToArchiveBase):
         )
 
         self.assertEqual(SubMessage.objects.filter(id__in=submessage_ids).count(), 2)
-        move_messages_to_archive(message_ids=[msg_id])
+        move_messages_to_archive(message_ids=[msg_id], realm=realm)
 
         self.assertEqual(
             set(ArchivedSubMessage.objects.filter(message_id=msg_id).values_list("id", flat=True)),
@@ -922,6 +894,7 @@ class MoveMessageToArchiveWithSubMessages(MoveMessageToArchiveBase):
 class MoveMessageToArchiveWithReactions(MoveMessageToArchiveBase):
     def test_archiving_message_with_reactions(self) -> None:
         msg_id = self.send_stream_message(self.sender, "Verona")
+        realm = get_realm("zulip")
 
         for name in ["hamlet", "cordelia"]:
             self.api_post(
@@ -935,7 +908,7 @@ class MoveMessageToArchiveWithReactions(MoveMessageToArchiveBase):
         )
 
         self.assertEqual(Reaction.objects.filter(id__in=reaction_ids).count(), 2)
-        move_messages_to_archive(message_ids=[msg_id])
+        move_messages_to_archive(message_ids=[msg_id], realm=realm)
 
         self.assertEqual(
             set(ArchivedReaction.objects.filter(message_id=msg_id).values_list("id", flat=True)),
@@ -955,32 +928,41 @@ class TestCleaningArchive(ArchiveMessagesTestingBase):
         self._make_expired_zulip_messages(7)
         archive_messages(chunk_size=2)  # Small chunk size to have multiple transactions
 
-        transactions = list(ArchiveTransaction.objects.all())
+        transactions = list(ArchiveTransaction.objects.all().order_by("id"))
         for transaction in transactions[0:-1]:
             transaction.timestamp = timezone_now() - timedelta(
                 days=settings.ARCHIVED_DATA_VACUUMING_DELAY_DAYS + 1
             )
             transaction.save()
 
+        # This transaction would up for deletion, but we enable the flag preventing
+        # it from automatic deletion:
+        transactions[-2].protect_from_deletion = True
+        transactions[-2].save()
+
         message_ids_to_clean = list(
-            ArchivedMessage.objects.filter(archive_transaction__in=transactions[0:-1]).values_list(
+            ArchivedMessage.objects.filter(archive_transaction__in=transactions[0:-2]).values_list(
                 "id", flat=True
             )
         )
 
         clean_archived_data()
-        remaining_transactions = list(ArchiveTransaction.objects.all())
-        self.assert_length(remaining_transactions, 1)
-        # All transactions except the last one were deleted:
+        remaining_transactions = list(ArchiveTransaction.objects.order_by("-id"))
+        self.assert_length(remaining_transactions, 2)
+        # All transactions except the last two were deleted:
         self.assertEqual(remaining_transactions[0].id, transactions[-1].id)
+        self.assertEqual(remaining_transactions[1].id, transactions[-2].id)
         # And corresponding ArchivedMessages should have been deleted:
         self.assertFalse(ArchivedMessage.objects.filter(id__in=message_ids_to_clean).exists())
         self.assertFalse(
             ArchivedUserMessage.objects.filter(message_id__in=message_ids_to_clean).exists()
         )
 
-        for message in ArchivedMessage.objects.all():
-            self.assertEqual(message.archive_transaction_id, remaining_transactions[0].id)
+        for message in ArchivedMessage.objects.all().iterator():
+            self.assertIn(
+                message.archive_transaction_id,
+                [remaining_transactions[0].id, remaining_transactions[1].id],
+            )
 
 
 class TestGetRealmAndStreamsForArchiving(ZulipTestCase):
@@ -1004,7 +986,7 @@ class TestGetRealmAndStreamsForArchiving(ZulipTestCase):
         """
 
         result = []
-        for realm in Realm.objects.all():
+        for realm in Realm.objects.all().iterator():
             if realm.message_retention_days != -1:
                 streams = Stream.objects.filter(realm=realm).exclude(message_retention_days=-1)
                 result.append((realm, list(streams)))
@@ -1038,11 +1020,11 @@ class TestGetRealmAndStreamsForArchiving(ZulipTestCase):
 
         archiving_blocked_zephyr_stream = self.make_stream("no archiving", realm=zephyr_realm)
         archiving_blocked_zephyr_stream.message_retention_days = -1
-        archiving_blocked_zephyr_stream.save()
+        archiving_blocked_zephyr_stream.save(update_fields=["message_retention_days"])
 
         archiving_enabled_zephyr_stream = self.make_stream("with archiving", realm=zephyr_realm)
         archiving_enabled_zephyr_stream.message_retention_days = 1
-        archiving_enabled_zephyr_stream.save()
+        archiving_enabled_zephyr_stream.save(update_fields=["message_retention_days"])
 
         no_archiving_realm = do_create_realm(string_id="no_archiving", name="no_archiving")
         do_set_realm_property(no_archiving_realm, "invite_required", False, acting_user=None)
@@ -1122,7 +1104,7 @@ class TestRestoreStreamMessages(ArchiveMessagesTestingBase):
             message_ids_to_archive_by_policy, timezone_now() - timedelta(days=6)
         )
 
-        move_messages_to_archive(message_ids_to_archive_manually)
+        move_messages_to_archive(message_ids_to_archive_manually, realm=realm)
         archive_messages()
 
         self._verify_archive_data(expected_archived_message_ids, expected_archived_usermessage_ids)
@@ -1145,35 +1127,10 @@ class TestDoDeleteMessages(ZulipTestCase):
         message_ids = [self.send_stream_message(cordelia, "Verona", str(i)) for i in range(10)]
         messages = Message.objects.filter(id__in=message_ids)
 
-        with self.assert_database_query_count(22):
+        with self.assert_database_query_count(24):
             do_delete_messages(realm, messages, acting_user=None)
         self.assertFalse(Message.objects.filter(id__in=message_ids).exists())
 
         archived_messages = ArchivedMessage.objects.filter(id__in=message_ids)
         self.assertEqual(archived_messages.count(), len(message_ids))
         self.assert_length({message.archive_transaction_id for message in archived_messages}, 1)
-
-    def test_old_event_format_processed_correctly(self) -> None:
-        """
-        do_delete_messages used to send events with users in dict format {"id": <int>}.
-        We have a block in process_notification to deal with that old format, that should be
-        deleted in a later release. This test is meant to ensure correctness of that block.
-        """
-        realm = get_realm("zulip")
-        cordelia = self.example_user("cordelia")
-        hamlet = self.example_user("hamlet")
-        message_id = self.send_personal_message(cordelia, hamlet)
-        message = Message.objects.get(id=message_id)
-
-        event = {
-            "type": "delete_message",
-            "sender": message.sender.email,
-            "sender_id": message.sender_id,
-            "message_id": message.id,
-            "message_type": "private",
-            "recipient_id": message.recipient_id,
-        }
-        move_messages_to_archive([message_id])
-        # We only send the event to see no exception is thrown - as it would be if the block
-        # in process_notification to handle this old format of "users to notify" wasn't correct.
-        send_event(realm, event, [{"id": cordelia.id}, {"id": hamlet.id}])

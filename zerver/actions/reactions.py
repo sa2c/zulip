@@ -1,39 +1,44 @@
-from typing import Any
+from typing import Literal
+
+from typing_extensions import TypedDict
 
 from zerver.actions.user_topics import do_set_user_topic_visibility_policy
 from zerver.lib.emoji import check_emoji_request, get_emoji_data
 from zerver.lib.exceptions import ReactionExistsError
 from zerver.lib.message import (
     access_message_and_usermessage,
+    event_recipient_ids_for_action_on_messages,
     set_visibility_policy_possible,
     should_change_visibility_policy,
     visibility_policy_for_participation,
 )
 from zerver.lib.message_cache import update_message_cache
-from zerver.lib.stream_subscription import subscriber_ids_with_stream_history_access
 from zerver.lib.streams import access_stream_by_id
 from zerver.lib.user_message import create_historical_user_messages
-from zerver.models import Message, Reaction, Recipient, Stream, UserMessage, UserProfile
+from zerver.models import Message, Reaction, UserProfile
 from zerver.tornado.django_api import send_event_on_commit
 
 
-def notify_reaction_update(
-    user_profile: UserProfile, message: Message, reaction: Reaction, op: str
-) -> None:
-    user_dict = {
-        "user_id": user_profile.id,
-        "email": user_profile.email,
-        "full_name": user_profile.full_name,
-    }
+class ReactionEvent(TypedDict):
+    type: Literal["reaction"]
+    op: Literal["add", "remove"]
+    user_id: int
+    message_id: int
+    emoji_name: str
+    emoji_code: str
+    reaction_type: str
 
-    event: dict[str, Any] = {
+
+def notify_reaction_update(
+    user_profile: UserProfile,
+    message: Message,
+    reaction: Reaction,
+    op: Literal["add", "remove"],
+) -> None:
+    event: ReactionEvent = {
         "type": "reaction",
         "op": op,
         "user_id": user_profile.id,
-        # TODO: We plan to remove this redundant user_dict object once
-        # clients are updated to support accessing use user_id.  See
-        # https://github.com/zulip/zulip/pull/14711 for details.
-        "user": user_dict,
         "message_id": message.id,
         "emoji_name": reaction.emoji_name,
         "emoji_code": reaction.emoji_code,
@@ -43,28 +48,7 @@ def notify_reaction_update(
     # Update the cached message since new reaction is added.
     update_message_cache([message])
 
-    # Recipients for message update events, including reactions, are
-    # everyone who got the original message, plus subscribers of
-    # streams with the access to stream's full history.
-    #
-    # This means reactions won't live-update in preview narrows for a
-    # stream the user isn't yet subscribed to; this is the right
-    # performance tradeoff to avoid sending every reaction to public
-    # stream messages to all users.
-    #
-    # To ensure that reactions do live-update for any user who has
-    # actually participated in reacting to a message, we add a
-    # "historical" UserMessage row for any user who reacts to message,
-    # subscribing them to future notifications, even if they are not
-    # subscribed to the stream.
-    user_ids = set(
-        UserMessage.objects.filter(message=message.id).values_list("user_profile_id", flat=True)
-    )
-    if message.recipient.type == Recipient.STREAM:
-        stream_id = message.recipient.type_id
-        stream = Stream.objects.get(id=stream_id)
-        user_ids |= subscriber_ids_with_stream_history_access(stream)
-
+    user_ids = event_recipient_ids_for_action_on_messages([message.id], message.is_channel_message)
     send_event_on_commit(user_profile.realm, event, list(user_ids))
 
 
@@ -127,7 +111,7 @@ def check_add_reaction(
     reaction_type: str | None,
 ) -> None:
     message, user_message = access_message_and_usermessage(
-        user_profile, message_id, lock_message=True
+        user_profile, message_id, lock_message=True, is_modifying_message=True
     )
 
     if emoji_code is None or reaction_type is None:

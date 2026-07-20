@@ -1,4 +1,5 @@
 import re
+from io import StringIO
 from re import Match
 
 from bs4 import BeautifulSoup
@@ -10,8 +11,10 @@ from bs4 import BeautifulSoup
 # this list without any modification.
 IGNORED_PHRASES = [
     # Proper nouns and acronyms
+    r"AI",
     r"API",
     r"APNS",
+    r"Apple Silicon",
     r"Botserver",
     r"Cookie Bot",
     r"DevAuthBackend",
@@ -19,33 +22,34 @@ IGNORED_PHRASES = [
     r"Esc",
     r"GCM",
     r"GitHub",
+    r"GitLab",
     r"Gravatar",
-    r"Help Center",
     r"HTTP",
     r"ID",
     r"IDs",
     r"Inbox",
+    r"Intel",
     r"IP",
     r"JSON",
     r"Jitsi",
-    r"Kerberos",
+    r"Jotform",
     r"LinkedIn",
     r"LDAP",
     r"Markdown",
+    r"OAuth",
     r"OTP",
-    r"Pivotal",
     r"Recent conversations",
     r"DM",
     r"DMs",
     r"Slack",
     r"Google",
     r"Terms of Service",
+    r"TikTok",
     r"Tuesday",
     r"URL",
     r"UUID",
-    r"Webathena",
     r"WordPress",
-    r"Zephyr",
+    r"YouTube",
     r"Zoom",
     r"Zulip",
     r"Zulip Server",
@@ -54,7 +58,12 @@ IGNORED_PHRASES = [
     r"Zulip Cloud",
     r"Zulip Cloud Standard",
     r"Zulip Cloud Plus",
+    r"Zulip Desktop",
+    r"Download Zulip for macOS \(Apple Silicon\)",
+    r"Download Zulip for macOS \(Intel\)",
     r"BigBlueButton",
+    r"Constructor Groups",
+    r"Nextcloud Talk",
     # Code things
     r"\.zuliprc",
     # BeautifulSoup will remove <z-user> which is horribly confusing,
@@ -76,6 +85,8 @@ IGNORED_PHRASES = [
     r"email",
     r"enabled",
     r"signups",
+    # Pasted text filename
+    r"PastedText",
     # Placeholders
     r"keyword",
     r"streamname",
@@ -112,11 +123,14 @@ IGNORED_PHRASES = [
     r"^moving messages$",
     r"^start a conversation$",
     r"^welcome to Zulip!$",
+    r"^general chat$",
     # These are used as example short names (e.g. an uncapitalized context):
     r"^marketing$",
     r"^cookie$",
     # Used to refer custom time limits
     r"\bN\b",
+    r"minute",
+    r"minutes",
     # Capital c feels obtrusive in clear status option
     r"clear",
     r"group direct messages with \{recipient\}",
@@ -126,9 +140,12 @@ IGNORED_PHRASES = [
     # Emoji name placeholder
     r"leafy green vegetable",
     # Subdomain placeholder
-    r"your-organization-url",
+    r"your-organization",
     # Used in invite modal
     r"or",
+    # Units
+    r"MB",
+    r"GB",
     # Used in GIPHY integration setting. GIFs Rating.
     r"rated Y",
     r"rated G",
@@ -138,6 +155,10 @@ IGNORED_PHRASES = [
     # Used in GIPHY popover.
     r"GIFs",
     r"GIPHY",
+    # Used for Tenor attributions
+    r"Search Tenor",
+    # Used for KLIPY attributions
+    r"Search KLIPY",
     # Used in our case studies
     r"Technical University of Munich",
     r"University of California San Diego",
@@ -148,6 +169,8 @@ IGNORED_PHRASES = [
     r"to add a new line",
     # Used in showing Notification Bot read receipts message
     "Notification Bot",
+    # Used in strings around welcome bot custom messages
+    r"Welcome Bot",
     # Used in presence_enabled setting label
     r"invisible mode off",
     # Typeahead suggestions for "Pronouns" custom field type.
@@ -157,13 +180,42 @@ IGNORED_PHRASES = [
     # Used in message-move-time-limit setting label
     r"does not apply to moderators and administrators",
     # Used in message-delete-time-limit setting label
-    r"does not apply to administrators",
+    r"does not apply to users who can delete any message",
     # Used as indicator with names for guest users.
     r"guest",
+    # Used as indicator with names for archived streams.
+    r"archived",
     # Used in pills for deactivated users.
     r"deactivated",
+    # Used in pills for resolved topics.
+    r"resolved",
+    # Used in pills for unresolved topics.
+    r"unresolved",
+    # Used in pills for followed topics.
+    r"followed",
+    # Used in pills for unfollowed topics.
+    r"unfollowed",
     # This is a reference to a setting/secret and should be lowercase.
     r"zulip_org_id",
+    # These are custom time unit options for modal dropdowns
+    r"minutes",
+    r"hours",
+    r"days",
+    r"weeks",
+    # Used in "Who can subscribe to this channel" label.
+    r"everyone except guests can subscribe to any public channel",
+    # Used in branch-filtering label in the integration-url-modal.
+    r"comma-separated list",
+    # Used in info_overlay.
+    r"then",
+    r"Joe Smith",
+    r"bold",
+    r"channel name",
+    r"is busy working",
+    r"italic",
+    r"strikethrough",
+    r"support team",
+    r"topic name",
 ]
 
 # Sort regexes in descending order of their lengths. As a result, the
@@ -174,7 +226,8 @@ IGNORED_PHRASES.sort(key=len, reverse=True)
 # text using BeautifulSoup and then removes extra whitespaces from
 # it. This step enables us to add HTML in our regexes directly.
 COMPILED_IGNORED_PHRASES = [
-    re.compile(r" ".join(BeautifulSoup(regex, "lxml").text.split())) for regex in IGNORED_PHRASES
+    re.compile(r" ".join(BeautifulSoup(StringIO(regex), "lxml").text.split()))
+    for regex in IGNORED_PHRASES
 ]
 
 SPLIT_BOUNDARY = r"?.!"  # Used to split string into sentences.
@@ -233,7 +286,7 @@ def get_safe_text(text: str) -> str:
     This returns text which is rendered by BeautifulSoup and is in the
     form that can be split easily and has all IGNORED_PHRASES processed.
     """
-    soup = BeautifulSoup(text, "lxml")
+    soup = BeautifulSoup(StringIO(text), "lxml")
     text = " ".join(soup.text.split())  # Remove extra whitespaces.
     for phrase_regex in COMPILED_IGNORED_PHRASES:
         text = phrase_regex.sub(replace_with_safe_phrase, text)
@@ -258,6 +311,8 @@ def check_banned_words(text: str) -> list[str]:
                 or "realm_uri" in lower_cased_text
                 or "realm_url" in lower_cased_text
                 or "remote_realm_host" in lower_cased_text
+                or "realm_message" in lower_cased_text
+                or "realm_move" in lower_cased_text
             ):
                 continue
             kwargs = dict(word=word, text=text, reason=reason)

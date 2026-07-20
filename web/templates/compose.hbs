@@ -5,36 +5,38 @@
     it changing compose box layout in any way. --}}
     <div id="scroll-to-bottom-button-container" aria-hidden="true">
         <div id="scroll-to-bottom-button-clickable-area" data-tooltip-template-id="scroll-to-bottom-button-tooltip-template">
-            <div id="scroll-to-bottom-button">
-                <i class="fa fa-chevron-down"></i>
-            </div>
+            {{!-- We add a semi-transparent underlay to the scroll to bottom
+            button with the same background color as those of the stream
+            messages for better visibility against the message timestamps. --}}
+            <div id="scroll-to-bottom-button-underlay"></div>
+            {{> components/action_button id="scroll-to-bottom-button" icon="chevron-down" variant="subtle" intent="brand" }}
         </div>
     </div>
-    <div id="compose_controls" class="new-style">
-        <div id="compose_buttons">
-            <div class="new_message_button reply_button_container">
+    <div id="closed-compose-controls">
+        <div id="legacy-closed-compose-box">
+            <div class="reply_button_container">
                 <div class="compose-reply-button-wrapper" data-reply-button-type="selected_message">
-                    <button type="button" class="button compose_reply_button"
+                    <button type="button" class="compose_reply_button"
                       id="left_bar_compose_reply_button_big">
                         {{t 'Compose message' }}
                     </button>
                 </div>
-                <button type="button" class="button compose_new_conversation_button"
+                <button type="button" class="compose_new_conversation_button"
                   id="new_conversation_button"
                   data-tooltip-template-id="new_stream_message_button_tooltip_template">
                     {{t 'Start new conversation' }}
                 </button>
             </div>
-            <span class="new_message_button mobile_button_container">
-                <button type="button" class="button rounded compose_mobile_button"
+            <span class="mobile_button_container">
+                <button type="button" class="compose_mobile_button"
                   id="left_bar_compose_mobile_button_big"
                   data-tooltip-template-id="left_bar_compose_mobile_button_tooltip_template">
                     +
                 </button>
             </span>
             {{#unless embedded }}
-            <span class="new_message_button new_direct_message_button_container">
-                <button type="button" class="button rounded compose_new_direct_message_button"
+            <span class="new_direct_message_button_container">
+                <button type="button" class="compose_new_direct_message_button"
                   id="new_direct_message_button"
                   data-tooltip-template-id="new_direct_message_button_tooltip_template">
                     {{t 'New direct message' }}
@@ -49,28 +51,41 @@
             <form id="send_message_form" action="/json/messages" method="post">
                 <div class="compose_table">
                     <div id="compose_top">
-                        <div id="compose-recipient">
+                        {{!-- We start with the low-attention-recipient-row class
+                        on the template to avoid showing the transition
+                        when the compose box first opens. Note that this
+                        class is immediately removed when it's not used,
+                        so, for example, opening the compose box from
+                        Inbox view does not cause any flash of unwanted
+                        styling. --}}
+                        <div id="compose-recipient" class="low-attention-recipient-row">
                             {{> dropdown_widget_wrapper
                               widget_name="compose_select_recipient"}}
                             <div class="topic-marker-container">
                                 <a role="button" class="conversation-arrow zulip-icon zulip-icon-chevron-right"></a>
                             </div>
-                            <div id="compose_recipient_box">
-                                <input type="text" name="stream_message_recipient_topic" id="stream_message_recipient_topic" maxlength="{{ max_topic_length }}" value="" placeholder="{{t 'Topic' }}" autocomplete="off" tabindex="0" aria-label="{{t 'Topic' }}" />
-                                <button type="button" id="recipient_box_clear_topic_button" class="button tippy-zulip-delayed-tooltip" data-tippy-content="{{t 'Clear topic' }}" tabindex="-1">
-                                    <i class="zulip-icon zulip-icon-close"></i>
+                            <div id="compose-channel-recipient">
+                                <input type="text" name="stream_message_recipient_topic" id="stream_message_recipient_topic" value="" placeholder="{{t 'Topic' }}" autocomplete="off" tabindex="0" aria-label="{{t 'Topic' }}" />
+                                <span id="topic-not-mandatory-placeholder" class="placeholder">
+                                    {{> topic_not_mandatory_placeholder_text empty_string_topic_display_name=empty_string_topic_display_name}}
+                                </span>
+                                <button type="button" id="recipient_box_clear_topic_button" class="compose-new-recipient-button" tabindex="-1">
+                                    <i class="zulip-icon zulip-icon-square-plus"></i>
                                 </button>
                             </div>
                             <div id="compose-direct-recipient" data-before="{{t 'You and' }}">
                                 <div class="pill-container">
-                                    <div class="input" contenteditable="true" id="private_message_recipient" data-no-recipients-text="{{t 'Add one or more users' }}" data-some-recipients-text="{{t 'Add another user...' }}"></div>
+                                    <div class="input" contenteditable="true" id="private_message_recipient" data-no-recipients-text="{{t 'Add users' }}" ></div>
+                                    <button type="button" id="compose-new-direct-recipient-button" class="compose-new-recipient-button tippy-zulip-delayed-tooltip" data-tippy-content="{{t 'Add recipient' }}" tabindex="-1">
+                                        <i class="zulip-icon zulip-icon-square-plus"></i>
+                                    </button>
                                 </div>
                             </div>
                         </div>
                     </div>
                     <div class="messagebox">
                         <div id="message-content-container" class="surround-formatting-buttons-row">
-                            <textarea class="new_message_textarea" name="content" id='compose-textarea' placeholder="{{t 'Compose your message here' }}" tabindex="0" aria-label="{{t 'Compose your message here...' }}"></textarea>
+                            <textarea class="new_message_textarea message-textarea" name="content" id='compose-textarea' placeholder="{{t 'Compose your message here' }}" tabindex="0" aria-label="{{t 'Compose your message here…' }}"></textarea>
                             <div id="preview-message-area-container">
                                 <div class="scrolling_list preview_message_area" data-simplebar data-simplebar-tab-index="-1" id="preview_message_area" style="display:none;">
                                     <div class="markdown_preview_spinner"></div>
@@ -89,7 +104,7 @@
                             <a id="compose-drafts-button" role="button" class="send-control-button hide-sm" tabindex=0 href="#drafts">
                                 <span class="compose-drafts-text">{{t 'Drafts' }}</span><span class="compose-drafts-count-container">(<span class="compose-drafts-count"></span>)</span>
                             </a>
-                            <span id="compose-limit-indicator" class="tippy-zulip-tooltip" data-tippy-content="{{t 'Maximum message length: {max_message_length} characters' }}"></span>
+                            <span id="compose-limit-indicator" class="message-limit-indicator"></span>
                             <div class="message-send-controls">
                                 <button type="submit" id="compose-send-button" class="send_message compose-submit-button compose-send-or-save-button" aria-label="{{t 'Send' }}">
                                     <img class="loader" alt="" src="" />
@@ -101,13 +116,19 @@
                             </div>
                         </div>
 
-                        <div id="message-formatting-controls-container">
-                            {{> compose_control_buttons }}
+                        <div id="message-formatting-controls-container" class="compose-scrolling-buttons-container">
+                            {{> compose_control_buttons . }}
+                            <button type="button" class="formatting-control-scroller-button formatting-scroller-forward">
+                                <i class="scroller-forward-icon zulip-icon zulip-icon-compose-scroll-right"></i>
+                            </button>
+                            <button type="button" class="formatting-control-scroller-button formatting-scroller-backward">
+                                <i class="scroller-backward-icon zulip-icon zulip-icon-compose-scroll-left"></i>
+                            </button>
                         </div>
                     </div>
                 </div>
             </form>
         </div>
-        <button type="button" class="close zulip-icon zulip-icon-close" id='compose_close' data-tooltip-template-id="compose_close_tooltip_template"></button>
+        <button type="button" class="zulip-icon zulip-icon-close" id='compose_close' data-tooltip-template-id="compose_close_tooltip_template"></button>
     </div>
 </div>

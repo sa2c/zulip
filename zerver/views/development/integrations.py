@@ -10,10 +10,10 @@ from django.test import Client
 from pydantic import Json
 
 from zerver.lib.exceptions import JsonableError, ResourceNotFoundError
-from zerver.lib.integrations import WEBHOOK_INTEGRATIONS
+from zerver.lib.integrations import INCOMING_WEBHOOK_INTEGRATIONS
 from zerver.lib.response import json_success
 from zerver.lib.typed_endpoint import PathOnly, typed_endpoint
-from zerver.lib.webhooks.common import get_fixture_http_headers, standardize_headers
+from zerver.lib.webhooks.common import call_fixture_to_headers, standardize_headers
 from zerver.models import UserProfile
 from zerver.models.realms import get_realm
 
@@ -24,7 +24,7 @@ ZULIP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../
 
 
 def get_webhook_integrations() -> list[str]:
-    return [integration.name for integration in WEBHOOK_INTEGRATIONS]
+    return [integration.name for integration in INCOMING_WEBHOOK_INTEGRATIONS]
 
 
 def get_valid_integration_name(name: str) -> str | None:
@@ -64,6 +64,7 @@ def send_webhook_fixture_message(
         follow=False,
         secure=False,
         headers=None,
+        query_params=None,
         HTTP_HOST=http_host,
         **standardized_headers,
     )
@@ -89,14 +90,12 @@ def get_fixtures(request: HttpRequest, *, integration_name: PathOnly[str]) -> Ht
         with suppress(orjson.JSONDecodeError):
             body = orjson.loads(body)
 
-        headers_raw = get_fixture_http_headers(
+        headers_raw = call_fixture_to_headers(
             valid_integration_name, "".join(fixture.split(".")[:-1])
         )
 
         def fix_name(header: str) -> str:  # nocoverage
-            if header.startswith("HTTP_"):  # HTTP_ is a prefix intended for Django.
-                return header[len("HTTP_") :]
-            return header
+            return header.removeprefix("HTTP_")  # HTTP_ is a prefix intended for Django.
 
         headers = {fix_name(k): v for k, v in headers_raw.items()}
         fixtures[fixture] = {"body": body, "headers": headers}
@@ -146,7 +145,7 @@ def send_all_webhook_fixture_messages(
             content = f.read()
         x = fixture.split(".")
         fixture_name, fixture_format = "".join(_ for _ in x[:-1]), x[-1]
-        headers = get_fixture_http_headers(valid_integration_name, fixture_name)
+        headers = call_fixture_to_headers(valid_integration_name, fixture_name)
         is_json = fixture_format == "json"
         response = send_webhook_fixture_message(url, content, is_json, headers)
         responses.append(

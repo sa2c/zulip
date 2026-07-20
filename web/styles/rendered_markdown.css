@@ -1,6 +1,30 @@
+/* We have Unicode list-style-type values below.  @charset is a
+   special directive which webpack will relocate to the first bytes of
+   the generated output bundle, so browsers decode the bytes correctly. */
+@charset "UTF-8";
+
+/* We use a custom counter here for Safari to
+   get better control of its counter positioning.
+   Because Safari does not recognize `content`
+   properties on `::marker`, the style here better
+   approximates the same styles set on `::marker`
+   below. */
+@counter-style numbers {
+    system: numeric;
+    symbols: "0" "1" "2" "3" "4" "5" "6" "7" "8" "9";
+    suffix: ".";
+}
+
 .rendered_markdown {
     & p {
         margin: 0 0 var(--markdown-interelement-space-px);
+
+        &:has(+ ul, + ol) {
+            /* When a paragraph is immediately followed
+               by a list sibling, we reduce the paragraph's
+               ordinary bottom space by half. */
+            margin-bottom: calc(var(--markdown-interelement-space-px) / 2);
+        }
     }
 
     /* The spacing between two paragraphs is double the usual value.
@@ -11,23 +35,99 @@
     }
 
     & ul {
-        margin: 0 0 var(--markdown-interelement-space-px) 20px;
-    }
+        margin: 0 0 var(--markdown-interelement-space-px) 0;
+        /* Because browsers use inline padding, we set the
+           same property here to offset bullets. */
+        padding-inline-start: 1.1ch;
+        /* By setting Unicode characters of our own, we
+           gain better, cross-browser alignment of bullets. */
+        list-style-type: "•";
 
-    /* Swap the left and right margins of bullets for Right-To-Left languages */
-    &.rtl ul {
-        margin-right: 20px;
-        margin-left: 0;
+        & ul {
+            list-style-type: "◦";
+
+            & ul {
+                list-style-type: "▪︎";
+            }
+        }
+
+        & > li {
+            /* This aligns bullets to roughly the
+               center of a single-digit counter.
+               11.2px at 16px/1em */
+            padding-inline-start: 0.7em;
+        }
+
+        & > li::marker {
+            /* This is an eyeballed value, but it makes the
+               otherwise diminutive markers specified above
+               both larger *and* better vertically centered. */
+            font-size: 1.3em;
+            /* We do not want the line-height for the item text
+               affected by the larger font-size, though. So we
+               zero it out. */
+            line-height: 0;
+        }
     }
 
     & ol {
-        margin: 0 0 var(--markdown-interelement-space-px) 20px;
+        /* For the sake of Safari, we reference the `numbers`
+           counter defined on `@counter-style` above. */
+        list-style: numbers;
+        /* To preserve the `start` attribute on lists that
+           begin with a number other than 1, we update the
+           `counter-reset` in postprocess_content.ts. */
+        counter-reset: count;
+        margin: 0 0 var(--markdown-interelement-space-px) 0;
+        /* Because browsers use inline padding, we set the
+           same here to offset the counters. */
+        padding-inline-start: 2.1ch;
+
+        & > li {
+            counter-increment: count 1;
+            /* 3.2px at 16px/1em */
+            padding-inline-start: 0.2em;
+        }
+
+        & > li::marker {
+            content: counter(count, decimal) ". ";
+        }
     }
 
-    /* Swap the left and right margins of ordered list for Right-To-Left languages */
-    &.rtl ol {
-        margin-right: 8px;
-        margin-left: 0;
+    /* To avoid cutting off the focus ring on links, we set
+       padding on first children most likely to take links.
+       We account for this extra space on `.message_content`. */
+    & > p:first-child,
+    & > ul:first-child,
+    & > ol:first-child {
+        padding-top: var(--message-box-link-focus-ring-block-padding);
+    }
+
+    /* We set margin according to the length of the longest list counter.
+       The values here keep the counters flush left, just like paragraph
+       text. */
+    .counter-length-1 {
+        padding-inline-start: 2.1ch;
+    }
+
+    .counter-length-2 {
+        padding-inline-start: 3.1ch;
+    }
+
+    .counter-length-3 {
+        padding-inline-start: 4.1ch;
+    }
+
+    .counter-length-4 {
+        padding-inline-start: 5.1ch;
+    }
+
+    .counter-length-5 {
+        padding-inline-start: 6.1ch;
+    }
+
+    .counter-length-6 {
+        padding-inline-start: 7.1ch;
     }
 
     & hr {
@@ -35,13 +135,6 @@
         border-top: 1px solid hsl(0deg 0% 87%);
         /* Override Bootstrap with doubled interelement space */
         margin: calc(var(--markdown-interelement-space-px) * 2) 0;
-
-        &:first-child {
-            /* When a horizontal rule opens a message, or any other
-               area in the message area (e.g., spoilers), there
-               should be no space above the rule. */
-            margin-top: 0;
-        }
     }
 
     /* Headings */
@@ -99,29 +192,41 @@
 
     /* Formatting for blockquotes */
     & blockquote {
-        padding-left: 5px;
-        margin: 0 0 var(--markdown-interelement-space-px) 10px;
-        border-left: 5px solid hsl(0deg 0% 87%);
+        /* This keeps the blockquote text block
+           aligned with list-item text blocks.
+           12.4px at 16px/1em */
+        padding: 0;
+        padding-inline-start: 0.775em;
     }
 
-    &.rtl blockquote {
-        padding-left: unset;
-        padding-right: 5px;
-        margin-left: unset;
-        margin-right: 10px;
-        border-left: unset;
-        border-right: 5px solid hsl(0deg 0% 87%);
+    & blockquote,
+    .message_embed {
+        /* We want to keep the border roughly centered
+           with bullets and single-digit list markers.
+           3.5px at 16px/1em */
+        margin: 0 0 var(--markdown-interelement-space-px) 0;
+        margin-inline-start: 0.2188em;
+        border-inline-start: 4px solid
+            var(--color-text-message-blockquote-border);
     }
 
     /* Formatting for Markdown tables */
     & table {
         padding-right: 10px;
         margin: 0 5px var(--markdown-interelement-space-px);
-        width: 99%;
-        display: block;
         max-width: fit-content;
+        /* The `display: block` property is critical, given the
+           current markup, to allowing oversize tables to scroll.
+           It's possible that in the future we'll want to wrap
+           a `<div>` element around tables and allow it to handle
+           overscroll, allowing the table to take its normal
+           `display: table` property. */
+        display: block;
         overflow-x: auto;
-        white-space: nowrap;
+        /* Firefox's devtools will report that this property has
+           no effect because of `display: block`, but that is
+           incorrect. Without this, cells separate in ways we
+           do not want. */
         border-collapse: collapse;
     }
 
@@ -131,7 +236,7 @@
 
     & tr {
         display: table-row;
-        vertical-align: inherit;
+        vertical-align: top;
     }
 
     & tr th {
@@ -162,18 +267,31 @@
         vertical-align: var(--line-fitted-vertical-align-offset-em);
     }
 
-    /* Mentions and alert words */
-    .user-mention-me :not(.silent) {
-        background-color: hsl(112deg 88% 87%);
+    /* We double the size of emoji on emoji-only messages. As there
+       is by definition no adjacent text in these messages, there is
+       no need to adjust the `margin` or `vertical-align` properties
+       declared above. */
+    .emoji-only .emoji {
+        height: calc(var(--length-line-oversize-block) * 2);
+        width: calc(var(--length-line-oversize-block) * 2);
     }
 
+    /* Mentions and alert words */
     .user-group-mention,
     .user-mention,
     .topic-mention {
         padding: 0 3px;
         border-radius: 3px;
         white-space: nowrap;
-        display: inline-block;
+        /* Reduce the font-size to reduce the
+           footprint of the background highlight. */
+        font-size: 0.95em;
+    }
+
+    .mention-content-wrapper {
+        /* Restore the font-size to match the rest
+           of the message area. */
+        font-size: 1.0526em;
     }
 
     .user-mention {
@@ -190,6 +308,19 @@
         }
     }
 
+    .user-mention,
+    .user-group-mention {
+        /* We have to explicitly mention this for compose box preview
+           where cursor is set to not-allowed */
+        cursor: pointer;
+    }
+
+    /* We show the same cursor as the parent element for `@all`
+       mention */
+    .user-mention-all {
+        cursor: inherit;
+    }
+
     .user-mention[data-user-id="*"],
     .user-group-mention,
     .topic-mention {
@@ -203,8 +334,11 @@
     }
 
     .stream-topic {
-        /* Display whitespace within topics. */
-        white-space: pre-wrap;
+        /* Display whitespace within channel and topic names. */
+        .stream-topic-inner,
+        .decorated-channel-name {
+            white-space: pre;
+        }
     }
 
     .user-group-mention {
@@ -221,13 +355,27 @@
     & time {
         background: hsl(0deg 0% 93%);
         border-radius: 3px;
-        padding: 0 0.2em;
         box-shadow: 0 0 0 1px hsl(0deg 0% 80%);
         white-space: nowrap;
-        margin-left: 2px;
-        margin-right: 2px;
-        display: inline-block;
-        margin-bottom: 1px;
+        margin: 0 2px;
+        /* Reduce the font-size to reduce the
+           footprint of the timestamp block. */
+        font-size: 0.95em;
+
+        .timestamp-content-wrapper {
+            /* Restore the font-size to match the rest
+               of the message area, and apply the layout
+               for the icon. */
+            font-size: 1.0526em;
+            padding: 0 0.2em;
+            display: inline-flex;
+            align-items: baseline;
+            gap: 3px;
+        }
+
+        .markdown-timestamp-icon {
+            align-self: center;
+        }
     }
 
     /* LaTeX styling */
@@ -239,6 +387,16 @@
         padding: 3px 0;
         margin: -3px 0;
         overflow: auto hidden;
+    }
+
+    .katex-mathml annotation {
+        /* Because annotations are never displayable, browser user-agent
+           stylesheets mark them as not displayable, which has the
+           side effect of having them not be included in the HTML
+           version of copying the content. Override this, so KaTeX can
+           be copy/pasted within Zulip. */
+        user-select: all;
+        display: inline;
     }
 
     .tex-error {
@@ -262,7 +420,7 @@
             padding: 8px 5px;
             font-weight: bold;
 
-            > :not(.spoiler-button) {
+            .spoiler-header-text {
                 /* Disallow margin from ordinary rendered-markdown
                    elements. The header's vertical space is handled
                    independently by padding on .spoiler-header. */
@@ -285,18 +443,20 @@
             overflow: hidden;
             border-top: hsl(0deg 0% 50%) 0 solid;
             transition:
+                /* stylelint-disable-next-line plugin/no-low-performance-animation-properties */
                 height 0.4s ease-in-out,
                 border-top 0.4s step-end,
-                padding 0.4s step-end;
+                padding 0.4s step-end; /* stylelint-disable-line plugin/no-low-performance-animation-properties */
             padding: 0;
             height: 0;
 
             &.spoiler-content-open {
                 border-top: hsl(0deg 0% 50%) 1px solid;
                 transition:
+                    /* stylelint-disable-next-line plugin/no-low-performance-animation-properties */
                     height 0.4s ease-in-out,
                     border-top 0.4s step-start,
-                    padding 0.4s step-start;
+                    padding 0.4s step-start; /* stylelint-disable-line plugin/no-low-performance-animation-properties */
                 padding: 5px;
                 height: auto;
             }
@@ -318,7 +478,7 @@
             float: right;
             width: 15px;
             cursor: pointer;
-            transition: 0.4s ease;
+            transition: transform 0.4s ease;
             transform: rotate(45deg);
 
             &::before,
@@ -329,7 +489,7 @@
                 width: 12px;
                 height: 3px;
                 background-color: hsl(0deg 0% 83%);
-                transition: 0.4s ease;
+                transition: transform 0.4s ease;
             }
 
             &::after {
@@ -353,152 +513,130 @@
         }
     }
 
-    & > .spoiler-block:last-child {
-        /* A spoiler block at the end of a message, or as
-           a message's only content, gets the same bottom
-           margin as other elements. */
+    /* embedded link previews */
+    .message-thumbnail-gallery {
+        display: flex;
+        flex-flow: row wrap;
+        place-items: center center;
+        gap: 5px;
         margin-bottom: var(--markdown-interelement-space-px);
     }
 
-    /* embedded link previews */
+    /* When a gallery appears inside a paragraph, we equalize
+       the space above and below the gallery. Thanks to margin
+       collapsing, this value will have no effect when a gallery
+       is the last element in a paragraph. */
+    p .message-thumbnail-gallery {
+        margin: var(--markdown-interelement-halved-space-px) 0;
+    }
+
+    /* We used to use this for certain dropbox previews, we are keeping
+       this around as to not break any previous instances of these
+       previews. */
     .message_inline_image_title {
         font-weight: bold;
     }
 
-    .twitter-image,
-    .message_inline_image {
-        position: relative;
-        margin-bottom: var(--markdown-interelement-space-px);
-        margin-right: 5px;
+    .message-media-inline-image:not(.message-media-gallery-image) {
+        margin: 0 0.125em; /* 2px at 16px/1em */
 
-        /* Sizing CSS for inline images requires care, because images load
-           asynchronously, and browsers will unfortunately jump your
-           scroll position when elements load above the current
-           position in the message feed in a way that changes the
-           height of elements. (As of March 2022, both Firefox and
-           Chrome exhibit this problem, though in Chrome it is pretty
-           subtle).
-
-           We prevent this by setting a fixed height for inline
-           previews. 100px is chosen because we don't want images to
-           overwhelm conversation in message feeds, as it does in chat
-           tools that show images at half-screen height or larger.
-
-           If there are several images next to each other, we display
-           them in a grid format; the same considerations requires
-           that either use a scrollable region or set a fixed width
-           for images so that the browser statically knows whether
-           it'll need to overflow. We choose fixed width here. */
-        height: 100px;
-        width: 150px;
-
-        /* Inline image containers also need an inline-block display in order
-           to implement the desired grid layout. */
-        display: inline-block;
-
-        /* Set a background for the image; the background will be visible for
-           messages whose aspect ratio is different from that of this
-           container. */
-        border: solid 1px transparent;
-        transition: background 0.3s ease;
-        background: hsl(0deg 0% 0% / 3%);
-
-        &:hover {
-            background: hsl(0deg 0% 0% / 15%);
+        &:has(.image-opens-message) {
+            /* When a message opens with an inline image, don't
+               present any margin before the image starts (e.g.,
+               to the left in LTR languages). */
+            margin-inline-start: 0;
         }
 
-        & a {
+        .media-anchor-element {
+            /* We want the image to behave as inline, which the
+               .message-media-inline-image will ensure, but in
+               order to keep inline images from touching each
+               other when they flow over separate lines, we
+               introduce top/bottom margins of 3px--a value
+               derived from the border around legacy images and
+               images presented in galleries. */
+            display: inline-block;
+            margin: 3px 0;
+        }
+    }
+
+    .twitter-image,
+    .message-media-gallery-image,
+    .message-media-preview-image,
+    .message-media-preview-video {
+        /* Set a background for the image; the background will be visible
+           behind the width of the transparent border. */
+        border: solid 3px transparent;
+        transition: background 0.3s ease;
+        background: var(--color-background-image-thumbnail);
+
+        &:hover {
+            background: var(--color-background-image-thumbnail-hover);
+        }
+
+        & .media-anchor-element {
             display: block;
-            height: 100%;
-            width: 100%;
+        }
+
+        & .media-image-element {
+            display: block;
+            object-fit: scale-down;
+
+            /* Sizing CSS for inline images requires care, because images load
+               asynchronously, and browsers will unfortunately jump your
+               scroll position when elements load above the current
+               position in the message feed in a way that changes the
+               height of elements. (As of March 2022, both Firefox and
+               Chrome exhibit this problem, though in Chrome it is pretty
+               subtle).
+
+               We prevent this by utilizing dimensions on the `<img>` elements,
+               but further care is needed because different layout mechanisms,
+               including inline-block, can ignore those dimensions. For that
+               reason, we enforce a minimum 4em square for "dinky" images,
+               and set the scaled-down width on all others via JavaScript.
+
+               If there are several images next to each other, we display
+               them in a grid format; the same considerations require
+               use to either use a scrollable region or set a predictable
+               size for images so that the browser statically knows whether
+               it'll need to overflow. We choose predictable sizes here. */
+
+            /* Ensure a reasonable clickable area on
+               extremely tall or extremely wide images. */
+            min-width: 4em;
+            min-height: 4em;
+
+            /* Constrain height based on the organization's
+               media preview size setting, but otherwise keep
+               the width to the size of the gallery, and
+               therefore the message area. */
+            max-height: var(--media-preview-max-height);
+            max-width: 100%;
+
+            /* Allow height and width to grow as needed, though
+               note we set the scaled-down `width` property on
+               each image in JavaScript to keep flexbox from
+               collapsing to the min-height and min-width values
+               set above... */
+            width: auto;
+            height: auto;
         }
 
         img.image-loading-placeholder {
-            content: url("../images/loading/loader-black.svg");
+            content: var(--svg-url-thumbnail-loader);
         }
     }
 
-    &.rtl .twitter-image,
-    &.rtl .message_inline_image {
-        margin-left: unset;
-        margin-right: 5px;
-    }
-
-    /* In browsers that support `:has()`, we pull
-       `.rendered_markdown` out of the baseline group
-       formed with EDITED/MOVED markers and the
-       timestamp when the first child of the rendered
-       markdown is a horizontal rule, a media element,
-       or KaTeX. */
-    &:has(> hr:first-child),
-    &:has(> .message_inline_image:first-child),
-    &:has(> p:first-child > .katex-display) {
-        align-self: center;
-    }
-
-    /* But for browsers that don't support :has(),
-       we provide a small layout hack using an
-       inline grid. */
-    @supports not selector(:has(*)) {
-        p:first-child > .katex-display {
-            /* KaTeX should take up 100% of the message box,
-               so that KaTeX's own CSS for centering still works. */
-            width: 100%;
-        }
-
-        p:first-child > .katex-display,
-        .message_inline_image {
-            /* We'll display this bit of media as
-               an inline grid. That will allow us
-               to put beneath the image a piece of
-               invisible ::before content that we'll
-               generate to participate in the
-               messagebox-content grid's baseline
-               group. */
-            display: inline-grid;
-            /* We create a grid area called
-               "media", so that both the inner
-               <a> element and the ::before content
-               can sit there. `auto` will take on
-               the height and width otherwise assigned
-               to the .message_inline_image. Setting
-               the min value to 0 on minmax() ensures
-               that media larger than those dimensions
-               don't cause a grid blowout. */
-            grid-template: "media" minmax(0, auto) / minmax(0, auto);
-        }
-
-        p:first-child > .katex-display > .katex,
-        .message_inline_image a,
-        .message_inline_image video {
-            /* We explicitly place the containing
-               media element in the thumbnail area. */
-            grid-area: media;
-        }
-
-        p:first-child > .katex-display::before,
-        .message_inline_image::before {
-            /* We generate a single . here to create
-               text content enough for a baseline.
-               Generated content is not generally
-               read aloud to screen readers. */
-            content: ".";
-            /* We color the generated . transparently,
-               so it won't be visible when the media
-               doesn't cover the entire area. */
-            color: transparent;
-            /* And we explicitly place the . in the thumbnail
-               area, too. Otherwise, grid would generate a new
-               column track for it to sit in. */
-            grid-area: media;
-        }
+    .inline-image {
+        display: inline;
     }
 
     .twitter-tweet {
         border: 1px solid hsl(0deg 0% 87%);
         padding: 0.5em 0.75em;
         margin-bottom: 0.25em;
-        word-break: break-word;
+        overflow-wrap: anywhere;
         min-height: 48px;
     }
 
@@ -509,186 +647,196 @@
         margin-right: 0.75em;
     }
 
+    /* We used to use this for certain dropbox previews, we are keeping
+       this around as to not break any previous instances of these
+       previews. */
     .message_inline_ref {
         margin-bottom: var(--markdown-interelement-space-px);
-        margin-left: 5px;
+        margin-inline-start: 5px;
         height: 50px;
         display: block !important;
         border: none !important;
     }
 
-    &.rtl .message_inline_ref {
-        margin-left: unset;
-        margin-right: 5px;
-    }
-
-    .twitter-image img,
-    .message_inline_image img,
-    .message_inline_ref img {
-        /* We use `scale-down` so that images smaller than the container are
-           neither scaled up nor cropped to fit. This preserves
-           their aspect ratio, which is often helpful. */
-        object-fit: scale-down;
-
-        /* We need to explicitly specify the image dimensions to have
-           object-fit work; likely because internally object-fit needs
-           to know the frame it is targeting, and images don't default
-           to container dimensions. */
-        height: 100%;
-        width: 100%;
-
-        float: left;
-        margin-right: 10px;
-        border-radius: inherit;
-    }
-
-    .message_inline_image img {
+    .media-image-element {
         cursor: zoom-in;
     }
 
-    .youtube-video img,
-    .vimeo-video img,
-    .embed-video img {
+    .youtube-video .media-image-element,
+    .vimeo-video .media-image-element,
+    .embed-video .media-image-element {
         cursor: pointer;
     }
 
-    &.rtl .twitter-image img,
-    &.rtl .message_inline_image img,
-    &.rtl .message_inline_ref img {
-        float: right;
-        margin-right: unset;
-        margin-left: 10px;
-    }
-
-    & li .message_inline_image img {
-        float: none;
+    .youtube-video .media-image-element {
+        /* We do this for the sake of increasing
+           the size of older YouTube thumbnail
+           previews, but there are no ill effects
+           on newer preview images. */
+        object-fit: contain;
     }
 
     .message_inline_video,
-    .message_inline_animated_image_still {
+    .message_inline_animated_image_still,
+    .youtube-video .media-anchor-element {
+        /* Once collections of thumbnails are set to render as
+           flex items, this can be updated to use `display: grid`
+           instead of `display: inline-grid`. */
+        display: inline-grid;
+        grid-template: "media" minmax(0, auto) / minmax(0, auto);
+        place-items: center center;
+
         &:hover {
             &::after {
                 transform: scale(1);
-                transition: transform 0.2s;
             }
         }
 
-        &::after {
-            content: "";
-            background-image: url("../images/play_button.svg");
-            display: block;
-            width: 32px;
-            height: 32px;
-            position: absolute;
-            /* video width (100px) / 2 - icon width (32px) / 2 */
-            top: 34px;
-            /* video height (150px) / 2 - icon height (32px) / 2 */
-            left: 59px;
-            border-radius: 100%;
-            transform: scale(0.8);
+        /* The .media-anchor-selector is for all media
+           except YouTube, which needs to place
+           .media-image-element on the grid. */
+        & .media-anchor-element,
+        & .media-image-element {
+            grid-area: media;
         }
 
-        & video {
+        &::after {
+            grid-area: media;
+            content: "";
+            background-image: url("../images/play_button.svg");
+            background-position: center center;
+            background-repeat: no-repeat;
+            /* 32px at 14px/1em */
+            background-size: 2.2857em;
+            /* Match the box to the play button's
+               background-size value. */
+            width: 2.2857em;
+            height: 2.2857em;
+            border-radius: 100%;
+            transform: scale(0.8);
+            transition: transform 0.2s;
+        }
+
+        & .media-video-element {
             display: block;
             object-fit: contain;
-            height: 100%;
-            width: 100%;
+            /* Since we do not yet read height and width
+               values for media thumbnails, we carry forward
+               reasonable dimensions for a landscape thumbnail
+               here, scaling with the image thumbnail size setting. */
+            height: var(--media-preview-max-height);
+            width: calc(var(--media-preview-max-height) * 1.5);
         }
     }
 
-    .youtube-video .fa-play::before,
-    .embed-video .fa-play::before {
-        position: absolute;
-        margin: var(--margin-top, 32px) 0 0 var(--margin-left, 45px);
-        padding: 5px 8px 5px 10px;
-        font-size: 12px;
-        border-radius: 4px;
-        background-color: hsl(0deg 0% 0%);
-        color: hsl(0deg 0% 100%);
-        opacity: 0.7;
-        top: 0;
-        left: 0;
+    .message_inline_video.video-format-unsupported {
+        display: none;
+    }
+
+    .youtube-video .media-anchor-element {
+        /* We display the youtube-video anchor
+           as a grid, not inline grid, to avoid
+           additional space beneath the thumbnail. */
+        display: grid;
+    }
+
+    .media-audio-wrapper {
+        vertical-align: middle;
+        display: inline-flex;
+        align-items: center;
+        max-width: 100%;
+    }
+
+    .media-audio-element {
+        flex: 0 1 auto;
+        /* Allow browser-native media players
+           to resize in narrow viewports. */
+        max-width: calc(100% - 30px);
+    }
+
+    .media-audio-download {
+        flex: 0 0 20px;
+        margin-left: 5px;
+        display: flex;
+        place-content: center center;
+
+        &:hover {
+            text-decoration: none;
+        }
     }
 
     .message_embed {
-        display: block;
-        position: relative;
-        margin: 0 0 var(--markdown-interelement-space-px);
-        border: none;
-        border-left: 3px solid hsl(0deg 0% 93%);
-        height: 80px;
+        display: grid;
+        grid-template-columns:
+            [thumbnail-start] var(--length-message-preview-embeds)
+            [thumbnail-end fader-start data-container-start] minmax(0, 1fr)
+            [data-container-end fader-end];
+        grid-template-rows:
+            [border-start thumbnail-start data-container-start] calc(
+                var(--length-message-preview-embeds) - 10%
+            )
+            [fader-start] 10% [data-container-end thumbnail-end border-end fader-end];
+        column-gap: 5px;
+        /* We want to control the height without worrying about
+           padding... */
+        box-sizing: border-box;
+        /* ...though we will account for 10px of padding in the
+           height itself, so that the fade effect on long description
+           text works as expected. */
+        height: calc(var(--length-message-preview-embeds) + 10px);
         padding: 5px;
-        z-index: 1;
-        text-shadow: hsl(0deg 0% 0% / 1%) 0 0 1px;
 
         .message_embed_title {
-            padding-top: 0;
-            /* to remove the spacing that the font has from the top of the container. */
-            margin-top: -5px;
-
             font-size: 1.2em;
-            line-height: normal;
+            /* 5px at 16.8px (1.2 * 14px) */
+            margin-top: -0.2976em;
+            /* We set the markdown link colors here so
+               that the ellipsis takes it on truncated
+               lines. The ellipsis will not take an
+               underline even if we specify one, so
+               that is deliberately omitted here. */
+            color: var(--color-markdown-link);
+
+            &:hover {
+                color: var(--color-markdown-link-hover);
+            }
+
+            .message-embed-title-link {
+                /* Line-clamp lines seem to have a small
+                   interline area that's not clickable
+                   unless we set the anchor to display as
+                   a block. */
+                display: block;
+            }
         }
 
+        .message_embed_title,
         .message_embed_description {
-            position: relative;
-            max-width: 500px;
-            margin-top: 3px;
-
-            /* to put it below the container gradient. */
-            z-index: -1;
+            /* Clamp multi-line titles and descriptions
+               to two lines. */
+            display: -webkit-box;
+            -webkit-box-orient: vertical;
+            -webkit-line-clamp: 2;
+            overflow: hidden;
+            /* Break overflowing words as necessary. */
+            overflow-wrap: break-word;
         }
 
         .message_embed_image {
-            display: inline-block;
-            width: 70px;
-            height: 70px;
+            display: block;
+            grid-area: thumbnail;
+            /* Keep the embed image square. */
+            max-height: var(--length-message-preview-embeds);
             background-size: cover;
             background-position: center;
         }
 
         .data-container {
-            position: relative;
-            padding: 0 5px;
-            display: inline-block;
-            vertical-align: top;
-            max-width: calc(100% - 115px);
-            max-height: 80px;
-            overflow: hidden;
-        }
-
-        .data-container div {
-            display: block;
-            border: none;
-        }
-
-        .data-container::after {
-            content: " ";
-            position: absolute;
-            width: 100%;
-            height: 10%;
-            bottom: 0;
-
-            background: linear-gradient(
-                0deg,
-                var(--color-background-stream-message-content),
-                transparent 100%
-            );
+            grid-area: data-container;
         }
     }
 
-    &.rtl .message_embed {
-        border-left: unset;
-        border-right: 3px solid hsl(0deg 0% 93%);
-    }
-
-    .message_embed > * {
-        display: inherit;
-        padding: 5px;
-        border: none;
-    }
-
-    & a {
+    & a:not(.icon-button) {
         color: var(--color-markdown-link);
         text-decoration: none;
 
@@ -715,7 +863,7 @@
         white-space: pre;
         overflow-x: auto;
         word-break: break-all;
-        word-wrap: normal;
+        overflow-wrap: normal;
         margin: 0 0 var(--markdown-interelement-space-px);
         padding: 5px 7px 3px;
         display: block;
@@ -723,6 +871,14 @@
 
         &:hover .code-buttons-container {
             visibility: visible;
+        }
+
+        /* Hide the code buttons container when the user is
+           clicking on the code block other than the buttons.
+           This allows the user to select part of the the code
+           without the buttons interfering with the selection. */
+        &:active .code-buttons-container:not(:hover) {
+            visibility: hidden;
         }
     }
 
@@ -745,7 +901,8 @@
         unicode-bidi: embed;
         direction: ltr;
         white-space: pre-wrap;
-        padding: 1px 2px;
+        /* 1px at 14px/1em */
+        padding: 0.0714em 2px;
         color: var(--color-markdown-code-text);
         background-color: var(--color-markdown-code-background);
         border-radius: 3px;
@@ -762,85 +919,40 @@
         /* Having absolute positioning here ensures that the element
         doesn't scroll along with the code div in narrow windows */
         position: absolute;
-        top: 2px;
+        top: 4px;
         right: 0;
         padding: 0 4px;
         /* Invisible unless <pre> is hovered. */
         visibility: hidden;
         z-index: 0;
-
-        &::after {
-            content: " ";
-            position: absolute;
-            height: 100%;
-            width: 100%;
-            z-index: -1;
-            /* Blur the background behind the button container */
-            backdrop-filter: blur(5px);
-            /* Use a radial gradient to avoid obvious hard edges
-               to the blur. */
-            mask-image: radial-gradient(
-                farthest-corner,
-                hsl(0deg 0% 0% / 100%),
-                hsl(0deg 0% 0% / 50%)
-            );
-        }
-
-        #clipboard_image {
-            /* Zero out legacy negative margins */
-            margin: 0;
-        }
     }
 
-    /* Style copy-to-clipboard button inside code blocks */
-    .copy_codeblock {
-        display: flex;
-        align-content: center;
-        /* Push back on legacy styles from .copy_button_base,
-           which are not necessary in the flex setting established
-           on the .code-buttons-container. */
-        height: auto;
-        width: auto;
-        background-clip: unset;
-        /* Don't let the default button color appear
-           behind the icon. Regrettably, !important
-           is necessary for a thorny selector-specificity
-           issue in dark mode. */
-        background-color: transparent !important;
-        /* Square off the box around the copy-to-clipboard icon. */
-        padding: 0 2px 0 4px;
-
-        &:hover {
-            /* Regrettably, !important is necessary for a thorny
-               selector-specificity issue in dark mode. */
-            background-color: transparent !important;
-        }
-
-        /* Remove the outline when clicking on the copy-to-clipboard button */
-        &:focus {
-            outline: none;
-        }
-    }
-
+    /* The properties of the code_external_link button are copied from the
+       copy-button class in app_components.css. */
     .code_external_link {
-        /* Match the apparent size of the playground icon
-           to the copy-to-clipboard icon. */
-        font-size: 16px;
-        /* Center the icon vertically in the link container. */
         display: flex;
-        align-content: center;
-        /* The font-icon footprint still requires 2px of
-           top padding to get better alignment with the
-           copy-to-clipboard icon. */
-        padding-top: 2px;
-        /* The default icon and on-hover colors are inherited from <a> tag.
-        so we set our own to match the copy-to-clipbord icon */
-        color: hsl(0deg 0% 47%);
+        border-radius: 4px;
+        color: var(--color-copy-button);
+        /* 2px at 16px/1em */
+        padding: 0.125em;
+        cursor: pointer;
 
-        &:hover {
-            color: hsl(200deg 100% 40%);
-            text-decoration: none;
+        &:hover,
+        :focus-visible {
+            background-color: var(--color-copy-button-square-bg-hover);
         }
+
+        &:active {
+            background-color: var(--color-copy-button-square-bg-active);
+            color: var(--color-copy-button-square-active);
+        }
+    }
+
+    .copy_codeblock,
+    .code_external_link {
+        font-size: 1.1363em;
+        border: 1px solid var(--color-copy-button-square-bg-active);
+        backdrop-filter: blur(20px);
     }
 }
 
@@ -906,18 +1018,6 @@
     }
 }
 
-.preview_content.rendered_markdown {
-    /*  Ensure that the first child and last child
-    don't have blank area at the top and bottom respectively. */
-    & > :first-child {
-        margin-top: 0;
-    }
-
-    & > :last-child:not(.message_inline_image) {
-        margin-bottom: 0;
-    }
-}
-
 .codehilite {
     display: block !important;
     border: none !important;
@@ -939,8 +1039,8 @@
 }
 
 /* Both the horizontal scrollbar in <pre/> as well as
-   vertical scrollbar in the <textarea/> is styled similarly. */
-.message_edit_form textarea,
+   vertical scrollbar in the view source <textarea/> is styled similarly. */
+.message_edit_form textarea:read-only,
 .rendered_markdown pre {
     /* Ensure the horizontal scrollbar is visible on Mac */
     &::-webkit-scrollbar {
@@ -952,7 +1052,8 @@
     &::-webkit-scrollbar-thumb {
         background-color: hsl(0deg 0% 0% / 30%);
         border-radius: 20px;
-        transition: all 0.2s ease;
+        cursor: auto;
+        transition: background-color 0.2s ease;
     }
 
     &::-webkit-scrollbar-thumb:hover {
@@ -973,4 +1074,21 @@
     .stream-topic {
         white-space: nowrap;
     }
+}
+
+.user-mention {
+    i.zulip-icon-bot {
+        vertical-align: middle;
+        position: relative;
+        top: -1px;
+        padding-left: 0.3em;
+    }
+}
+
+/* This is required to align the time-example output in the "?" menu. */
+#markdown-instructions p:has(time) {
+    display: flex;
+    align-items: center;
+    margin: calc(var(--markdown-interelement-space-px) / 2) 0;
+    padding: calc(var(--message-box-link-focus-ring-block-padding) / 2) 0;
 }

@@ -4,7 +4,7 @@ from typing_extensions import override
 from zerver.actions.message_send import internal_send_private_message
 from zerver.lib.test_classes import ZulipTestCase
 from zerver.lib.test_helpers import message_stream_count, most_recent_message
-from zerver.models import UserProfile
+from zerver.models.recipients import get_or_create_direct_message_group
 from zerver.models.users import get_system_bot
 
 
@@ -27,21 +27,6 @@ class TutorialTests(ZulipTestCase):
             # set this to true for welcome_bot in the codebase.
             disable_external_notifications=True,
         )
-
-    def test_tutorial_status(self) -> None:
-        user = self.example_user("hamlet")
-        self.login_user(user)
-
-        cases = [
-            ("started", UserProfile.TUTORIAL_STARTED),
-            ("finished", UserProfile.TUTORIAL_FINISHED),
-        ]
-        for incoming_status, expected_db_status in cases:
-            params = dict(status=incoming_status)
-            result = self.client_post("/json/users/me/tutorial_status", params)
-            self.assert_json_success(result)
-            user = self.example_user("hamlet")
-            self.assertEqual(user.tutorial_status, expected_db_status)
 
     def test_response_to_pm_for_app(self) -> None:
         user = self.example_user("hamlet")
@@ -148,6 +133,9 @@ class TutorialTests(ZulipTestCase):
     def test_response_to_pm_for_help(self) -> None:
         user = self.example_user("hamlet")
         bot = get_system_bot(settings.WELCOME_BOT, user.realm_id)
+
+        direct_group_message = get_or_create_direct_message_group(id_list=[user.id, bot.id])
+
         messages = ["help", "Help", "?"]
         self.login_user(user)
         for content in messages:
@@ -157,15 +145,35 @@ class TutorialTests(ZulipTestCase):
                 "`apps`, `profile`, `theme`, "
                 "`channels`, `topics`, `message formatting`, `keyboard shortcuts`.\n\n"
                 "Check out our [Getting started guide](/help/getting-started-with-zulip), "
-                "or browse the [Help center](/help/) to learn more!"
+                "or browse the [help center](/help/) to learn more!"
             )
-            self.assertEqual(most_recent_message(user).content, expected_response)
+            message = most_recent_message(user)
+            self.assertEqual(message.content, expected_response)
+            self.assertEqual(message.recipient, direct_group_message.recipient)
+
+    def test_no_response_to_direct_message_group_with_a_soft_diactivated_user(self) -> None:
+        user = self.example_user("hamlet")
+        soft_deactivated_user = self.example_user("cordelia")
+        self.soft_deactivate_user(soft_deactivated_user)
+        bot = get_system_bot(settings.WELCOME_BOT, user.realm_id)
+
+        messages = ["help", "Help", "?"]
+        self.login_user(user)
+        for content in messages:
+            self.send_group_direct_message(user, [soft_deactivated_user, bot], content)
+            message = most_recent_message(user)
+            self.assertEqual(message.content, content)
+            self.assertEqual(message.sender, user)
 
     def test_response_to_pm_for_undefined(self) -> None:
         user = self.example_user("hamlet")
         bot = get_system_bot(settings.WELCOME_BOT, user.realm_id)
+
+        get_or_create_direct_message_group(id_list=[user.id, bot.id])
+
         messages = ["Hello", "HAHAHA", "OKOK", "LalulaLapas"]
         self.login_user(user)
+
         # First undefined message sent.
         self.send_personal_message(user, bot, "Hello")
         expected_response = (

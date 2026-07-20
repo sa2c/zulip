@@ -5,28 +5,32 @@ from django.conf import settings
 from django.contrib.auth.models import AnonymousUser
 from django.db import connection, transaction
 from django.http import HttpRequest, HttpResponse
-from django.utils.html import escape as escape_html
 from django.utils.translation import gettext as _
 from pydantic import Json, NonNegativeInt
-from sqlalchemy.sql import and_, column, join, literal, literal_column, select, table
+from sqlalchemy.sql import column, func
 from sqlalchemy.types import Integer, Text
 
 from zerver.context_processors import get_valid_realm_from_request
-from zerver.lib.exceptions import JsonableError, MissingAuthenticationError
+from zerver.lib.exceptions import (
+    IncompatibleParametersError,
+    JsonableError,
+    MissingAuthenticationError,
+)
 from zerver.lib.message import get_first_visible_message_id, messages_for_ids
 from zerver.lib.narrow import (
     NarrowParameter,
     add_narrow_conditions,
+    clean_narrow_for_message_fetch,
     fetch_messages,
+    get_base_query_for_search,
     is_spectator_compatible,
     is_web_public_narrow,
     parse_anchor_value,
-    update_narrow_terms_containing_with_operator,
 )
 from zerver.lib.request import RequestNotes
 from zerver.lib.response import json_success
 from zerver.lib.sqlalchemy_utils import get_sqlalchemy_connection
-from zerver.lib.topic import DB_TOPIC_NAME, MATCH_TOPIC
+from zerver.lib.topic import MATCH_TOPIC
 from zerver.lib.topic_sqlalchemy import topic_column_sa
 from zerver.lib.typed_endpoint import ApiParamConfig, typed_endpoint
 from zerver.models import UserMessage, UserProfile
@@ -73,13 +77,13 @@ def highlight_string(text: str, locs: Iterable[tuple[int, int]]) -> str:
 
 def get_search_fields(
     rendered_content: str,
-    topic_name: str,
+    escaped_topic_name: str,
     content_matches: Iterable[tuple[int, int]],
     topic_matches: Iterable[tuple[int, int]],
 ) -> dict[str, str]:
     return {
         "match_content": highlight_string(rendered_content, content_matches),
-        MATCH_TOPIC: highlight_string(escape_html(topic_name), topic_matches),
+        MATCH_TOPIC: highlight_string(escaped_topic_name, topic_matches),
     }
 
 
@@ -104,21 +108,51 @@ def get_messages_backend(
     request: HttpRequest,
     maybe_user_profile: UserProfile | AnonymousUser,
     *,
+    allow_empty_topic_name: Json[bool] = False,
     anchor_val: Annotated[str | None, ApiParamConfig("anchor")] = None,
+    anchor_date: str | None = None,
+    apply_markdown: Json[bool] = True,
+    client_gravatar: Json[bool] = True,
+    client_requested_message_ids: Annotated[
+        Json[list[NonNegativeInt] | None], ApiParamConfig("message_ids")
+    ] = None,
     include_anchor: Json[bool] = True,
-    num_before: Json[NonNegativeInt],
-    num_after: Json[NonNegativeInt],
     narrow: Json[list[NarrowParameter] | None] = None,
+    num_after: Json[NonNegativeInt] = 0,
+    num_before: Json[NonNegativeInt] = 0,
     use_first_unread_anchor_val: Annotated[
         Json[bool], ApiParamConfig("use_first_unread_anchor")
     ] = False,
-    client_gravatar: Json[bool] = True,
-    apply_markdown: Json[bool] = True,
 ) -> HttpResponse:
+    # User has to either provide message_ids or both num_before and num_after.
+    if (
+        num_before or num_after or anchor_val is not None or use_first_unread_anchor_val
+    ) and client_requested_message_ids is not None:
+        raise IncompatibleParametersError(
+            [
+                "num_before",
+                "num_after",
+                "anchor",
+                "message_ids",
+                "include_anchor",
+                "use_first_unread_anchor",
+            ]
+        )
+    elif client_requested_message_ids is not None:
+        include_anchor = False
+
+    anchor_info = None
+    if client_requested_message_ids is None:
+        anchor_info = parse_anchor_value(anchor_val, use_first_unread_anchor_val, anchor_date)
+
     realm = get_valid_realm_from_request(request)
-    anchor = parse_anchor_value(anchor_val, use_first_unread_anchor_val)
-    narrow = update_narrow_terms_containing_with_operator(realm, maybe_user_profile, narrow)
-    if num_before + num_after > MAX_MESSAGES_PER_FETCH:
+    narrow = clean_narrow_for_message_fetch(narrow, realm, maybe_user_profile)
+
+    num_of_messages_requested = num_before + num_after
+    if client_requested_message_ids is not None:
+        num_of_messages_requested = len(client_requested_message_ids)
+
+    if num_of_messages_requested > MAX_MESSAGES_PER_FETCH:
         raise JsonableError(
             _("Too many messages requested (maximum {max_messages}).").format(
                 max_messages=MAX_MESSAGES_PER_FETCH,
@@ -208,10 +242,11 @@ def get_messages_backend(
             user_profile=user_profile,
             realm=realm,
             is_web_public_query=is_web_public_query,
-            anchor=anchor,
+            anchor_info=anchor_info,
             include_anchor=include_anchor,
             num_before=num_before,
             num_after=num_after,
+            client_requested_message_ids=client_requested_message_ids,
         )
 
         anchor = query_info.anchor
@@ -226,25 +261,25 @@ def get_messages_backend(
         # rendered message dict before returning it.  We attempt to
         # bulk-fetch rendered message dicts from remote cache using the
         # 'messages' list.
-        message_ids: list[int] = []
+        result_message_ids: list[int] = []
         user_message_flags: dict[int, list[str]] = {}
         if is_web_public_query:
             # For spectators, we treat all historical messages as read.
             for row in rows:
                 message_id = row[0]
-                message_ids.append(message_id)
+                result_message_ids.append(message_id)
                 user_message_flags[message_id] = ["read"]
         elif include_history:
             assert user_profile is not None
-            message_ids = [row[0] for row in rows]
+            result_message_ids = [row[0] for row in rows]
 
             # TODO: This could be done with an outer join instead of two queries
             um_rows = UserMessage.objects.filter(
-                user_profile=user_profile, message_id__in=message_ids
+                user_profile=user_profile, message_id__in=result_message_ids
             )
             user_message_flags = {um.message_id: um.flags_list() for um in um_rows}
 
-            for message_id in message_ids:
+            for message_id in result_message_ids:
                 if message_id not in user_message_flags:
                     user_message_flags[message_id] = ["read", "historical"]
         else:
@@ -252,38 +287,51 @@ def get_messages_backend(
                 message_id = row[0]
                 flags = row[1]
                 user_message_flags[message_id] = UserMessage.flags_list_for_flags(flags)
-                message_ids.append(message_id)
+                result_message_ids.append(message_id)
 
         search_fields: dict[int, dict[str, str]] = {}
         if is_search:
             for row in rows:
                 message_id = row[0]
-                (topic_name, rendered_content, content_matches, topic_matches) = row[-4:]
+                (escaped_topic_name, rendered_content, content_matches, topic_matches) = row[-4:]
                 search_fields[message_id] = get_search_fields(
-                    rendered_content, topic_name, content_matches, topic_matches
+                    rendered_content, escaped_topic_name, content_matches, topic_matches
                 )
 
         message_list = messages_for_ids(
-            message_ids=message_ids,
+            message_ids=result_message_ids,
             user_message_flags=user_message_flags,
             search_fields=search_fields,
             apply_markdown=apply_markdown,
             client_gravatar=client_gravatar,
-            allow_edit_history=realm.allow_edit_history,
+            allow_empty_topic_name=allow_empty_topic_name,
+            message_edit_history_visibility_policy=realm.message_edit_history_visibility_policy,
             user_profile=user_profile,
             realm=realm,
         )
 
-    ret = dict(
-        messages=message_list,
-        result="success",
-        msg="",
-        found_anchor=query_info.found_anchor,
-        found_oldest=query_info.found_oldest,
-        found_newest=query_info.found_newest,
-        history_limited=query_info.history_limited,
-        anchor=anchor,
-    )
+    if client_requested_message_ids is not None:
+        ret = dict(
+            messages=message_list,
+            result="success",
+            msg="",
+            history_limited=query_info.history_limited,
+            found_anchor=False,
+            found_oldest=False,
+            found_newest=False,
+        )
+    else:
+        ret = dict(
+            messages=message_list,
+            result="success",
+            msg="",
+            found_anchor=query_info.found_anchor,
+            found_oldest=query_info.found_oldest,
+            found_newest=query_info.found_newest,
+            history_limited=query_info.history_limited,
+            anchor=anchor,
+        )
+
     return json_success(request, data=ret)
 
 
@@ -299,49 +347,39 @@ def messages_in_narrow_backend(
     msg_ids = [message_id for message_id in msg_ids if message_id >= first_visible_message_id]
     # This query is limited to messages the user has access to because they
     # actually received them, as reflected in `zerver_usermessage`.
-    query = (
-        select(column("message_id", Integer))
-        .where(
-            and_(
-                column("user_profile_id", Integer) == literal(user_profile.id),
-                column("message_id", Integer).in_(msg_ids),
-            )
-        )
-        .select_from(
-            join(
-                table("zerver_usermessage"),
-                table("zerver_message"),
-                literal_column("zerver_usermessage.message_id", Integer)
-                == literal_column("zerver_message.id", Integer),
-            )
-        )
+    query, inner_msg_id_col = get_base_query_for_search(
+        user_profile.realm_id, user_profile, need_user_message=True
     )
+    query = query.where(column("message_id", Integer).in_(msg_ids))
 
-    inner_msg_id_col = column("message_id", Integer)
-    query, is_search = add_narrow_conditions(
+    cleaned_narrow = clean_narrow_for_message_fetch(narrow, user_profile.realm, user_profile)
+    query, is_search, _is_dm_narrow = add_narrow_conditions(
         user_profile=user_profile,
         inner_msg_id_col=inner_msg_id_col,
         query=query,
-        narrow=narrow,
+        narrow=cleaned_narrow,
         is_web_public_query=False,
         realm=user_profile.realm,
     )
 
     if not is_search:
         # `add_narrow_conditions` adds the following columns only if narrow has search operands.
-        query = query.add_columns(topic_column_sa(), column("rendered_content", Text))
+        query = query.add_columns(
+            func.escape_html(topic_column_sa(), type_=Text).label("escaped_topic_name"),
+            column("rendered_content", Text),
+        )
 
     search_fields = {}
     with get_sqlalchemy_connection() as sa_conn:
         for row in sa_conn.execute(query).mappings():
             message_id = row["message_id"]
-            topic_name: str = row[DB_TOPIC_NAME]
+            escaped_topic_name: str = row["escaped_topic_name"]
             rendered_content: str = row["rendered_content"]
             content_matches = row.get("content_matches", [])
             topic_matches = row.get("topic_matches", [])
             search_fields[str(message_id)] = get_search_fields(
                 rendered_content,
-                topic_name,
+                escaped_topic_name,
                 content_matches,
                 topic_matches,
             )

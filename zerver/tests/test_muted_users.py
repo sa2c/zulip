@@ -9,6 +9,7 @@ from zerver.lib.muted_users import get_mute_object, get_muting_users, get_user_m
 from zerver.lib.test_classes import ZulipTestCase
 from zerver.lib.timestamp import datetime_to_timestamp
 from zerver.models import RealmAuditLog, UserMessage, UserProfile
+from zerver.models.realm_audit_logs import AuditLogEventType
 
 
 class MutedUsersTests(ZulipTestCase):
@@ -111,7 +112,7 @@ class MutedUsersTests(ZulipTestCase):
         self.assertEqual(
             audit_log_entry,
             (
-                RealmAuditLog.USER_MUTED,
+                AuditLogEventType.USER_MUTED,
                 mute_time,
                 {"muted_user_id": cordelia.id},
             ),
@@ -171,7 +172,7 @@ class MutedUsersTests(ZulipTestCase):
         self.assertEqual(
             audit_log_entry,
             (
-                RealmAuditLog.USER_UNMUTED,
+                AuditLogEventType.USER_UNMUTED,
                 mute_time,
                 {"unmuted_user_id": cordelia.id},
             ),
@@ -207,11 +208,11 @@ class MutedUsersTests(ZulipTestCase):
         self.assertEqual(set(), cache_get(get_muting_users_cache_key(cordelia.id))[0])
 
     def assert_usermessage_read_flag(self, user: UserProfile, message: int, flag: bool) -> None:
-        usermesaage = UserMessage.objects.get(
+        usermessage = UserMessage.objects.get(
             user_profile=user,
             message=message,
         )
-        self.assertTrue(usermesaage.flags.read == flag)
+        self.assertTrue(usermessage.flags.read == flag)
 
     def test_new_messages_from_muted_user_marked_as_read(self) -> None:
         hamlet = self.example_user("hamlet")

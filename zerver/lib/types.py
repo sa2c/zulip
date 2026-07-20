@@ -2,7 +2,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import IntEnum
-from typing import Any, TypeAlias, TypeVar
+from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar
+
+if TYPE_CHECKING:
+    from zerver.models import Stream
 
 from django_stubs_ext import StrPromise
 from typing_extensions import NotRequired, TypedDict
@@ -25,6 +28,8 @@ class ProfileDataElementBase(TypedDict, total=False):
     hint: str
     display_in_profile_summary: bool
     required: bool
+    editable_by_user: bool
+    use_for_user_matching: bool
     field_data: str
     order: int
 
@@ -37,6 +42,12 @@ class ProfileDataElement(ProfileDataElementBase):
 class ProfileDataElementUpdateDict(TypedDict):
     id: int
     value: ProfileDataElementValue
+
+
+class UserProfileChangeDict(TypedDict):
+    field_name: str
+    old_value: str
+    new_value: str
 
 
 ProfileData: TypeAlias = list[ProfileDataElement]
@@ -66,9 +77,12 @@ class LinkifierDict(TypedDict):
     pattern: str
     url_template: str
     id: int
+    example_input: str | None
+    reverse_template: str | None
+    alternative_url_templates: list[str]
 
 
-class UnspecifiedValue:
+class Unset:
     """In most API endpoints, we use a default value of `None"` to encode
     parameters that the client did not pass, which is nicely Pythonic.
 
@@ -79,8 +93,11 @@ class UnspecifiedValue:
     We use this type as an explicit sentinel value for such endpoints.
 
     TODO: Can this be merged with the _NotSpecified class, which is
-    currently an internal implementation detail of the REQ class?
+    currently an internal implementation detail of the typed_endpoint?
     """
+
+
+UNSET = Unset()
 
 
 class EditHistoryEvent(TypedDict, total=False):
@@ -134,17 +151,41 @@ class UserTopicDict(TypedDict, total=False):
     visibility_policy: int
 
 
+class UserGroupMembersDict(TypedDict):
+    direct_members: list[int]
+    direct_subgroups: list[int]
+
+
+@dataclass
+class UserGroupMembersData:
+    direct_members: list[int]
+    direct_subgroups: list[int]
+
+
 # This next batch of types is for Stream/Subscription objects.
 class RawStreamDict(TypedDict):
     """Dictionary containing fields fetched from the Stream model that
     are needed to encode the stream for the API.
     """
 
+    can_add_subscribers_group_id: int
+    can_administer_channel_group_id: int
+    can_create_topic_group_id: int
+    can_delete_any_message_group_id: int
+    can_delete_own_message_group_id: int
+    can_move_messages_out_of_channel_group_id: int
+    can_move_messages_within_channel_group_id: int
+    can_send_message_group_id: int
     can_remove_subscribers_group_id: int
+    can_resolve_topics_group_id: int
+    can_subscribe_group_id: int
     creator_id: int | None
     date_created: datetime
+    deactivated: bool
     description: str
     first_message_id: int | None
+    folder_id: int | None
+    is_recently_active: bool
     history_public_to_subscribers: bool
     id: int
     invite_only: bool
@@ -153,6 +194,8 @@ class RawStreamDict(TypedDict):
     name: str
     rendered_description: str
     stream_post_policy: int
+    subscriber_count: int
+    topics_policy: str
 
 
 class RawSubscriptionDict(TypedDict):
@@ -180,7 +223,17 @@ class SubscriptionStreamDict(TypedDict):
     """
 
     audible_notifications: bool | None
-    can_remove_subscribers_group: int
+    can_add_subscribers_group: int | UserGroupMembersDict
+    can_administer_channel_group: int | UserGroupMembersDict
+    can_create_topic_group: int | UserGroupMembersDict
+    can_delete_any_message_group: int | UserGroupMembersDict
+    can_delete_own_message_group: int | UserGroupMembersDict
+    can_move_messages_out_of_channel_group: int | UserGroupMembersDict
+    can_move_messages_within_channel_group: int | UserGroupMembersDict
+    can_send_message_group: int | UserGroupMembersDict
+    can_remove_subscribers_group: int | UserGroupMembersDict
+    can_resolve_topics_group: int | UserGroupMembersDict
+    can_subscribe_group: int | UserGroupMembersDict
     color: str
     creator_id: int | None
     date_created: int
@@ -188,10 +241,13 @@ class SubscriptionStreamDict(TypedDict):
     desktop_notifications: bool | None
     email_notifications: bool | None
     first_message_id: int | None
+    folder_id: int | None
+    is_recently_active: bool
     history_public_to_subscribers: bool
     in_home_view: bool
     invite_only: bool
     is_announcement_only: bool
+    is_archived: bool
     is_muted: bool
     is_web_public: bool
     message_retention_days: int | None
@@ -202,16 +258,32 @@ class SubscriptionStreamDict(TypedDict):
     stream_id: int
     stream_post_policy: int
     stream_weekly_traffic: int | None
+    subscriber_count: int
     subscribers: NotRequired[list[int]]
+    partial_subscribers: NotRequired[list[int]]
+    topics_policy: str
     wildcard_mentions_notify: bool | None
 
 
 class NeverSubscribedStreamDict(TypedDict):
-    can_remove_subscribers_group: int
+    is_archived: bool
+    can_add_subscribers_group: int | UserGroupMembersDict
+    can_administer_channel_group: int | UserGroupMembersDict
+    can_create_topic_group: int | UserGroupMembersDict
+    can_delete_any_message_group: int | UserGroupMembersDict
+    can_delete_own_message_group: int | UserGroupMembersDict
+    can_move_messages_out_of_channel_group: int | UserGroupMembersDict
+    can_move_messages_within_channel_group: int | UserGroupMembersDict
+    can_send_message_group: int | UserGroupMembersDict
+    can_remove_subscribers_group: int | UserGroupMembersDict
+    can_resolve_topics_group: int | UserGroupMembersDict
+    can_subscribe_group: int | UserGroupMembersDict
     creator_id: int | None
     date_created: int
     description: str
     first_message_id: int | None
+    folder_id: int | None
+    is_recently_active: bool
     history_public_to_subscribers: bool
     invite_only: bool
     is_announcement_only: bool
@@ -222,7 +294,10 @@ class NeverSubscribedStreamDict(TypedDict):
     stream_id: int
     stream_post_policy: int
     stream_weekly_traffic: int | None
+    subscriber_count: int
     subscribers: NotRequired[list[int]]
+    partial_subscribers: NotRequired[list[int]]
+    topics_policy: str
 
 
 class DefaultStreamDict(TypedDict):
@@ -231,19 +306,34 @@ class DefaultStreamDict(TypedDict):
     with few exceptions and possible additional fields.
     """
 
-    can_remove_subscribers_group: int
+    is_archived: bool
+    can_add_subscribers_group: int | UserGroupMembersDict
+    can_administer_channel_group: int | UserGroupMembersDict
+    can_create_topic_group: int | UserGroupMembersDict
+    can_delete_any_message_group: int | UserGroupMembersDict
+    can_delete_own_message_group: int | UserGroupMembersDict
+    can_move_messages_out_of_channel_group: int | UserGroupMembersDict
+    can_move_messages_within_channel_group: int | UserGroupMembersDict
+    can_send_message_group: int | UserGroupMembersDict
+    can_remove_subscribers_group: int | UserGroupMembersDict
+    can_resolve_topics_group: int | UserGroupMembersDict
+    can_subscribe_group: int | UserGroupMembersDict
     creator_id: int | None
     date_created: int
     description: str
     first_message_id: int | None
+    folder_id: int | None
+    is_recently_active: bool
     history_public_to_subscribers: bool
     invite_only: bool
     is_web_public: bool
     message_retention_days: int | None
     name: str
     rendered_description: str
-    stream_id: int  # `stream_id`` represents `id` of the `Stream` object in `API_FIELDS`
+    stream_id: int  # `stream_id` represents `id` of the `Stream` object in `API_FIELDS`
     stream_post_policy: int
+    subscriber_count: int
+    topics_policy: str
     # Computed fields not specified in `Stream.API_FIELDS`
     is_announcement_only: bool
     is_default: NotRequired[bool]
@@ -287,13 +377,11 @@ class RealmPlaygroundDict(TypedDict):
 
 @dataclass
 class GroupPermissionSetting:
-    require_system_group: bool
-    allow_internet_group: bool
-    allow_owners_group: bool
     allow_nobody_group: bool
     allow_everyone_group: bool
     default_group_name: str
-    id_field_name: str
+    require_system_group: bool = False
+    allow_internet_group: bool = False
     default_for_system_groups: str | None = None
     allowed_system_groups: list[str] = field(default_factory=list)
 
@@ -313,7 +401,6 @@ class RawUserDict(TypedDict):
     avatar_version: int
     is_active: bool
     role: int
-    is_billing_admin: bool
     is_bot: bool
     timezone: str
     date_joined: datetime
@@ -322,6 +409,8 @@ class RawUserDict(TypedDict):
     bot_type: int | None
     long_term_idle: bool
     email_address_visibility: int
+    is_imported_stub: bool
+    is_deleted: bool
 
 
 class RemoteRealmDictValue(TypedDict):
@@ -334,3 +423,34 @@ class AnalyticsDataUploadLevel(IntEnum):
     BASIC = 1
     BILLING = 2
     ALL = 3
+
+
+@dataclass
+class StreamMessageEditRequest:
+    is_content_edited: bool
+    is_topic_edited: bool
+    is_stream_edited: bool
+    is_message_moved: bool
+    is_nontrivial_move: bool
+    topic_resolved: bool
+    topic_unresolved: bool
+    content: str
+    target_topic_name: str
+    target_stream: "Stream"
+    orig_content: str
+    orig_topic_name: str
+    orig_stream: "Stream"
+    propagate_mode: str
+
+
+@dataclass
+class DirectMessageEditRequest:
+    content: str
+    orig_content: str
+    is_content_edited: bool
+
+
+@dataclass(frozen=True)
+class Invitee:
+    email: str
+    full_name: str = ""

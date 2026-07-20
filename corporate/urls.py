@@ -4,6 +4,7 @@ from django.conf.urls import include
 from django.urls import path
 from django.views.generic import RedirectView, TemplateView
 
+from corporate.views.audit_logs import get_remote_server_logs
 from corporate.views.billing_page import (
     billing_page,
     remote_realm_billing_page,
@@ -25,6 +26,7 @@ from corporate.views.installation_activity import (
     get_installation_activity,
     get_integrations_activity,
 )
+from corporate.views.plan_activity import get_plan_ledger
 from corporate.views.portico import (
     app_download_link_redirect,
     apps_view,
@@ -68,7 +70,13 @@ from corporate.views.sponsorship import (
     sponsorship,
     sponsorship_page,
 )
-from corporate.views.support import demo_request, remote_servers_support, support, support_request
+from corporate.views.support import (
+    demo_request,
+    remote_servers_support,
+    sales_support_request,
+    support,
+    support_request,
+)
 from corporate.views.upgrade import (
     remote_realm_upgrade,
     remote_realm_upgrade_page,
@@ -83,9 +91,6 @@ from zerver.lib.rest import rest_path
 from zerver.lib.url_redirects import LANDING_PAGE_REDIRECTS
 
 i18n_urlpatterns: Any = [
-    # Zephyr/MIT
-    path("zephyr/", TemplateView.as_view(template_name="corporate/zephyr.html")),
-    path("zephyr-mirror/", TemplateView.as_view(template_name="corporate/zephyr-mirror.html")),
     path("jobs/", TemplateView.as_view(template_name="corporate/jobs.html")),
     # Billing
     path("billing/", billing_page, name="billing_page"),
@@ -95,6 +100,7 @@ i18n_urlpatterns: Any = [
     path("upgrade/", upgrade_page, name="upgrade_page"),
     path("support/", support_request),
     path("request-demo/", demo_request),
+    path("contact-sales/", sales_support_request),
     path("billing/event_status/", event_status_page, name="event_status_page"),
     path("stripe/webhook/", stripe_webhook, name="stripe_webhook"),
     # Server admin (user_profile.is_staff) visible stats pages
@@ -105,6 +111,8 @@ i18n_urlpatterns: Any = [
     path("user_activity/<user_profile_id>/", get_user_activity),
     path("activity/remote", get_remote_server_activity),
     path("activity/remote/support", remote_servers_support, name="remote_servers_support"),
+    path("activity/remote/logs/server/<uuid>/", get_remote_server_logs),
+    path("activity/plan_ledger/<plan_id>/", get_plan_ledger),
 ]
 
 v1_api_and_json_patterns = [
@@ -136,10 +144,11 @@ landing_page_urls = [
     path("team/", team_view),
     path("history/", landing_view, {"template_name": "corporate/history.html"}),
     path("values/", landing_view, {"template_name": "corporate/values.html"}),
+    path("partners/", landing_view, {"template_name": "corporate/partners.html"}),
     path("why-zulip/", landing_view, {"template_name": "corporate/why-zulip.html"}),
     path("self-hosting/", landing_view, {"template_name": "corporate/self-hosting.html"}),
+    path("zulip-cloud/", landing_view, {"template_name": "corporate/zulip-cloud.html"}),
     path("security/", landing_view, {"template_name": "corporate/security.html"}),
-    path("try-zulip/", landing_view, {"template_name": "corporate/try-zulip.html"}),
     # /for pages
     path("use-cases/", landing_view, {"template_name": "corporate/for/use-cases.html"}),
     path(
@@ -152,6 +161,8 @@ landing_page_urls = [
     path("for/open-source/", landing_view, {"template_name": "corporate/for/open-source.html"}),
     path("for/research/", landing_view, {"template_name": "corporate/for/research.html"}),
     path("for/business/", landing_view, {"template_name": "corporate/for/business.html"}),
+    # /role pages
+    path("role/engineers/", landing_view, {"template_name": "corporate/role/engineers.html"}),
     # case-studies
     path(
         "case-studies/idrift/",
@@ -184,6 +195,11 @@ landing_page_urls = [
         {"template_name": "corporate/case-studies/tum-case-study.html"},
     ),
     path(
+        "case-studies/university-of-cordoba/",
+        landing_view,
+        {"template_name": "corporate/case-studies/university-of-cordoba-case-study.html"},
+    ),
+    path(
         "case-studies/ucsd/",
         landing_view,
         {"template_name": "corporate/case-studies/ucsd-case-study.html"},
@@ -207,6 +223,21 @@ landing_page_urls = [
         "case-studies/recurse-center/",
         landing_view,
         {"template_name": "corporate/case-studies/recurse-center-case-study.html"},
+    ),
+    path(
+        "case-studies/rush-stack/",
+        landing_view,
+        {"template_name": "corporate/case-studies/rush-stack-case-study.html"},
+    ),
+    path(
+        "case-studies/windborne/",
+        landing_view,
+        {"template_name": "corporate/case-studies/windborne-case-study.html"},
+    ),
+    path(
+        "case-studies/mixxx/",
+        landing_view,
+        {"template_name": "corporate/case-studies/mixxx-case-study.html"},
     ),
     path("communities/", communities_view),
 ]

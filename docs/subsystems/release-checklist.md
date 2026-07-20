@@ -12,17 +12,17 @@ preparing a new release.
   - Upgrade all puppet dependencies in `puppet/deps.yaml`
   - Upgrade all puppet-installed dependencies (e.g., Smokescreen, go,
     etc) in `puppet/zulip/manifests/common.pp`
-  - [Upload strings to
-    Transifex](../translating/internationalization.md#translation-process)
-    using `push-translations`. Post a Transifex
-    [announcement](https://app.transifex.com/zulip/communication/?q=project%3Azulip)
-    notifying translators that we're approaching a release.
+  - [Post a message to
+    Weblate](https://hosted.weblate.org/projects/zulip/#announcement)
+    inviting translators to translate new strings.
   - Merge draft updates to the [changelog](../overview/changelog.md)
     with changes since the last release. While doing so, take notes on
     things that might need follow-up work or documentation before we
     can happily advertise them in a release blog post.
-  - Inspect all `TODO/compatibility` comments for whether we can
-    remove any backwards-compatibility code in this release.
+  - Prepare draft updates to the [changelog](../overview/changelog.md)
+    with changes since the last release. The `/write-changelog` experimental
+    Claude skill may be a better starting point than the original
+    `git log --stat 12.x..upstream/main` marathon workflow.
 - Create a burn-down list of issues that need to be fixed before we can
   release, and make sure all of them are being worked on.
 - Draft the release blog post (a.k.a. the release notes) in Paper. In
@@ -32,12 +32,8 @@ preparing a new release.
 ### Final release preparation
 
 - Update the Paper blog post draft with any new commits.
-- Download updated translation strings from Transifex and commit
-  them. Use the `--branch 6.x` parameter for maintenance releases.
-- Use `build-release-tarball` to generate a pre-release tarball.
-- Test the new tarball extensively, both new install and upgrade from last
-  release, on Ubuntu 22.04.
-- Repeat until release is ready.
+- Merge updated translations from Weblate (using the appropriate
+  branch for the release).
 - Send around the Paper blog post draft for review.
 - Move the blog post draft to Astro:
   - Use "··· > Export > Markdown" to get a pretty good Markdown
@@ -76,7 +72,7 @@ preparing a new release.
     - Update the `tag` in `kubernetes/chart/zulip/values.yaml`
     - Update the docs by running `helm-docs`
     - Update the `image` in `kubernetes/manual/zulip-rc.yml`
-  - Build the image: `docker build . -t zulip/docker-zulip:4.11-0 --no-cache`
+  - Build the image: `docker build --pull . -t zulip/docker-zulip:4.11-0 --no-cache`
   - Also tag it with `latest`: `docker build . -t zulip/docker-zulip:latest`
   - Push those tags: `docker push zulip/docker-zulip:4.11-0; docker push zulip/docker-zulip:latest`
   - Push the commits to `main`.
@@ -85,7 +81,7 @@ preparing a new release.
   - Email to [zulip-announce](https://groups.google.com/g/zulip-announce)
   - Email to [zulip-blog-announce](https://groups.google.com/a/zulip.com/g/zulip-blog-announce)
   - Message in [#announce](https://chat.zulip.org/#narrow/channel/1-announce)
-  - Tweet from [@zulip](https://twitter.com/zulip).
+  - Post from [@zulip.bsky.social](https://bsky.app/profile/zulip.bsky.social).
   - Toot from [fosstodon.org/@zulip](https://fosstodon.org/@zulip)
 
 ### Post-release
@@ -103,16 +99,21 @@ preparing a new release.
     to both zulip.git and zulip-internal.git to get a correct version
     number for future Cloud deployments.
   - Add the new release to `.github/ISSUE_TEMPLATE/2_bug_report.md`.
-  - Consider removing a few old releases from ReadTheDocs; we keep about
-    two years of back-versions.
-  - Update Transifex to add the new `4.x` style release branch
-    resources and archive the previous release branch's resources with
-    the "Translations can't translate this resource" setting.
+  - Consider removing a few old releases from the issue template and
+    ReadTheDocs; we keep about two years of back-versions.
+  - Update Weblate to add a component on the release branch for
+    Django; then add a parallel Frontend component by using "Duplicate
+    this component" on the Django release branch component.
+  - In Weblate, remove the previous stable components.
   - Add a new CI production upgrade target:
-    - Build a docker image: `cd tools/ci && docker build . -f Dockerfile.prod --build-arg=BASE_IMAGE=zulip/ci:bookworm --build-arg=VERSION=7.0 --tag=zulip/ci:bookworm-7.0 && docker push zulip/ci:bookworm-7.0`
+    - Build a docker image: `cd tools/ci && docker build --pull . -f Dockerfile.prod --build-arg=BASE_IMAGE=zulip/ci:bookworm --build-arg=VERSION=7.0 --tag=zulip/ci:bookworm-7.0 && docker push zulip/ci:bookworm-7.0`
     - Add a new line to the `production_upgrade` matrix in
       `.github/workflows/production-suite.yml`.
   - Update /history page in `templates/corporate/history.md`.
+  - Inspect all `TODO/compatibility` comments for whether we can
+    remove any backwards-compatibility code following this release.
+  - Review possible improvements to API bindings to better match the
+    defaults and features of the new release.
 - _Minor releases only (e.g., 3.2):_
   - On the release branch, update `ZULIP_VERSION` to the present
     release with a `+git` suffix, e.g., `3.2+git`.

@@ -11,8 +11,8 @@ from zerver.lib.validator import WildValue, check_bool, check_int, check_string
 from zerver.lib.webhooks.common import (
     OptionalUserSpecifiedTopicStr,
     check_send_webhook_message,
-    get_http_headers_from_filename,
-    validate_extract_webhook_http_header,
+    default_fixture_to_headers,
+    get_event_header,
 )
 from zerver.lib.webhooks.git import (
     TOPIC_WITH_BRANCH_TEMPLATE,
@@ -23,10 +23,11 @@ from zerver.lib.webhooks.git import (
     get_pull_request_event_message,
     get_push_commits_event_message,
     get_release_event_message,
+    is_branch_name_notifiable,
 )
 from zerver.models import UserProfile
 
-fixture_to_headers = get_http_headers_from_filename("HTTP_X_GOGS_EVENT")
+fixture_to_headers = default_fixture_to_headers("HTTP_X_GOGS_EVENT")
 
 
 def get_issue_url(repo_url: str, issue_nr: int) -> str:
@@ -86,6 +87,11 @@ def format_pull_request_event(payload: WildValue, include_title: bool = False) -
         target_branch = payload["pull_request"]["head_branch"].tame(check_string)
         base_branch = payload["pull_request"]["base_branch"].tame(check_string)
     title = payload["pull_request"]["title"].tame(check_string) if include_title else None
+    stringified_assignee = (
+        payload["pull_request"]["assignee"]["login"].tame(check_string)
+        if payload["action"] and payload["pull_request"]["assignee"]
+        else None
+    )
 
     return get_pull_request_event_message(
         user_name=user_name,
@@ -95,20 +101,24 @@ def format_pull_request_event(payload: WildValue, include_title: bool = False) -
         target_branch=target_branch,
         base_branch=base_branch,
         title=title,
+        assignee_updated=stringified_assignee,
     )
 
 
 def format_issues_event(payload: WildValue, include_title: bool = False) -> str:
     issue_nr = payload["issue"]["number"].tame(check_int)
     assignee = payload["issue"]["assignee"]
+    stringified_assignee = assignee["login"].tame(check_string) if assignee else None
+    action = payload["action"].tame(check_string)
     return get_issue_event_message(
         user_name=payload["sender"]["login"].tame(check_string),
         action=payload["action"].tame(check_string),
         url=get_issue_url(payload["repository"]["html_url"].tame(check_string), issue_nr),
         number=issue_nr,
         message=payload["issue"]["body"].tame(check_string),
-        assignee=assignee["login"].tame(check_string) if assignee else None,
+        assignee=stringified_assignee,
         title=payload["issue"]["title"].tame(check_string) if include_title else None,
+        assignee_updated=stringified_assignee if action == "assigned" else None,
     )
 
 
@@ -187,10 +197,10 @@ def gogs_webhook_main(
     user_specified_topic: str | None,
 ) -> HttpResponse:
     repo = payload["repository"]["name"].tame(check_string)
-    event = validate_extract_webhook_http_header(request, http_header_name, integration_name)
+    event = get_event_header(request, http_header_name, integration_name)
     if event == "push":
         branch = payload["ref"].tame(check_string).replace("refs/heads/", "")
-        if branches is not None and branch not in branches.split(","):
+        if not is_branch_name_notifiable(branch, branches):
             return json_success(request)
         body = format_push_event(payload)
         topic_name = TOPIC_WITH_BRANCH_TEMPLATE.format(

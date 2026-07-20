@@ -4,36 +4,41 @@
 import autosize from "autosize";
 import $ from "jquery";
 import _ from "lodash";
+import assert from "minimalistic-assert";
 import {
     insertTextIntoField,
     replaceFieldText,
     setFieldText,
     wrapFieldSelection,
 } from "text-field-edit";
-import {z} from "zod";
+import type Template from "uri-template-lite";
+import * as z from "zod/mini";
 
-import type {Typeahead} from "./bootstrap_typeahead";
-import * as bulleted_numbered_list_util from "./bulleted_numbered_list_util";
-import * as channel from "./channel";
-import * as common from "./common";
-import type {TypeaheadSuggestion} from "./composebox_typeahead";
-import {$t, $t_html} from "./i18n";
-import * as loading from "./loading";
-import * as markdown from "./markdown";
-import * as people from "./people";
-import * as popover_menus from "./popover_menus";
-import {postprocess_content} from "./postprocess_content";
-import * as rendered_markdown from "./rendered_markdown";
-import * as rtl from "./rtl";
-import {current_user} from "./state_data";
-import * as stream_data from "./stream_data";
-import * as user_status from "./user_status";
-import * as util from "./util";
+import type {Typeahead} from "./bootstrap_typeahead.ts";
+import * as bulleted_numbered_list_util from "./bulleted_numbered_list_util.ts";
+import * as channel from "./channel.ts";
+import * as common from "./common.ts";
+import * as compose_state from "./compose_state.ts";
+import type {TypeaheadSuggestion} from "./composebox_typeahead.ts";
+import {$t, $t_html} from "./i18n.ts";
+import * as linkifiers from "./linkifiers.ts";
+import * as loading from "./loading.ts";
+import * as markdown from "./markdown.ts";
+import {message_render_response_schema} from "./message_store.ts";
+import * as people from "./people.ts";
+import {postprocess_content} from "./postprocess_content.ts";
+import * as rendered_markdown from "./rendered_markdown.ts";
+import * as rtl from "./rtl.ts";
+import {current_user} from "./state_data.ts";
+import * as stream_data from "./stream_data.ts";
+import * as user_status from "./user_status.ts";
+import * as util from "./util.ts";
 
 export const DEFAULT_COMPOSE_PLACEHOLDER = $t({defaultMessage: "Compose your message here"});
 
 export type ComposeTriggeredOptions = {
     trigger: string;
+    defer_focus?: boolean | undefined;
 } & (
     | {
           message_type: "stream";
@@ -42,7 +47,7 @@ export type ComposeTriggeredOptions = {
       }
     | {
           message_type: "private";
-          private_message_recipient: string;
+          private_message_recipient_ids: number[];
       }
 );
 export type ComposePlaceholderOptions =
@@ -63,13 +68,12 @@ type SelectedLinesSections = {
     after_lines: string;
 };
 
-const message_render_response_schema = z.object({
-    msg: z.string(),
-    result: z.string(),
-    rendered: z.string(),
-});
-
 export let compose_spinner_visible = false;
+
+export function rewire_compose_spinner_visible(value: typeof compose_spinner_visible): void {
+    compose_spinner_visible = value;
+}
+
 export let shift_pressed = false; // true or false
 export let code_formatting_button_triggered = false; // true or false
 export let compose_textarea_typeahead: Typeahead<TypeaheadSuggestion> | undefined;
@@ -102,41 +106,114 @@ export function is_full_size(): boolean {
     return full_size_status;
 }
 
-export function autosize_textarea($textarea: JQuery<HTMLTextAreaElement>): void {
+export let autosize_textarea = ($textarea: JQuery<HTMLTextAreaElement>): void => {
     // Since this supports both compose and file upload, one must pass
     // in the text area to autosize.
     if (!is_expanded()) {
         autosize.update($textarea);
     }
+};
+
+export function rewire_autosize_textarea(value: typeof autosize_textarea): void {
+    autosize_textarea = value;
 }
 
-export function insert_and_scroll_into_view(
+export let insert_and_scroll_into_view = (
     content: string,
     $textarea: JQuery<HTMLTextAreaElement>,
     replace_all = false,
-): void {
-    if (replace_all) {
-        setFieldText($textarea[0]!, content);
+    replace_all_without_undo_support = false,
+): void => {
+    if (replace_all_without_undo_support) {
+        // setFieldText is very slow and noticeable when inserting 10k+
+        // characters of text like from a drafted response,
+        // but we use it since we want to support `undo`. If we don't want
+        // to support `undo`, we can use a faster method.
+        $textarea.val(content);
+    } else if (replace_all) {
+        setFieldText(util.the($textarea), content);
     } else {
-        insertTextIntoField($textarea[0]!, content);
+        insertTextIntoField(util.the($textarea), content);
     }
     // Blurring and refocusing ensures the cursor / selection is in view
     // in chromium browsers.
     $textarea.trigger("blur");
     $textarea.trigger("focus");
     autosize_textarea($textarea);
+};
+
+export function rewire_insert_and_scroll_into_view(
+    value: typeof insert_and_scroll_into_view,
+): void {
+    insert_and_scroll_into_view = value;
+}
+
+export function maybe_show_scrolling_formatting_buttons(container_selector: string): void {
+    const button_container = document.querySelector(container_selector);
+    const button_bar = document.querySelector(
+        `${container_selector} .compose-control-buttons-container`,
+    );
+
+    if (!button_container || !button_bar) {
+        return;
+    }
+
+    const button_container_width = button_container?.clientWidth;
+    const button_bar_width = button_bar?.scrollWidth;
+    const button_bar_scroll_left = button_bar?.scrollLeft;
+
+    const button_bar_max_left_scroll = button_bar_width - button_container_width;
+
+    assert(
+        typeof button_container_width === "number" &&
+            typeof button_bar_width === "number" &&
+            typeof button_bar_scroll_left === "number",
+    );
+
+    // Set these values as data attributes for ready access by
+    // other scrolling logic
+    button_container.setAttribute("data-button-container-width", button_container_width.toString());
+    button_container.setAttribute("data-button-bar-width", button_bar_width.toString());
+    button_container.setAttribute(
+        "data-button-bar-max-left-scroll",
+        button_bar_max_left_scroll.toString(),
+    );
+
+    button_container.classList.remove("can-scroll-forward", "can-scroll-backward");
+
+    if (button_container_width < button_bar_width) {
+        // It's possible that the buttons may be scrolled prior
+        // to the viewport being resized
+        if (button_bar_scroll_left < button_bar_max_left_scroll) {
+            button_container?.classList.add("can-scroll-forward");
+        }
+
+        if (button_bar_scroll_left > 0) {
+            button_container?.classList.add("can-scroll-backward");
+        }
+    }
 }
 
 function get_focus_area(opts: ComposeTriggeredOptions): string {
     // Set focus to "Topic" when narrowed to a stream+topic
     // and "Start new conversation" button clicked.
-    if (opts.message_type === "stream" && opts.stream_id && !opts.topic) {
+    if (
+        opts.message_type === "stream" &&
+        opts.stream_id &&
+        !opts.topic &&
+        !stream_data.can_use_empty_topic(opts.stream_id)
+    ) {
         return "input#stream_message_recipient_topic";
     } else if (
         (opts.message_type === "stream" && opts.stream_id !== undefined) ||
-        (opts.message_type === "private" && opts.private_message_recipient)
+        (opts.message_type === "private" && opts.private_message_recipient_ids.length > 0)
     ) {
-        if (opts.trigger === "clear topic button") {
+        if (
+            opts.trigger === "clear topic button" ||
+            opts.trigger === "compose_hotkey" ||
+            opts.trigger === "inbox_nofocus" ||
+            opts.trigger === "zoomed new topic"
+        ) {
             return "input#stream_message_recipient_topic";
         }
         return "textarea#compose-textarea";
@@ -161,7 +238,7 @@ export function set_focus(opts: ComposeTriggeredOptions): void {
     }
 }
 
-export function smart_insert_inline($textarea: JQuery<HTMLTextAreaElement>, syntax: string): void {
+export let smart_insert_inline = ($textarea: JQuery<HTMLTextAreaElement>, syntax: string): void => {
     function is_space(c: string | undefined): boolean {
         return c === " " || c === "\t" || c === "\n";
     }
@@ -193,6 +270,10 @@ export function smart_insert_inline($textarea: JQuery<HTMLTextAreaElement>, synt
     }
 
     insert_and_scroll_into_view(syntax, $textarea);
+};
+
+export function rewire_smart_insert_inline(value: typeof smart_insert_inline): void {
+    smart_insert_inline = value;
 }
 
 export function smart_insert_block(
@@ -245,12 +326,12 @@ export function smart_insert_block(
     insert_and_scroll_into_view(syntax, $textarea);
 }
 
-export function insert_syntax_and_focus(
+export let insert_syntax_and_focus = (
     syntax: string,
     $textarea = $<HTMLTextAreaElement>("textarea#compose-textarea"),
     mode = "inline",
     padding_newlines?: number,
-): void {
+): void => {
     // Generic helper for inserting syntax into the main compose box
     // where the cursor was and focusing the area.  Mostly a thin
     // wrapper around smart_insert_inline and smart_inline_block.
@@ -270,13 +351,18 @@ export function insert_syntax_and_focus(
     } else if (mode === "block") {
         smart_insert_block($textarea, syntax, padding_newlines);
     }
+};
+
+export function rewire_insert_syntax_and_focus(value: typeof insert_syntax_and_focus): void {
+    insert_syntax_and_focus = value;
 }
 
-export function replace_syntax(
+export let replace_syntax = (
     old_syntax: string,
     new_syntax: string,
     $textarea = $<HTMLTextAreaElement>("textarea#compose-textarea"),
-): boolean {
+    ignore_caret = false,
+): boolean => {
     // The following couple lines are needed to later restore the initial
     // logical position of the cursor after the replacement
     const prev_caret = $textarea.caret();
@@ -293,8 +379,16 @@ export function replace_syntax(
     // for details.
 
     const old_text = $textarea.val();
-    replaceFieldText($textarea[0]!, old_syntax, () => new_syntax, "after-replacement");
+    replaceFieldText(util.the($textarea), old_syntax, () => new_syntax, "after-replacement");
     const new_text = $textarea.val();
+    const has_changed = old_text !== new_text;
+
+    // If the caller wants to ignore the caret position, we return early.
+    // This is useful e.g. when we are replacing content without affecting
+    // which element has focus.
+    if (ignore_caret) {
+        return has_changed;
+    }
 
     // When replacing content in a textarea, we need to move the cursor
     // to preserve its logical position if and only if the content we
@@ -314,7 +408,11 @@ export function replace_syntax(
     }
 
     // Return if anything was actually replaced.
-    return old_text !== new_text;
+    return has_changed;
+};
+
+export function rewire_replace_syntax(value: typeof replace_syntax): void {
+    replace_syntax = value;
 }
 
 export function compute_placeholder_text(opts: ComposePlaceholderOptions): string {
@@ -333,16 +431,32 @@ export function compute_placeholder_text(opts: ComposePlaceholderOptions): strin
             }
         }
 
-        if (stream_name && opts.topic) {
+        // The following block of code will do nothing if the channel is
+        // not selected as the placeholder in that case will be "Compose your message here".
+        let topic_display_name: string | undefined;
+        if (opts.topic !== "") {
+            topic_display_name = opts.topic;
+        } else if (
+            stream_data.can_use_empty_topic(opts.stream_id) &&
+            !$("input#stream_message_recipient_topic").is(":focus")
+        ) {
+            topic_display_name = util.get_final_topic_display_name(opts.topic);
+        }
+
+        if (stream_name && topic_display_name !== undefined) {
             return $t(
                 {defaultMessage: "Message #{channel_name} > {topic_name}"},
-                {channel_name: stream_name, topic_name: opts.topic},
+                {channel_name: stream_name, topic_name: topic_display_name},
             );
         } else if (stream_name) {
             return $t({defaultMessage: "Message #{channel_name}"}, {channel_name: stream_name});
         }
     } else if (opts.direct_message_user_ids.length > 0) {
-        const users = people.get_users_from_ids(opts.direct_message_user_ids);
+        const user_ids = opts.direct_message_user_ids;
+        if (people.is_direct_message_conversation_with_self(user_ids)) {
+            return $t({defaultMessage: "Write yourself a note"});
+        }
+        const users = people.get_users_from_ids(user_ids);
         const recipient_parts = users.map((user) => {
             if (people.should_add_guest_user_indicator(user.user_id)) {
                 return $t({defaultMessage: "{name} (guest)"}, {name: user.full_name});
@@ -367,7 +481,7 @@ export function compute_placeholder_text(opts: ComposePlaceholderOptions): strin
     return DEFAULT_COMPOSE_PLACEHOLDER;
 }
 
-export function set_compose_box_top(set_top: boolean): void {
+export let set_compose_box_top = (set_top: boolean): void => {
     if (set_top) {
         // As `#compose` has `position: fixed` property, we cannot
         // make the compose-box to attain the correct height just by
@@ -379,6 +493,10 @@ export function set_compose_box_top(set_top: boolean): void {
     } else {
         $("#compose").css("top", "");
     }
+};
+
+export function rewire_set_compose_box_top(value: typeof set_compose_box_top): void {
+    set_compose_box_top = value;
 }
 
 export function make_compose_box_full_size(): void {
@@ -428,9 +546,42 @@ export function make_compose_box_original_size(): void {
 
     // Again initialise the compose textarea as it was destroyed
     // when compose box was made full screen
-    autosize($("textarea#compose-textarea"));
+    const $compose_textarea = $<HTMLTextAreaElement>("textarea#compose-textarea");
+    autosize($compose_textarea);
 
-    $("textarea#compose-textarea").trigger("focus");
+    // If the preview area is open, reset the min-height for it to
+    // ensure a smooth back-and-forth for toggling preview mode.
+    const $preview_message_area = $("#compose .preview_message_area");
+    if ($preview_message_area.length > 0) {
+        const edit_height = $compose_textarea.height();
+        $preview_message_area.css({"min-height": edit_height + "px"});
+    }
+    $compose_textarea.trigger("focus");
+}
+
+export function handle_scrolling_formatting_buttons(event: JQuery.ScrollEvent): void {
+    event.stopPropagation();
+    const $button_bar = $(event.currentTarget);
+    const $button_container = $button_bar.closest(".compose-scrolling-buttons-container");
+    const button_bar_max_left_scroll = Number(
+        $button_container.attr("data-button-bar-max-left-scroll"),
+    );
+    const button_bar_left_scroll = $button_bar.scrollLeft();
+
+    // If we're within 4px of the start or end of the formatting buttons,
+    // go ahead and hide the respective scrolling button
+    const hide_scroll_button_threshold_px = 4;
+
+    $button_container.addClass("can-scroll-forward can-scroll-backward");
+
+    assert(typeof button_bar_left_scroll === "number");
+
+    if (button_bar_left_scroll >= button_bar_max_left_scroll - hide_scroll_button_threshold_px) {
+        $button_container.removeClass("can-scroll-forward");
+    }
+    if (button_bar_left_scroll <= hide_scroll_button_threshold_px) {
+        $button_container.removeClass("can-scroll-backward");
+    }
 }
 
 export function handle_keydown(
@@ -452,6 +603,8 @@ export function handle_keydown(
         type = "italic";
     } else if (key === "l" && event.shiftKey) {
         type = "link";
+    } else if (key === "c" && event.shiftKey) {
+        type = "code";
     }
 
     // detect Cmd and Ctrl key
@@ -465,7 +618,7 @@ export function handle_keydown(
 }
 
 export function handle_keyup(
-    _event: JQuery.KeyboardEventBase,
+    _event: JQuery.KeyboardEventBase | null,
     $textarea: JQuery<HTMLTextAreaElement>,
 ): void {
     if (_event?.key === "Shift") {
@@ -473,6 +626,46 @@ export function handle_keyup(
     }
     // Set the rtl class if the text has an rtl direction, remove it otherwise
     rtl.set_rtl_class_for_textarea($textarea);
+}
+
+/**
+ * True if the cursor in `$textarea` for the current line sits between an opening run
+ * of backticks (`, ```, ...) and its still‑missing matching closer
+ * where the cursor is placed.
+ */
+export function cursor_inside_inline_code_span($textarea: JQuery<HTMLTextAreaElement>): boolean {
+    const text_area_element = $textarea[0];
+    if (!text_area_element) {
+        return false;
+    }
+    // jQuery.val() can be string | number | string[] | undefined.
+    const val = $textarea.val();
+    assert(typeof val === "string");
+    const caret = text_area_element.selectionStart;
+
+    const last_newline = val.lastIndexOf("\n", caret - 1);
+    const line_start = last_newline === -1 ? 0 : last_newline + 1;
+    const current_line_prefix = val.slice(line_start, caret);
+
+    let open_backtick_count = 0;
+    for (let i = 0; i < current_line_prefix.length; i += 1) {
+        if (current_line_prefix[i] === "`") {
+            let consecutive_count = 1;
+            while (i + 1 < current_line_prefix.length && current_line_prefix[i + 1] === "`") {
+                consecutive_count += 1;
+                i += 1;
+            }
+
+            // A code span can be opened with any number of consecutive backticks,
+            // and can only be closed with the same number of consecutive backticks.
+            if (open_backtick_count === 0) {
+                open_backtick_count = consecutive_count;
+            } else if (consecutive_count === open_backtick_count) {
+                open_backtick_count = 0;
+            }
+        }
+    }
+    return open_backtick_count > 0;
 }
 
 export function cursor_inside_code_block($textarea: JQuery<HTMLTextAreaElement>): boolean {
@@ -497,11 +690,125 @@ export function position_inside_code_block(content: string, position: number): b
     return [...code_blocks].some((code_block) => code_block?.textContent?.includes(unique_insert));
 }
 
-export function format_text(
+// A function with the same name implements this on the Python side.
+// Please replicate any changes here to that function as well.
+function expand_reverse_template(
+    reverse_template: string,
+    variables: Record<string, string>,
+): string {
+    const output: string[] = [];
+    let index = 0;
+    while (index < reverse_template.length) {
+        if (reverse_template.startsWith("{{", index)) {
+            output.push("{");
+            index += 2;
+        } else if (reverse_template.startsWith("}}", index)) {
+            output.push("}");
+            index += 2;
+        } else if (reverse_template[index] === "{") {
+            const end_index = reverse_template.indexOf("}", index + 1);
+            // This should not fail with a valid reverse_template.
+            assert(end_index !== -1);
+
+            const name = reverse_template.slice(index + 1, end_index);
+            // This should not fail with a valid reverse_template.
+            assert(name !== "");
+
+            const value = variables[name];
+            // This should not fail with a valid reverse_template.
+            assert(value !== undefined);
+
+            output.push(value);
+            index = end_index + 1;
+        } else {
+            output.push(reverse_template[index]!);
+            index += 1;
+        }
+    }
+    return output.join("");
+}
+
+function expand_url_template_from_match(
+    match: RegExpExecArray,
+    url_template: Template,
+    group_number_to_name: Record<number, string>,
+): string | null {
+    const context: Record<string, string> = {};
+    const capturing_groups = match.slice(1).entries();
+    for (const [index, capturing_group] of capturing_groups) {
+        const name = group_number_to_name[index + 1];
+        if (!name) {
+            return null;
+        }
+        context[name] = capturing_group;
+    }
+    return url_template.expand(context);
+}
+
+function reverse_linkify_segment(segment: string): string | null {
+    const linkifier_map = linkifiers.get_linkifier_map();
+    for (const [
+        pattern,
+        {url_template, group_number_to_name, reverse_template, alternative_url_templates},
+    ] of linkifier_map) {
+        if (!reverse_template) {
+            continue;
+        }
+
+        const all_templates = [url_template, ...alternative_url_templates];
+        for (const template of all_templates) {
+            const template_context = template.match(segment);
+            if (!template_context) {
+                continue;
+            }
+
+            const reversed_text = expand_reverse_template(reverse_template, template_context);
+            pattern.lastIndex = 0;
+            const match = pattern.exec(reversed_text);
+            if (!match) {
+                continue;
+            }
+
+            // Validate that expanding the captured groups round-trips to the original URL.
+            const expanded_url = expand_url_template_from_match(
+                match,
+                template,
+                group_number_to_name,
+            );
+            if (expanded_url !== segment) {
+                continue;
+            }
+            return reversed_text;
+        }
+    }
+    return null;
+}
+
+export function reverse_linkify_text(text: string): string | null {
+    // We keep the spaces around in a capturing group so we can join it later.
+    const segments = text.split(/(\s+)/);
+    let changed = false;
+
+    for (let i = 0; i < segments.length; i += 1) {
+        const segment = segments[i]!;
+        if (segment.trim() === "") {
+            continue;
+        }
+        const replacement = reverse_linkify_segment(segment) ?? segment;
+        if (replacement !== segment) {
+            changed = true;
+            segments[i] = replacement;
+        }
+    }
+
+    return changed ? segments.join("") : null;
+}
+
+export let format_text = (
     $textarea: JQuery<HTMLTextAreaElement>,
     type: string,
     inserted_content = "",
-): void {
+): void => {
     const italic_syntax = "*";
     const bold_syntax = "**";
     const bold_and_italic_syntax = "***";
@@ -588,15 +895,12 @@ export function format_text(
 
     const format_list = (type: string): void => {
         let is_marked: (line: string) => boolean;
-        let mark: (line: string, i: number) => string;
         let strip_marking: (line: string) => string;
         if (type === "bulleted") {
             is_marked = bulleted_numbered_list_util.is_bulleted;
-            mark = (line: string) => "- " + line;
             strip_marking = bulleted_numbered_list_util.strip_bullet;
         } else {
             is_marked = bulleted_numbered_list_util.is_numbered;
-            mark = (line, i) => i + 1 + ". " + line;
             strip_marking = bulleted_numbered_list_util.strip_numbering;
         }
         // We toggle complete lines even when they are partially selected (and just selecting the
@@ -607,20 +911,29 @@ export function format_text(
         // If there is even a single unmarked line selected, we mark all.
         const should_mark = selected_lines.split("\n").some((line) => !is_marked(line));
         if (should_mark) {
-            selected_lines = selected_lines
-                .split("\n")
-                .map((line, i) => mark(line, i))
-                .join("\n");
-            // We always ensure a blank line before and after the list, as we want
+            const lines = selected_lines.split("\n");
+            const processed_lines = [];
+            let counter = 1;
+            for (const line of lines) {
+                if (line.trim() === "") {
+                    processed_lines.push(line);
+                } else {
+                    if (type === "bulleted") {
+                        processed_lines.push("- " + line);
+                    } else {
+                        processed_lines.push(counter + ". " + line);
+                        counter += 1;
+                    }
+                }
+            }
+            selected_lines = processed_lines.join("\n");
+
+            // We always ensure a blank line after the list, as we want
             // a clean separation between the list and the rest of the text, especially
             // when the markdown is rendered.
 
-            // Add blank line between text before and list if not already present.
-            if (before_lines.length && before_lines.at(-1) !== "\n") {
-                before_lines += "\n";
-            }
             // Add blank line between list and rest of text if not already present.
-            if (after_lines.length && after_lines.at(0) !== "\n") {
+            if (after_lines.length > 0 && after_lines.at(0) !== "\n") {
                 after_lines = "\n" + after_lines;
             }
         } else {
@@ -1064,6 +1377,7 @@ export function format_text(
             break;
         }
         case "code": {
+            // Ctrl + Shift + C: Toggle code syntax on selection.
             const inline_code_syntax = "`";
             let block_code_syntax_start = "```\n";
             let block_code_syntax_end = "\n```";
@@ -1149,6 +1463,10 @@ export function format_text(
             break;
         }
     }
+};
+
+export function rewire_format_text(value: typeof format_text): void {
+    format_text = value;
 }
 
 /* TODO: This functions don't belong in this module, as they have
@@ -1157,7 +1475,7 @@ export function hide_compose_spinner(): void {
     compose_spinner_visible = false;
     $(".compose-submit-button .loader").hide();
     $(".compose-submit-button .zulip-icon-send").show();
-    $(".compose-submit-button").removeClass("disable-btn");
+    $(".compose-submit-button").removeClass("compose-button-disabled");
 }
 
 export function show_compose_spinner(): void {
@@ -1165,25 +1483,166 @@ export function show_compose_spinner(): void {
     // Always use white spinner.
     loading.show_button_spinner($(".compose-submit-button .loader"), true);
     $(".compose-submit-button .zulip-icon-send").hide();
-    $(".compose-submit-button").addClass("disable-btn");
+    $(".compose-submit-button").addClass("compose-button-disabled");
 }
 
-export function get_compose_click_target(element: HTMLElement): Element {
-    const compose_control_buttons_popover = popover_menus.get_compose_control_buttons_popover();
-    if (
-        compose_control_buttons_popover &&
-        $(compose_control_buttons_popover.popper).has(element).length
-    ) {
-        return compose_control_buttons_popover.reference;
+let thumbnail_poll_timeout: ReturnType<typeof setTimeout> | null = null;
+let pending_thumbnail_paths = new Set<string>();
+const MAX_THUMBNAIL_RETRIES = 5;
+
+function extract_thumbnail_paths($preview_content: JQuery): Set<string> {
+    const paths = new Set<string>();
+
+    $preview_content.find(".image-loading-placeholder").each(function () {
+        const $img = $(this);
+        const $link = $img.closest("a");
+        const href = $link.attr("href");
+
+        if (href?.startsWith("/user_uploads/")) {
+            paths.add(href.slice("/user_uploads/".length));
+        }
+    });
+
+    return paths;
+}
+
+async function check_thumbnail_status(path_id: string): Promise<boolean> {
+    const thumbnail_status_schema = z.object({
+        has_thumbnail: z.boolean(),
+    });
+
+    try {
+        const response: unknown = await channel.get({
+            url: `/json/thumbnail/status/${path_id}`,
+        });
+        const data = thumbnail_status_schema.parse(response);
+        return data.has_thumbnail;
+    } catch {
+        return false;
     }
-    return element;
 }
 
-export function render_and_show_preview(
+async function poll_thumbnail_status(
+    $preview_container: JQuery,
     $preview_spinner: JQuery,
     $preview_content_box: JQuery,
     content: string,
+    attempt = 1,
+): Promise<void> {
+    if (attempt > MAX_THUMBNAIL_RETRIES) {
+        pending_thumbnail_paths.clear();
+        return;
+    }
+
+    if (pending_thumbnail_paths.size === 0 || !$preview_container.hasClass("preview_mode")) {
+        return;
+    }
+
+    // Check all pending thumbnails in parallel
+    const thumbnails_to_check = [...pending_thumbnail_paths];
+    const thumbnail_status_results = await Promise.all(
+        thumbnails_to_check.map(async (path_id) => ({
+            path_id,
+            ready: await check_thumbnail_status(path_id),
+        })),
+    );
+
+    // Remove thumbnails that are now ready
+    let any_thumbnail_ready = false;
+    for (const {path_id, ready} of thumbnail_status_results) {
+        if (ready) {
+            pending_thumbnail_paths.delete(path_id);
+            any_thumbnail_ready = true;
+        }
+    }
+
+    // We check preview mode again since the user could have exited preview
+    // while we were waiting for the thumbnail status
+    if ($preview_container.hasClass("preview_mode")) {
+        if (any_thumbnail_ready) {
+            render_and_show_preview(
+                $preview_container,
+                $preview_spinner,
+                $preview_content_box,
+                content,
+                false,
+            );
+            return;
+        }
+
+        if (pending_thumbnail_paths.size > 0) {
+            const retry_delay_secs = util.get_retry_backoff_seconds(undefined, attempt, true);
+            thumbnail_poll_timeout = setTimeout(() => {
+                void poll_thumbnail_status(
+                    $preview_container,
+                    $preview_spinner,
+                    $preview_content_box,
+                    content,
+                    attempt + 1,
+                );
+            }, retry_delay_secs * 1000);
+        }
+    }
+}
+
+export function clear_thumbnail_polling(): void {
+    if (thumbnail_poll_timeout !== null) {
+        clearTimeout(thumbnail_poll_timeout);
+        thumbnail_poll_timeout = null;
+    }
+    pending_thumbnail_paths.clear();
+}
+
+// We use this module-level variable to suppress the preview spinner for
+// the next render cycle. We need this state because the preview update
+// is triggered via a global input event listener when we modify the textarea
+// (e.g. cancelling an upload). We cannot pass a "no spinner" argument
+// through the standard event chain because the event listener format is fixed.
+let prevent_next_spinner = false;
+
+export function set_prevent_next_spinner(value: boolean): void {
+    prevent_next_spinner = value;
+}
+
+export function enter_preview_mode($container: JQuery): void {
+    // Disable unneeded compose_control_buttons as we don't
+    // need them in preview mode.
+    $container.addClass("preview_mode");
+    $container.find(".preview_mode_disabled .compose_control_button").attr("tabindex", -1);
+
+    $container.find(".markdown_preview").hide();
+    $container.find(".undo_markdown_preview").show();
+    $container.find(".undo_markdown_preview").trigger("focus");
+}
+
+export function exit_preview_mode($container: JQuery): void {
+    $container.find("textarea.message-textarea").trigger("focus");
+
+    // While in preview mode we disable unneeded compose_control_buttons,
+    // so here we are re-enabling those compose_control_buttons
+    $container.removeClass("preview_mode");
+    $container.find(".preview_mode_disabled .compose_control_button").attr("tabindex", 0);
+
+    $container.find(".undo_markdown_preview").hide();
+    $container.find(".preview_message_area").hide();
+    $container.find(".preview_content").empty();
+    $container.find(".markdown_preview").show();
+}
+
+export function render_and_show_preview(
+    $preview_container: JQuery,
+    $preview_spinner: JQuery,
+    $preview_content_box: JQuery,
+    content: string,
+    show_spinner = true,
 ): void {
+    if (prevent_next_spinner) {
+        show_spinner = false;
+    }
+
+    const preview_render_count = compose_state.get_preview_render_count() + 1;
+    compose_state.set_preview_render_count(preview_render_count);
+
     function show_preview(rendered_content: string, raw_content?: string): void {
         // content is passed to check for status messages ("/me ...")
         // and will be undefined in case of errors
@@ -1201,12 +1660,25 @@ export function render_and_show_preview(
 
         $preview_content_box.html(postprocess_content(rendered_preview_html));
         rendered_markdown.update_elements($preview_content_box);
+
+        // Check for thumbnail loading placeholders and start polling
+        clear_thumbnail_polling();
+        pending_thumbnail_paths = extract_thumbnail_paths($preview_content_box);
+
+        if (pending_thumbnail_paths.size > 0) {
+            void poll_thumbnail_status(
+                $preview_container,
+                $preview_spinner,
+                $preview_content_box,
+                content,
+            );
+        }
     }
 
     if (content.length === 0) {
         show_preview($t_html({defaultMessage: "Nothing to preview"}));
     } else {
-        if (markdown.contains_backend_only_syntax(content)) {
+        if (markdown.contains_backend_only_syntax(content) && show_spinner) {
             const $spinner = $preview_spinner.expectOne();
             loading.make_indicator($spinner);
         } else {
@@ -1218,12 +1690,23 @@ export function render_and_show_preview(
             // wrong, users will see a brief flicker of the locally
             // echoed frontend rendering before receiving the
             // authoritative backend rendering from the server).
-            markdown.render(content);
+            const rendered_content = markdown.render(content).content;
+            show_preview(rendered_content);
         }
         void channel.post({
             url: "/json/messages/render",
             data: {content},
             success(response_data) {
+                if (
+                    preview_render_count !== compose_state.get_preview_render_count() ||
+                    !$preview_container.hasClass("preview_mode")
+                ) {
+                    // The user is no longer in preview mode or the compose
+                    // input has already been updated with new raw Markdown
+                    // since this rendering request was sent off to the server, so
+                    // there's nothing to do.
+                    return;
+                }
                 const data = message_render_response_schema.parse(response_data);
                 if (markdown.contains_backend_only_syntax(content)) {
                     loading.destroy_indicator($preview_spinner);

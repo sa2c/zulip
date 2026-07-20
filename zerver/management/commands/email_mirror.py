@@ -4,10 +4,9 @@ for forwarding emails into Zulip.
 https://zulip.readthedocs.io/en/latest/production/email-gateway.html
 
 The email gateway supports two major modes of operation: An email
-server (using postfix) where the email address configured in
-EMAIL_GATEWAY_PATTERN delivers emails directly to Zulip, and this, a
-cron job that connects to an IMAP inbox (which receives the emails)
-periodically.
+server where the email address configured in EMAIL_GATEWAY_PATTERN
+delivers emails directly to Zulip, and this, a cron job that connects
+to an IMAP inbox (which receives the emails) periodically.
 
 Run this in a cron job every N minutes if you have configured Zulip to
 poll an external IMAP mailbox for messages. The script will then
@@ -18,7 +17,7 @@ recipient address and retrieve, forward, and archive the message.
 
 """
 
-import email
+import email.parser
 import email.policy
 import logging
 from collections.abc import Generator
@@ -64,15 +63,14 @@ def get_imap_messages() -> Generator[EmailMessage, None, None]:
     try:
         mbox.select(settings.EMAIL_GATEWAY_IMAP_FOLDER)
         try:
-            status, num_ids_data = mbox.search(None, "ALL")
+            _status, num_ids_data = mbox.search(None, "ALL")
             for message_id in num_ids_data[0].split():
-                status, msg_data = mbox.fetch(message_id, "(RFC822)")
+                _status, msg_data = mbox.fetch(message_id, "(RFC822)")
                 assert isinstance(msg_data[0], tuple)
                 msg_as_bytes = msg_data[0][1]
-                message = email.message_from_bytes(msg_as_bytes, policy=email.policy.default)
-                # https://github.com/python/typeshed/issues/2417
-                assert isinstance(message, EmailMessage)
-                yield message
+                yield email.parser.BytesParser(
+                    _class=EmailMessage, policy=email.policy.default
+                ).parsebytes(msg_as_bytes)
                 mbox.store(message_id, "+FLAGS", "\\Deleted")
             mbox.expunge()
         finally:

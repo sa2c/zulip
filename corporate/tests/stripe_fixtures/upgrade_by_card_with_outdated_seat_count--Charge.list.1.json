@@ -7,25 +7,26 @@
       "application": null,
       "application_fee": null,
       "application_fee_amount": null,
-      "balance_transaction": "txn_NORMALIZED00000000000001",
+      "balance_transaction": "txn_NORMALIZED",
       "billing_details": {
         "address": {
           "city": "San Francisco",
           "country": "US",
           "line1": "123 Main St",
           "line2": null,
-          "postal_code": "94105",
+          "postal_code": "12345",
           "state": "CA"
         },
         "email": null,
         "name": "John Doe",
-        "phone": null
+        "phone": null,
+        "tax_id": null
       },
       "calculated_statement_descriptor": "ZULIP CLOUD STANDARD",
       "captured": true,
-      "created": 1010000001,
+      "created": 1000000000,
       "currency": "usd",
-      "customer": "cus_NORMALIZED0001",
+      "customer": "cus_NORMALIZED",
       "description": "Payment for Invoice",
       "destination": null,
       "dispute": null,
@@ -34,14 +35,16 @@
       "failure_code": null,
       "failure_message": null,
       "fraud_details": {},
-      "id": "ch_NORMALIZED00000000000001",
-      "invoice": "in_NORMALIZED00000000000001",
+      "id": "upgrade_by_card_with_outdated_seat_count--Charge.list.1.json",
       "livemode": false,
       "metadata": {},
       "object": "charge",
       "on_behalf_of": null,
       "order": null,
       "outcome": {
+        "advice_code": null,
+        "network_advice_code": null,
+        "network_decline_code": null,
         "network_status": "approved_by_network",
         "reason": null,
         "risk_level": "normal",
@@ -50,24 +53,25 @@
         "type": "authorized"
       },
       "paid": true,
-      "payment_intent": "pi_NORMALIZED00000000000001",
-      "payment_method": "pm_1P41oTDEQaroqDjsGzEUBsmO",
+      "payment_intent": "pi_NORMALIZED",
+      "payment_method": "pm_NORMALIZED",
       "payment_method_details": {
         "card": {
           "amount_authorized": 48000,
+          "authorization_code": "137078",
           "brand": "visa",
           "checks": {
-            "address_line1_check": null,
-            "address_postal_code_check": null,
+            "address_line1_check": "pass",
+            "address_postal_code_check": "pass",
             "cvc_check": "pass"
           },
           "country": "US",
-          "exp_month": 4,
-          "exp_year": 2025,
+          "exp_month": 1,
+          "exp_year": 9999,
           "extended_authorization": {
             "status": "disabled"
           },
-          "fingerprint": "NORMALIZED000001",
+          "fingerprint": "NORMALIZED",
           "funding": "credit",
           "incremental_authorization": {
             "status": "unavailable"
@@ -82,10 +86,12 @@
           "network_token": {
             "used": false
           },
+          "network_transaction_id": "749857738210088",
           "overcapture": {
             "maximum_amount_capturable": 48000,
             "status": "unavailable"
           },
+          "regulated_status": "unregulated",
           "three_d_secure": null,
           "wallet": null
         },
@@ -94,15 +100,8 @@
       "radar_options": {},
       "receipt_email": "hamlet@zulip.com",
       "receipt_number": null,
-      "receipt_url": "https://pay.stripe.com/receipts/invoices/CAcaFwoVYWNjdF8xN3ZUa3dERVFhcm9xRGpzKLy62rAGMgaDrQJyHXA6LBbhKvRwkeSm8AwwllpWTXBjeThLLCdDhJd5gwadg1919CrwTHgLxICHyzgD?s=ap",
+      "receipt_url": "https://pay.stripe.com/receipts/invoices/NORMALIZED?s=ap",
       "refunded": false,
-      "refunds": {
-        "data": [],
-        "has_more": false,
-        "object": "list",
-        "total_count": 0,
-        "url": "/v1/charges/ch_NORMALIZED00000000000001/refunds"
-      },
       "review": null,
       "shipping": null,
       "source": null,

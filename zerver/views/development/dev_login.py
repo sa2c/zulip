@@ -18,7 +18,6 @@ from zerver.lib.exceptions import (
 from zerver.lib.response import json_success
 from zerver.lib.subdomains import get_subdomain
 from zerver.lib.typed_endpoint import typed_endpoint
-from zerver.lib.users import get_api_key
 from zerver.lib.validator import validate_login_email
 from zerver.models import Realm, UserProfile
 from zerver.models.realms import get_realm
@@ -51,7 +50,7 @@ def get_dev_users(realm: Realm | None = None, extra_users_count: int = 10) -> li
 def add_dev_login_context(realm: Realm | None, context: dict[str, Any]) -> None:
     users = get_dev_users(realm)
     context["current_realm"] = realm
-    context["all_realms"] = Realm.objects.all()
+    context["all_realms"] = Realm.objects.filter(deactivated_redirect__isnull=True)
 
     def sort(lst: list[UserProfile]) -> list[UserProfile]:
         return sorted(lst, key=lambda u: u.delivery_email)
@@ -59,10 +58,8 @@ def add_dev_login_context(realm: Realm | None, context: dict[str, Any]) -> None:
     context["direct_owners"] = sort([u for u in users if u.is_realm_owner])
     context["direct_admins"] = sort([u for u in users if u.is_realm_admin and not u.is_realm_owner])
     context["guest_users"] = sort([u for u in users if u.is_guest])
-    context["direct_moderators"] = sort([u for u in users if u.is_moderator])
-    context["direct_users"] = sort(
-        [u for u in users if not (u.is_realm_admin or u.is_guest or u.is_moderator)]
-    )
+    context["direct_moderators"] = sort([u for u in users if u.role == UserProfile.ROLE_MODERATOR])
+    context["direct_users"] = sort([u for u in users if not (u.is_guest or u.is_moderator)])
 
 
 @csrf_exempt
@@ -139,7 +136,7 @@ def api_dev_fetch_api_key(request: HttpRequest, *, username: str) -> HttpRespons
     assert isinstance(user_profile, UserProfile)
 
     do_login(request, user_profile)
-    api_key = get_api_key(user_profile)
+    api_key = user_profile.api_key
     return json_success(
         request,
         data={"api_key": api_key, "email": user_profile.delivery_email, "user_id": user_profile.id},

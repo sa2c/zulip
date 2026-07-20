@@ -18,12 +18,13 @@
     min-width: max-content;
 
     & > li {
-        word-break: break-word;
+        overflow-wrap: anywhere;
 
         & > a {
             display: flex;
-            padding: 3px 10px;
-            gap: 5px;
+            align-items: center;
+            padding: 0.2142em 0.7142em; /* 3px 10px at 14px em */
+            gap: 0.3571em; /* 5px at 14px em */
             font-weight: normal;
             /* We want to keep this `max-width` less than 320px. */
             max-width: 292px;
@@ -51,17 +52,26 @@
                 outline: 0;
             }
 
-            /* styles defined for user_circle here only deal with positioning of user_presence_circle
-            in typeahead list in order to ensure they are rendered correctly in in all screen sizes.
-            Most of the style rules related to color, gradient etc. which are generally common throughout
-            the app are defined in user_circles.css and are not overridden here. */
-            .user_circle {
-                width: var(--length-user-status-circle);
-                height: var(--length-user-status-circle);
-                position: relative;
-                left: -2px;
-                flex-shrink: 0;
-                align-self: center;
+            &.topic-typeahead-link {
+                gap: 5px;
+            }
+
+            &.topic-edit-typeahead {
+                display: flex;
+                flex-wrap: wrap;
+
+                .typeahead-strong-section {
+                    /* We want to wrap the topic but preserve
+                       original white spaces sequence too. */
+                    white-space: pre-wrap;
+                }
+            }
+
+            .typeahead-content {
+                display: flex;
+                align-items: center;
+                overflow: hidden;
+                gap: 0.3571em;
             }
 
             .typeahead-text-container {
@@ -71,7 +81,20 @@
                 text-overflow: ellipsis;
                 white-space: nowrap;
                 gap: 3px;
+                align-items: baseline;
             }
+
+            .compose-stream-name {
+                overflow: visible;
+                gap: 0;
+            }
+        }
+
+        .stream-to-topic-arrow {
+            margin-left: 0.375em; /* 6px at 16px em */
+            cursor: default;
+            color: var(--color-compose-chevron-arrow);
+            text-decoration: none;
         }
     }
 
@@ -82,19 +105,35 @@
             color: var(--color-active-dropdown-item);
             background-color: var(--background-color-active-typeahead-item);
         }
+
+        & .user-circle-offline {
+            /* Ensure better contrast on highlighted
+               typeahead items. */
+            color: var(--color-user-circle-offline-typeahead-highlight);
+        }
+    }
+
+    .pronouns,
+    .autocomplete_secondary {
+        align-self: baseline;
+        opacity: 0.8;
+        font-size: 85%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+
+        & > a {
+            color: var(--color-dropdown-item);
+            text-decoration: underline 1px;
+            text-decoration-color: var(--color-dropdown-item-link-underline);
+            opacity: 0.6;
+        }
     }
 
     .autocomplete_secondary {
-        align-self: end;
-        opacity: 0.8;
-        font-size: 85%;
         flex: 1 1 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        position: relative;
-        top: -1px;
     }
 
+    .active .pronouns,
     .active .autocomplete_secondary {
         opacity: 1;
     }
@@ -108,7 +147,7 @@
         overflow-y: auto;
     }
 
-    .typeahead-header {
+    .typeahead-footer {
         margin: 0;
         padding: 4px 10px;
         border-top: 1px solid hsl(0deg 0% 0% / 20%);
@@ -116,63 +155,108 @@
         align-items: center;
     }
 
-    #typeahead-header-text {
+    #typeahead-footer-text {
         color: var(--color-dropdown-item);
-        font-size: 12px;
+        font-size: 0.8571em; /* 12px at 14px/em */
     }
 
     a strong.typeahead-strong-section {
+        /* Can't use flex to display this item if
+           we want `text-overflow: ellipsis` to work
+           which only works on block elements. */
+        overflow: hidden;
+        text-overflow: ellipsis;
         white-space: pre;
-        /* Present as flexbox to better control
-           icon alignment and spacing, when icons
-           are shown. */
-        display: flex;
         align-items: baseline;
-        /* Approximate space as preserved in
-           typeahead lines, e.g., between the channel
-           name and its description. */
-        gap: 0.25ch;
-    }
+        font-weight: 500;
 
-    .active {
-        .unsubscribed_icon {
-            visibility: visible;
-            float: right;
-            margin-top: 5px;
-            color: hsl(96deg 7% 73%);
+        .decorated-channel-name-wrapper {
+            display: inline-flex;
+            max-width: 100%;
+
+            .decorated-channel-name {
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
         }
-    }
-
-    .unsubscribed_icon {
-        visibility: hidden;
-        font-size: 0.8em;
     }
 }
 
-.typeahead-option-label {
+.typeahead-option-label-container {
     display: flex !important;
     justify-content: space-between;
 
     > strong {
         margin-right: 14px;
     }
+
+    .typeahead-option-label {
+        color: var(--color-typeahead-option-label);
+    }
 }
 
+.typeahead-image.zulip-icon {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+/* For FontAwesome icons and zulip icons used in place of images for some users. */
 .typeahead-image {
-    display: inline-block;
-    height: 21px;
-    width: 21px;
+    flex: 0 0 auto;
+    position: relative;
+    height: 1.3125em; /* 21px at 16px/1em */
+    width: 1.3125em; /* 21px at 16px/1em */
     border-radius: 4px;
 
-    /* For FontAwesome icons and zulip icons used in place of images for some users. */
-    font-size: 19px;
-    text-align: center;
-
-    &.zulip-icon-triple-users {
-        font-size: 19px;
+    .typeahead-image-avatar {
+        border-radius: 4px;
+        /* Override bootstrap img */
+        vertical-align: baseline;
     }
 
-    &.no-presence-circle {
-        margin-left: 14px;
+    .user-circle {
+        position: absolute;
+        /* This is smaller than the sidebar because avatars here are smaller */
+        font-size: 0.4375em; /* 7px at 16px/1em */
+        line-height: 1;
+        bottom: -0.5px;
+        right: -0.5px;
+        background-color: var(--color-background-dropdown-widget);
+        padding: 1px;
+        border-radius: 50%;
+
+        &.user-circle-offline {
+            display: none;
+        }
+    }
+
+    /* Move the background styles onto the :before element so that the 1px padding
+       outline still works. */
+    .user-circle-idle {
+        background: var(--color-background-dropdown-widget);
+    }
+
+    .user-circle-idle::before {
+        background: var(--gradient-user-circle-idle);
+        background-clip: text;
+        -webkit-text-fill-color: transparent;
+        border-radius: 50%;
+    }
+}
+
+.typeahead-text-container {
+    i.zulip-icon-bot {
+        align-self: center;
+    }
+
+    /*
+    Negates the extra 3px left margin from `.status-emoji` in zulip.css, which,
+    combined with .typeahead-text-container's `gap`, created unintended spacing.
+    The typeahead's spacing is now managed only by `gap` in
+    .typeahead-text-container.
+    */
+    .status-emoji {
+        margin-left: 0;
     }
 }

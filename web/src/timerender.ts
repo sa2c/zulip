@@ -1,25 +1,33 @@
+import {tz, tzOffset} from "@date-fns/tz";
 import {
+    differenceInCalendarDays,
     differenceInHours,
     differenceInMinutes,
     formatISO,
     isEqual,
     isValid,
     parseISO,
+    startOfToday,
 } from "date-fns";
 import $ from "jquery";
 
 import render_markdown_time_tooltip from "../templates/markdown_time_tooltip.hbs";
 
-import {$t} from "./i18n";
-import {difference_in_calendar_days, get_offset, start_of_day} from "./time_zone_util";
-import {parse_html} from "./ui_util";
-import {user_settings} from "./user_settings";
+import {$t} from "./i18n.ts";
+import {parse_html} from "./ui_util.ts";
+import {user_settings} from "./user_settings.ts";
+import * as util from "./util.ts";
 
 let next_timerender_id = 0;
 
-export let display_time_zone = new Intl.DateTimeFormat().resolvedOptions().timeZone;
+export let display_time_zone = browser_time_zone();
+export let display_tz = tz(display_time_zone);
 
 const formatter_map = new Map<string, Intl.DateTimeFormat>();
+
+export function browser_time_zone(): string {
+    return new Intl.DateTimeFormat().resolvedOptions().timeZone;
+}
 
 export function clear_for_testing(): void {
     next_timerender_id = 0;
@@ -28,10 +36,17 @@ export function clear_for_testing(): void {
 // Exported for testing only; we do not support live-updating the time zone.
 export function set_display_time_zone(time_zone: string): void {
     display_time_zone = time_zone;
+    display_tz = tz(display_time_zone);
     formatter_map.clear();
 }
 
-type DateFormat = "weekday" | "dayofyear" | "weekday_dayofyear_year" | "dayofyear_year";
+type DateFormat =
+    | "weekday"
+    | "dayofyear"
+    | "long_dayofyear"
+    | "weekday_dayofyear_year"
+    | "dayofyear_year"
+    | "long_dayofyear_year";
 type DateWithTimeFormat =
     | "dayofyear_time"
     | "dayofyear_year_time"
@@ -72,8 +87,16 @@ export function get_format_options_for_type(
     };
 
     const dayofyear_format_options: Intl.DateTimeFormatOptions = {day: "numeric", month: "short"};
+    const long_dayofyear_format_options: Intl.DateTimeFormatOptions = {
+        day: "numeric",
+        month: "long",
+    };
     const dayofyear_year_format_options: Intl.DateTimeFormatOptions = {
         ...dayofyear_format_options,
+        year: "numeric",
+    };
+    const long_dayofyear_year_format_options: Intl.DateTimeFormatOptions = {
+        ...long_dayofyear_format_options,
         year: "numeric",
     };
     const long_format_options: Intl.DateTimeFormatOptions = {
@@ -90,10 +113,14 @@ export function get_format_options_for_type(
             return weekday_format_options;
         case "dayofyear": // Jul 27
             return dayofyear_format_options;
+        case "long_dayofyear": // July 27
+            return long_dayofyear_format_options;
         case "dayofyear_time": // Jul 27, 01:30 PM
             return {...dayofyear_format_options, ...time_format_options};
         case "dayofyear_year": // Jul 27, 2016
             return dayofyear_year_format_options;
+        case "long_dayofyear_year": // July 27, 2016
+            return long_dayofyear_year_format_options;
         case "dayofyear_year_time": // Jul 27, 2016, 01:30 PM
             return {...dayofyear_year_format_options, ...time_format_options};
         case "weekday_dayofyear_year": // Wednesday, July 27, 2016
@@ -132,7 +159,7 @@ export function get_localized_date_or_time_for_format(
 }
 
 // Exported for tests only.
-export function get_tz_with_UTC_offset(time: number | Date): string {
+export function get_tz_with_UTC_offset(time: Date): string {
     let timezone = new Intl.DateTimeFormat(user_settings.default_language, {
         timeZone: display_time_zone,
         timeZoneName: "short",
@@ -149,7 +176,7 @@ export function get_tz_with_UTC_offset(time: number | Date): string {
     // show that along with (UTC+x:y)
     timezone = /GMT[+-][\d:]*/.test(timezone ?? "") ? "" : timezone;
 
-    const offset_minutes = Math.round(get_offset(time, display_time_zone) / 60000);
+    const offset_minutes = tzOffset(display_time_zone, time);
     const tz_UTC_offset = `(UTC${offset_minutes < 0 ? "-" : "+"}${String(
         Math.floor(Math.abs(offset_minutes) / 60),
     ).padStart(2, "0")}:${String(Math.abs(offset_minutes) % 60).padStart(2, "0")})`;
@@ -174,7 +201,7 @@ export type TimeRender = {
     needs_update: boolean;
 };
 
-export function render_now(time: Date, today = new Date()): TimeRender {
+export function render_now(time: Date, today = new Date(), display_year?: boolean): TimeRender {
     let time_str = "";
     let needs_update = false;
     // render formal time to be used for tippy tooltip
@@ -185,7 +212,7 @@ export function render_now(time: Date, today = new Date()): TimeRender {
     // Presumably the result of diffDays will be an integer in this
     // case, but round it to be sure before comparing to integer
     // constants.
-    const days_old = difference_in_calendar_days(today, time, display_time_zone);
+    const days_old = differenceInCalendarDays(today, time, {in: display_tz});
 
     if (days_old === 0) {
         time_str = $t({defaultMessage: "Today"});
@@ -193,7 +220,7 @@ export function render_now(time: Date, today = new Date()): TimeRender {
     } else if (days_old === 1) {
         time_str = $t({defaultMessage: "Yesterday"});
         needs_update = true;
-    } else if (time.getFullYear() !== today.getFullYear()) {
+    } else if (time.getFullYear() !== today.getFullYear() || display_year) {
         // For long running servers, searching backlog can get ambiguous
         // without a year stamp. Only show year if message is from an older year
         time_str = get_localized_date_or_time_for_format(time, "dayofyear_year");
@@ -212,17 +239,21 @@ export function render_now(time: Date, today = new Date()): TimeRender {
 }
 
 // Relative time rendering for use in most screens like Recent conversations.
-export function relative_time_string_from_date(date: Date): string {
+export function relative_time_string_from_date(date: Date, use_minutes_short_form = false): string {
     const current_date = new Date();
     const minutes = differenceInMinutes(current_date, date);
     if (minutes <= 2) {
         return $t({defaultMessage: "Just now"});
     }
     if (minutes < 60) {
+        if (use_minutes_short_form) {
+            return $t({defaultMessage: "{minutes} min ago"}, {minutes});
+        }
+
         return $t({defaultMessage: "{minutes} minutes ago"}, {minutes});
     }
 
-    const days_old = difference_in_calendar_days(current_date, date, display_time_zone);
+    const days_old = differenceInCalendarDays(current_date, date, {in: display_tz});
     const hours = Math.floor(minutes / 60);
 
     if (hours < 24) {
@@ -262,7 +293,9 @@ export function last_seen_status_from_date(last_active_date: Date): string {
         return $t({defaultMessage: "Active {minutes} minutes ago"}, {minutes});
     }
 
-    const days_old = difference_in_calendar_days(current_date, last_active_date, display_time_zone);
+    const days_old = differenceInCalendarDays(current_date, last_active_date, {
+        in: display_tz,
+    });
     const hours = Math.floor(minutes / 60);
 
     if (hours < 24) {
@@ -324,15 +357,15 @@ export function initialize(): void {
         display_time_zone === undefined || // https://bugs.chromium.org/p/chromium/issues/detail?id=1487920
         display_time_zone === "Etc/Unknown" // https://bugs.chromium.org/p/chromium/issues/detail?id=1473422
     ) {
-        display_time_zone = user_settings.timezone;
+        set_display_time_zone(user_settings.timezone);
         try {
             new Intl.DateTimeFormat(undefined, {timeZone: display_time_zone});
         } catch {
-            display_time_zone = "UTC";
+            set_display_time_zone("UTC");
         }
     }
 
-    last_update = start_of_day(new Date(), display_time_zone);
+    last_update = startOfToday({in: display_tz});
 }
 
 function maybe_add_update_list_entry(entry: UpdateEntry): void {
@@ -353,18 +386,19 @@ function render_date_span($elem: JQuery, rendered_time: TimeRender): JQuery {
 // (What's actually spliced into the message template is the contents
 // of this DOM node as HTML, so effectively a copy of the node. That's
 // okay since to update the time later we look up the node by its id.)
-export function render_date(time: Date): JQuery {
+export function render_date(time: Date, display_year?: boolean): HTMLElement {
     const className = `timerender${next_timerender_id}`;
     next_timerender_id += 1;
-    const rendered_time = render_now(time);
-    let $node = $("<span>").attr("class", `timerender-content ${className}`);
+    const today = new Date();
+    const rendered_time = render_now(time, today, display_year);
+    let $node = $("<span>").attr("class", `date_row_text timerender-content ${className}`);
     $node = render_date_span($node, rendered_time);
     maybe_add_update_list_entry({
         needs_update: rendered_time.needs_update,
         className,
         time,
     });
-    return $node;
+    return util.the($node);
 }
 
 // Renders the timestamp returned by the <time:> Markdown syntax.
@@ -372,7 +406,7 @@ export function format_markdown_time(time: number | Date): string {
     return get_localized_date_or_time_for_format(time, "weekday_dayofyear_year_time");
 }
 
-export function get_markdown_time_tooltip(reference: HTMLElement): DocumentFragment | string {
+export function get_markdown_time_tooltip(reference: Element): DocumentFragment | string {
     if (reference instanceof HTMLTimeElement) {
         const time = parseISO(reference.dateTime);
         const tz_offset_str = get_tz_with_UTC_offset(time);
@@ -384,7 +418,7 @@ export function get_markdown_time_tooltip(reference: HTMLElement): DocumentFragm
 // This isn't expected to be called externally except manually for
 // testing purposes.
 export function update_timestamps(): void {
-    const today = start_of_day(new Date(), display_time_zone);
+    const today = startOfToday({in: display_tz});
     if (!isEqual(today, last_update)) {
         const to_process = update_list;
         update_list = [];
@@ -455,7 +489,7 @@ export function stringify_time(time: number | Date): string {
 
 export function format_time_modern(time: number | Date, today = new Date()): string {
     const hours = differenceInHours(today, time);
-    const days_old = difference_in_calendar_days(today, time, display_time_zone);
+    const days_old = differenceInCalendarDays(today, time, {in: display_tz});
 
     if (time > today) {
         /* For timestamps in the future, we always show the year*/
@@ -534,13 +568,44 @@ export function get_time_limit_setting_in_appropriate_unit(
     return {value: time_limit_in_days, unit: "day"};
 }
 
-export function should_display_profile_incomplete_alert(timestamp: number): boolean {
-    const today = new Date(Date.now());
-    const time = new Date(timestamp * 1000);
-    const days_old = difference_in_calendar_days(today, time, display_time_zone);
+export function get_time_in_timezone(date: Date, timezone: string): number {
+    return Date.parse(date.toLocaleString("en-US", {timeZone: timezone}));
+}
 
-    if (days_old >= 15) {
+export function get_offset_difference_at_date(
+    timezone1: string,
+    timezone2: string,
+    reference_date: Date,
+): number {
+    const date1 = get_time_in_timezone(reference_date, timezone1);
+    const date2 = get_time_in_timezone(reference_date, timezone2);
+    return date1 - date2;
+}
+
+export function are_timezones_on_same_clock_now(timezone1: string, timezone2: string): boolean {
+    // America/Los_Angeles is clearly the same as America/Los_Angeles:
+    if (timezone1 === timezone2) {
         return true;
     }
-    return false;
+
+    // We still want this function to return true if the timezones are
+    // on the same clock for now, even though they may eventually diverge
+    // during Daylight Savings. This avoids nagging the user.  The only
+    // tradeoff is if the user stays logged on while the clocks change,
+    // but that should be rare.
+    const now = new Date();
+
+    try {
+        return get_offset_difference_at_date(timezone1, timezone2, now) === 0;
+    } catch {
+        // This should only happen during testing, but we just catch any error
+        // related to invalid time zones.
+        return false;
+    }
+}
+
+export function is_browser_timezone_same_as(zulip_time_zone: string): boolean {
+    // We delegate most of this check to facilitate testing.
+    // We don't want to mock browser_time_zone.
+    return are_timezones_on_same_clock_now(browser_time_zone(), zulip_time_zone);
 }

@@ -1,34 +1,35 @@
 import $ from "jquery";
 import * as tippy from "tippy.js";
 
-import {$t} from "./i18n";
+import {$t} from "./i18n.ts";
+import * as util from "./util.ts";
 
-export const status_classes = "alert-error alert-success alert-info alert-warning alert-loading";
+export const status_classes = "alert-error alert-success alert-info alert-warning";
 
 export function phrase_match(query: string, phrase: string): boolean {
     // match "tes" to "test" and "stream test" but not "hostess"
     return (" " + phrase.toLowerCase()).includes(" " + query.toLowerCase());
 }
 
+// Any changes to this function should be followed by a check for changes needed
+// to adjust_mac_kbd_tags of starlight_help/src/scripts/adjust_mac_kbd_tags.ts.
 const keys_map = new Map([
     ["Backspace", "Delete"],
     ["Enter", "Return"],
-    ["Home", "←"],
-    ["End", "→"],
-    ["PgUp", "↑"],
-    ["PgDn", "↓"],
     ["Ctrl", "⌘"],
     ["Alt", "⌥"],
 ]);
 
-const fn_shortcuts = new Set(["Home", "End", "PgUp", "PgDn"]);
-
+// Any changes to this function should be followed by a check for changes needed
+// to adjust_mac_kbd_tags of starlight_help/src/scripts/adjust_mac_kbd_tags.ts.
 export function has_mac_keyboard(): boolean {
     return /mac/i.test(navigator.platform);
 }
 
 // We convert the <kbd> tags used for keyboard shortcuts to mac equivalent
 // key combinations, when we detect that the user is using a mac-style keyboard.
+// Any changes to this function should be followed by a check for changes needed
+// to adjust_mac_kbd_tags of starlight_help/src/scripts/adjust_mac_kbd_tags.ts.
 export function adjust_mac_kbd_tags(kbd_elem_class: string): void {
     if (!has_mac_keyboard()) {
         return;
@@ -37,16 +38,15 @@ export function adjust_mac_kbd_tags(kbd_elem_class: string): void {
     $(kbd_elem_class).each(function () {
         let key_text = $(this).text();
 
-        if (fn_shortcuts.has(key_text)) {
-            $(this).before($("<kbd>").text("Fn"), $("<span>").text(" + ").contents());
-            $(this).addClass("arrow-key");
-        }
-
         // We use data-mac-key attribute to override the default key in case
-        // of exceptions. Currently, there are 2 shortcuts (for navigating back
-        // and forth in browser history) which need `Cmd` instead of the expected
-        // mapping (`Opt`) for the `Alt` key, so we use this attribute to override
-        // `Opt` with `Cmd`.
+        // of exceptions:
+        // - There are 2 shortcuts (for navigating back and forth in browser
+        //   history) which need "⌘" instead of the expected mapping ("Opt")
+        //   for the "Alt" key, so we use this attribute to override "Opt"
+        //   with "⌘".
+        // - The "Ctrl" + "[" shortcuts (which match the Vim keybinding behavior
+        //   of mapping to "Esc") need to display "Ctrl" for all users, so we
+        //   use this attribute to override "⌘" with "Ctrl".
         const replace_key = $(this).attr("data-mac-key") ?? keys_map.get(key_text);
         if (replace_key !== undefined) {
             key_text = replace_key;
@@ -62,6 +62,14 @@ export function adjust_mac_kbd_tags(kbd_elem_class: string): void {
         if (following_key !== undefined) {
             const $kbd_elem = $("<kbd>").text(following_key);
             $(this).after($("<span>").text(" + ").contents(), $kbd_elem);
+        }
+
+        // The ⌘ symbol isn't vertically centered, so we use an icon.
+        if (key_text === "⌘") {
+            const $icon = $("<i>")
+                .addClass("zulip-icon zulip-icon-mac-command")
+                .attr("aria-label", key_text);
+            $(this).empty().append($icon); // Use .append() to safely add the icon
         }
     });
 }
@@ -79,10 +87,6 @@ export function adjust_mac_hotkey_hints(hotkeys: string[]): void {
         if (replace_key !== undefined) {
             hotkeys[index] = replace_key;
         }
-
-        if (fn_shortcuts.has(hotkey)) {
-            hotkeys.unshift("Fn");
-        }
     }
 }
 
@@ -99,6 +103,13 @@ export function adjust_shift_hotkey(hotkeys: string[]): boolean {
     return false;
 }
 
+export function is_printable_ascii(key: string): boolean {
+    // ASCII printable characters (character code 32-126) -> " " to "~".
+    // It includes letters, digits, punctuation marks, and a few
+    // miscellaneous symbols.
+    return key.length === 1 && key >= " " && key <= "~";
+}
+
 // See https://zulip.readthedocs.io/en/latest/development/authentication.html#password-form-implementation
 // for design details on this feature.
 function set_password_toggle_label(
@@ -108,7 +119,7 @@ function set_password_toggle_label(
 ): void {
     $(password_selector).attr("aria-label", label);
     if (tippy_tooltips) {
-        const element: tippy.ReferenceElement = $(password_selector)[0]!;
+        const element: tippy.ReferenceElement = util.the($(password_selector));
         const tippy_instance = element._tippy ?? tippy.default(element);
         tippy_instance.setContent(label);
     } else {
@@ -126,11 +137,11 @@ function toggle_password_visibility(
 
     if ($password_field.attr("type") === "password") {
         $password_field.attr("type", "text");
-        $(password_selector).removeClass("fa-eye-slash").addClass("fa-eye");
+        $(password_selector).removeClass("zulip-icon-hide").addClass("zulip-icon-show");
         label = $t({defaultMessage: "Hide password"});
     } else {
         $password_field.attr("type", "password");
-        $(password_selector).removeClass("fa-eye").addClass("fa-eye-slash");
+        $(password_selector).removeClass("zulip-icon-show").addClass("zulip-icon-hide");
         label = $t({defaultMessage: "Show password"});
     }
     set_password_toggle_label(password_selector, label, tippy_tooltips);
@@ -141,7 +152,7 @@ export function reset_password_toggle_icons(
     password_selector: string,
 ): void {
     $(password_field).attr("type", "password");
-    $(password_selector).removeClass("fa-eye").addClass("fa-eye-slash");
+    $(password_selector).removeClass("zulip-icon-show").addClass("zulip-icon-hide");
     const label = $t({defaultMessage: "Show password"});
     set_password_toggle_label(password_selector, label, true);
 }

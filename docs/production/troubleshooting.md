@@ -55,6 +55,15 @@ on this page includes details about how to fix common issues with Zulip services
 
 ## Using supervisorctl
 
+:::{important}
+
+If you are using [Docker](docker.md), `supervisorctl` runs inside
+the container; see {doc}`docker:how-to/compose-commands` and
+{doc}`docker:how-to/helm-commands` for shell access and log
+retrieval.
+
+:::
+
 To see what Zulip-related services are configured to
 use Supervisor, look at `/etc/supervisor/conf.d/zulip.conf` and
 `/etc/supervisor/conf.d/zulip-db.conf`.
@@ -91,7 +100,6 @@ zulip-workers:zulip_events_missedmessage_mobile_notifications   RUNNING   pid 11
 zulip-workers:zulip_events_outgoing_webhooks                    RUNNING   pid 11358, uptime 19:40:17
 zulip-workers:zulip_events_user_activity                        RUNNING   pid 11365, uptime 19:40:14
 zulip-workers:zulip_events_user_activity_interval               RUNNING   pid 11376, uptime 19:40:11
-zulip-workers:zulip_events_user_presence                        RUNNING   pid 11384, uptime 19:40:08
 ```
 
 If you see any services showing a status other than `RUNNING`, or you
@@ -156,7 +164,7 @@ If one of these services is not installed or functioning correctly,
 Zulip will not work. Below we detail some common configuration
 problems and how to resolve them:
 
-- If your browser reports no webserver is running, that is likely
+- If your browser reports no web server is running, that is likely
   because nginx is not configured properly and thus failed to start.
   nginx will fail to start if you configured SSL incorrectly or did
   not provide SSL certificates. To fix this, configure them properly
@@ -235,6 +243,7 @@ Unattended-Upgrade::Package-Blacklist {
     "memcached$";
     "nginx-full$";
     "postgresql-\d+$";
+    "postgresql-\d+-pgdg-pgroonga$";
     "rabbitmq-server$";
     "redis-server$";
     "supervisor$";

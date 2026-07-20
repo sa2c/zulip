@@ -46,8 +46,8 @@ Steps and best practices for starting a conversation:
    - [#production
      help](https://chat.zulip.org/#narrow/channel/31-production-help) for suggestions
      related to self-hosting Zulip.
-3. **[Start a new topic](https://zulip.com/help/starting-a-new-topic)** for
-   discussing your suggestions, using a brief summary of your idea as the
+3. **[Start a new topic](https://zulip.com/help/introduction-to-topics#how-to-start-a-new-topic)**
+   for discussing your suggestions, using a brief summary of your idea as the
    name of the topic.
 
 If you aren't sure where to post or how to name your topic, don't worry!
@@ -69,7 +69,7 @@ for a feature or improvement. Steps and best practices for filing an issue:
    - [zulip/zulip](https://github.com/zulip/zulip/issues) for suggestions for the
      Zulip web app or server. A good default if you aren't sure which repository
      to use.
-   - [zulip/zulip-mobile](https://github.com/zulip/zulip-mobile/issues) for
+   - [zulip/zulip-flutter](https://github.com/zulip/zulip-flutter/issues) for
      suggestions for the mobile apps.
    - [zulip/zulip-desktop](https://github.com/zulip/zulip-desktop/issues) for
      suggestions that are specific to the Zulip desktop app.
@@ -85,3 +85,27 @@ for a feature or improvement. Steps and best practices for filing an issue:
    message](https://zulip.com/help/link-to-a-message-or-conversation#get-a-link-to-a-specific-message)
    in the discussion thread, as message links will still work even if the topic is
    renamed or resolved.
+
+## Evaluation and onboarding feedback
+
+If you have been involved in the decision to use (or not use!) Zulip, or are
+currently considering it, we'd love to hear about it. You can contact us
+publicly in the [#feedback](https://chat.zulip.org/#narrow/channel/137-feedback)
+channel in the [Zulip development
+community](https://zulip.com/development-community/), or privately at
+[feedback@zulip.com](mailto:feedback@zulip.com).
+
+Here are some questions we're especially interested in:
+
+- **Who you are**: Tell us a bit about your organization. What does it do? How many
+  people are involved?
+- **Evaluation**: What is the process by which your organization chose or will
+  choose a team chat product?
+- **Pros and cons**: What are the pros and cons of Zulip for your organization,
+  and the pros and cons of other products you are evaluating?
+- **Features**: What are the features that are most important for your
+  organization? In the best-case scenario, what would your chat solution do
+  for you?
+- **Onboarding**: If you remember, what were your impressions during your first
+  few minutes of using Zulip? What did you notice, and how did you feel? Was
+  there anything that stood out to you as confusing, or unexpected, or great?

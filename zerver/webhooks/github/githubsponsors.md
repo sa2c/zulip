@@ -4,8 +4,6 @@ Get GitHub Sponsors notifications in Zulip!
 
 {start_tabs}
 
-1. {!create-channel.md!}
-
 1. {!create-an-incoming-webhook.md!}
 
 1. {!generate-webhook-url-basic.md!}
@@ -29,7 +27,7 @@ Get GitHub Sponsors notifications in Zulip!
 
 - [GitHub's webhook events documentation][github-webhook-events]
 
-- [Zulip GitHub integration](/integrations/doc/github).
+- [Zulip GitHub integration](/integrations/github).
 
 {!webhooks-url-specification.md!}
 

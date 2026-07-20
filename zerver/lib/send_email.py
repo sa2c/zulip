@@ -1,27 +1,30 @@
-import hashlib
+import contextlib
 import logging
 import os
+import re
 import smtplib
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from datetime import timedelta
 from email.headerregistry import Address
+from email.message import EmailMessage
 from email.parser import Parser
 from email.policy import default
 from email.utils import formataddr, parseaddr
+from email.utils import formatdate as email_formatdate
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-import backoff
 import css_inline
 import orjson
+from bs4 import BeautifulSoup
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives, get_connection
 from django.core.mail.backends.base import BaseEmailBackend
-from django.core.mail.backends.smtp import EmailBackend
 from django.core.mail.message import sanitize_address
 from django.core.management import CommandError
 from django.db import transaction
-from django.db.models import QuerySet
+from django.db.models import Exists, OuterRef, QuerySet
 from django.db.models.functions import Lower
 from django.http import HttpRequest
 from django.template import loader
@@ -31,15 +34,15 @@ from django.utils.translation import override as override_language
 
 from confirmation.models import generate_key
 from zerver.lib.logging_util import log_to_file
-from zerver.models import Realm, ScheduledEmail, UserProfile
+from zerver.lib.queue import queue_event_on_commit
+from zerver.models import Realm, RealmAuditLog, ScheduledEmail, UserProfile
+from zerver.models.realm_audit_logs import AuditLogEventType
 from zerver.models.scheduled_jobs import EMAIL_TYPES
 from zerver.models.users import get_user_profile_by_id
-from zproject.email_backends import EmailLogBackEnd, get_forward_address
+from zproject.email_backends import smtp_connection_backoff
 
 if settings.ZILENCER_ENABLED:
     from zilencer.models import RemoteZulipServer
-
-MAX_CONNECTION_TRIES = 3
 
 ## Logging setup ##
 
@@ -90,8 +93,11 @@ def build_email(
     from_address: str | None = None,
     reply_to_email: str | None = None,
     language: str | None = None,
+    date: str | None = None,
     context: Mapping[str, Any] = {},
     realm: Realm | None = None,
+    in_reply_to: str | None = None,
+    references: str | None = None,
 ) -> EmailMultiAlternatives:
     # Callers should pass exactly one of to_user_id and to_email.
     assert (to_user_ids is None) ^ (to_emails is None)
@@ -120,11 +126,25 @@ def build_email(
     # commonly-recognized.
     extra_headers = {"X-Auto-Response-Suppress": "All"}
 
+    if date is None:
+        # Messages enqueued via the `email_senders` queue provide a
+        # Date header of when they were enqueued; Django would also
+        # add a default-now header if we left this off, but doing so
+        # ourselves here explicitly makes it slightly more consistent.
+        date = email_formatdate()
+    extra_headers["Date"] = date
+
     if realm is not None:
         # formaddr is meant for formatting (display_name, email_address) pair for headers like "To",
         # but we can use its utility for formatting the List-Id header, as it follows the same format,
         # except having just a domain instead of an email address.
         extra_headers["List-Id"] = formataddr((realm.name, realm.host))
+
+    if in_reply_to is not None:
+        extra_headers["In-Reply-To"] = in_reply_to
+
+    if references is not None:
+        extra_headers["References"] = references
 
     assert settings.STATIC_URL is not None
     context = {
@@ -241,9 +261,14 @@ class NoEmailArgumentError(CommandError):
         super().__init__(msg)
 
 
+@smtp_connection_backoff
+def _send_messages(connection: BaseEmailBackend, messages: list[EmailMultiAlternatives]) -> int:
+    return connection.send_messages(messages)
+
+
 # When changing the arguments to this function, you may need to write a
 # migration to change or remove any emails in ScheduledEmail.
-def send_email(
+def send_immediate_email(
     template_prefix: str,
     to_user_ids: list[int] | None = None,
     to_emails: list[str] | None = None,
@@ -251,11 +276,15 @@ def send_email(
     from_address: str | None = None,
     reply_to_email: str | None = None,
     language: str | None = None,
+    date: str | None = None,
     context: Mapping[str, Any] = {},
     realm: Realm | None = None,
     connection: BaseEmailBackend | None = None,
     dry_run: bool = False,
     request: HttpRequest | None = None,
+    in_reply_to: str | None = None,
+    references: str | None = None,
+    remove_suppressed_destination: bool = False,
 ) -> None:
     mail = build_email(
         template_prefix,
@@ -265,35 +294,50 @@ def send_email(
         from_address=from_address,
         reply_to_email=reply_to_email,
         language=language,
+        date=date,
         context=context,
         realm=realm,
+        in_reply_to=in_reply_to,
+        references=references,
     )
-    template = template_prefix.split("/")[-1]
+    template = template_prefix.rsplit("/", 1)[-1]
 
     log_email_config_errors()
 
     if dry_run:
-        print(mail.message().get_payload()[0])
+        print(mail.message().get_payload(0))
         return
 
-    if connection is None:
+    owns_connection = connection is None
+    if owns_connection:
         connection = get_connection()
+    assert connection is not None
 
     cause = ""
     if request is not None:
         cause = f" (triggered from {request.META['REMOTE_ADDR']})"
 
-    logging_recipient: str | list[str] = mail.to
     if realm is not None:
         logging_recipient = f"{mail.to} in {realm.string_id}"
+    else:
+        logging_recipient = f"{mail.to}"
 
+    if remove_suppressed_destination:
+        maybe_remove_from_suppression_list(mail.to)
     logger.info("Sending %s email to %s%s", template, logging_recipient, cause)
 
     try:
-        # This will call .open() for us, which is a no-op if it's already open;
-        # it will only call .close() if it was not open to begin with
-        if connection.send_messages([mail]) == 0:
+        # When we created the connection (no caller-provided one),
+        # retry with backoff on transient connection failures.
+        # Caller-provided connections (e.g. PersistentSMTPEmailBackend)
+        # manage their own lifecycle via ensure_connected().
+        if owns_connection:
+            result = _send_messages(connection, [mail])
+        else:
+            result = connection.send_messages([mail])
+        if result == 0:
             logger.error("Unknown error sending %s email to %s", template, mail.to)
+            connection.close()
             raise EmailNotDeliveredError
     except smtplib.SMTPResponseException as e:
         logger.exception(
@@ -304,45 +348,69 @@ def send_email(
             e.smtp_error,
             stack_info=True,
         )
-        raise EmailNotDeliveredError
-    except smtplib.SMTPException as e:
+        connection.close()
+        raise EmailNotDeliveredError from e
+    except (smtplib.SMTPException, OSError) as e:
         logger.exception("Error sending %s email to %s: %s", template, mail.to, e, stack_info=True)
-        raise EmailNotDeliveredError
+        connection.close()
+        raise EmailNotDeliveredError from e
 
 
-@backoff.on_exception(backoff.expo, OSError, max_tries=MAX_CONNECTION_TRIES, logger=None)
-def initialize_connection(connection: BaseEmailBackend | None = None) -> BaseEmailBackend:
-    if not connection:
-        connection = get_connection()
-        assert connection is not None
-
-    if connection.open():
-        # If it's a new connection, no need to no-op to check connectivity
-        return connection
-
-    if isinstance(connection, EmailLogBackEnd) and not get_forward_address():
-        # With the development environment backend and without a
-        # configured forwarding address, we don't actually send emails.
-        #
-        # As a result, the connection cannot be closed by the server
-        # (as there is none), and `connection.noop` is not
-        # implemented, so we need to return the connection early.
-        return connection
-
-    # No-op to ensure that we don't return a connection that has been
-    # closed by the mail server.
-    if isinstance(connection, EmailBackend):
-        try:
-            assert connection.connection is not None
-            status = connection.connection.noop()[0]
-        except Exception:
-            status = -1
-        if status != 250:
-            # Close and connect again.
-            connection.close()
-            connection.open()
-
-    return connection
+def send_email(
+    template_prefix: str,
+    to_user_ids: list[int] | None = None,
+    to_emails: list[str] | None = None,
+    from_name: str | None = None,
+    from_address: str | None = None,
+    reply_to_email: str | None = None,
+    language: str | None = None,
+    date: str | None = None,
+    context: Mapping[str, Any] = {},
+    realm: Realm | None = None,
+    connection: BaseEmailBackend | None = None,
+    dry_run: bool = False,
+    remove_suppressed_destination: bool = False,
+    request: HttpRequest | None = None,
+) -> None:
+    if settings.EMAIL_ALWAYS_ENQUEUED and not dry_run:
+        queue_event_on_commit(
+            "email_senders",
+            dict(
+                template_prefix=template_prefix,
+                to_user_ids=to_user_ids,
+                to_emails=to_emails,
+                from_name=from_name,
+                from_address=from_address,
+                reply_to_email=reply_to_email,
+                language=language,
+                date=date,
+                context=context,
+                realm_id=realm.id if realm is not None else None,
+                remove_suppressed_destination=remove_suppressed_destination,
+            ),
+        )
+    else:
+        if settings.TEST_SUITE:
+            # In tests, verify that the context object is
+            # JSON-serializable, as may happen in production using
+            # EMAIL_ALWAYS_ENQUEUED, above.
+            context = orjson.loads(orjson.dumps(context))
+        send_immediate_email(
+            template_prefix,
+            to_user_ids,
+            to_emails,
+            from_name,
+            from_address,
+            reply_to_email,
+            language,
+            date,
+            context,
+            realm,
+            connection,
+            dry_run,
+            request,
+            remove_suppressed_destination=remove_suppressed_destination,
+        )
 
 
 def send_future_email(
@@ -356,7 +424,7 @@ def send_future_email(
     context: Mapping[str, Any] = {},
     delay: timedelta = timedelta(0),
 ) -> None:
-    template_name = template_prefix.split("/")[-1]
+    template_name = template_prefix.rsplit("/", 1)[-1]
     email_fields = {
         "template_prefix": template_prefix,
         "from_name": from_name,
@@ -366,7 +434,7 @@ def send_future_email(
     }
 
     if settings.DEVELOPMENT_LOG_EMAILS:
-        send_email(
+        send_immediate_email(
             template_prefix,
             to_user_ids=to_user_ids,
             to_emails=to_emails,
@@ -377,8 +445,16 @@ def send_future_email(
         )
         # For logging the email
 
+    if delay == timedelta(0):
+        # Immediately queue, rather than go through the ScheduledEmail table
+        queue_event_on_commit(
+            "deferred_email_senders",
+            {**email_fields, "to_user_ids": to_user_ids, "to_emails": to_emails},
+        )
+        return
+
     assert (to_user_ids is None) ^ (to_emails is None)
-    with transaction.atomic():
+    with transaction.atomic(savepoint=False):
         email = ScheduledEmail.objects.create(
             type=EMAIL_TYPES[template_name],
             scheduled_timestamp=timezone_now() + delay,
@@ -422,7 +498,7 @@ def send_email_to_admins(
     )
 
 
-def send_email_to_billing_admins_and_realm_owners(
+def send_email_to_users_with_billing_access_and_realm_owners(
     template_prefix: str,
     realm: Realm,
     from_name: str | None = None,
@@ -432,7 +508,9 @@ def send_email_to_billing_admins_and_realm_owners(
 ) -> None:
     send_email(
         template_prefix,
-        to_user_ids=[user.id for user in realm.get_human_billing_admin_and_realm_owner_users()],
+        to_user_ids=[
+            user.id for user in realm.get_human_users_with_billing_access_and_realm_owner_users()
+        ],
         from_name=from_name,
         from_address=from_address,
         language=language,
@@ -450,25 +528,30 @@ def clear_scheduled_invitation_emails(email: str) -> None:
 
 
 @transaction.atomic(savepoint=False)
-def clear_scheduled_emails(user_id: int, email_type: int | None = None) -> None:
+def clear_scheduled_emails(user_ids: list[int], email_type: int | None = None) -> None:
     # We need to obtain a FOR UPDATE lock on the selected rows to keep a concurrent
     # execution of this function (or something else) from deleting them before we access
     # the .users attribute.
-    items = (
-        ScheduledEmail.objects.filter(users__in=[user_id])
-        .prefetch_related("users")
-        .select_for_update()
+    items = ScheduledEmail.objects.filter(users__in=user_ids).select_for_update(
+        # We might end up deleting rows.
+        no_key=False
     )
     if email_type is not None:
         items = items.filter(type=email_type)
+    item_ids = list(items.values_list("id", flat=True))
+    if not item_ids:
+        return
 
-    for item in items:
-        item.users.remove(user_id)
-        if not item.users.all().exists():
-            # Due to our transaction holding the row lock we have a guarantee
-            # that the obtained COUNT is accurate, thus we can reliably use it
-            # to decide whether to delete the ScheduledEmail row.
-            item.delete()
+    through_model = ScheduledEmail.users.through
+    through_model.objects.filter(
+        scheduledemail_id__in=item_ids, userprofile_id__in=user_ids
+    ).delete()
+
+    # Due to our transaction holding the row lock we have a guarantee
+    # that the obtained COUNT is accurate, thus we can reliably use it
+    # to decide whether to delete the ScheduledEmail row.
+    subquery = through_model.objects.filter(scheduledemail_id=OuterRef("id"))
+    ScheduledEmail.objects.filter(id__in=item_ids).exclude(Exists(subquery)).delete()
 
 
 def handle_send_email_format_changes(job: dict[str, Any]) -> None:
@@ -484,7 +567,7 @@ def handle_send_email_format_changes(job: dict[str, Any]) -> None:
         del job["to_user_id"]
 
 
-def deliver_scheduled_emails(email: ScheduledEmail) -> None:
+def queue_scheduled_emails(email: ScheduledEmail) -> None:
     data = orjson.loads(email.data)
     user_ids = list(email.users.values_list("id", flat=True))
     if not user_ids and not email.address:
@@ -502,8 +585,7 @@ def deliver_scheduled_emails(email: ScheduledEmail) -> None:
         data["to_user_ids"] = user_ids
     if email.address is not None:
         data["to_emails"] = [email.address]
-    handle_send_email_format_changes(data)
-    send_email(**data)
+    queue_event_on_commit("deferred_email_senders", data)
     email.delete()
 
 
@@ -515,7 +597,32 @@ def get_header(option: str | None, header: str | None, name: str) -> str:
     return str(option or header)
 
 
+def add_utm_params_to_links(html_content: str, campaign_name: str) -> str:
+    target_domains = {"zulip.com", "blog.zulip.com", "zulip.readthedocs.io"}
+    soup = BeautifulSoup(html_content, "html.parser")
+
+    for a_tag in soup.find_all("a", href=True):
+        url = a_tag["href"]
+        parsed = urlsplit(url)
+
+        if parsed.netloc in target_domains:
+            query_params = dict(parse_qsl(parsed.query))
+            query_params["utm_source"] = "newsletter"
+            query_params["utm_medium"] = "email"
+            query_params["utm_campaign"] = campaign_name
+
+            new_query = urlencode(query_params)
+            new_url = urlunsplit(
+                (parsed.scheme, parsed.netloc, parsed.path, new_query, parsed.fragment)
+            )
+
+            a_tag["href"] = new_url
+
+    return str(soup)
+
+
 def custom_email_sender(
+    campaign_name: str,
     markdown_template_path: str,
     dry_run: bool,
     subject: str | None = None,
@@ -526,10 +633,9 @@ def custom_email_sender(
 ) -> Callable[..., None]:
     with open(markdown_template_path) as f:
         text = f.read()
-        parsed_email_template = Parser(policy=default).parsestr(text)
-        email_template_hash = hashlib.sha256(text.encode()).hexdigest()[0:32]
+        parsed_email_template = Parser(_class=EmailMessage, policy=default).parsestr(text)
 
-    email_id = f"zerver/emails/custom/custom_email_{email_template_hash}"
+    email_id = f"zerver/emails/custom/custom_email_{campaign_name}"
     markdown_email_base_template_path = "templates/zerver/emails/custom_email_base.pre.html"
     html_template_path = f"templates/{email_id}.html"
     plain_text_template_path = f"templates/{email_id}.txt"
@@ -558,19 +664,42 @@ def custom_email_sender(
         #  3. Have that interpolation happen in the context of
         #     each individual email we send, so the contents can
         #     vary user-to-user
-        f.write(base_template.read().replace("{{ rendered_input }}", rendered_input))
+        html_body = base_template.read().replace("{{ rendered_input }}", rendered_input)
+
+        if campaign_name:
+            html_body = add_utm_params_to_links(html_body, campaign_name)
+
+        f.write(html_body)
+
+    # Add the manage_preferences block content in the plain_text template.
+    manage_preferences_block_template_path = (
+        "templates/zerver/emails/custom_email_base.pre.manage_preferences_block.txt"
+    )
+    with (
+        open(plain_text_template_path, "a") as f,
+        open(manage_preferences_block_template_path) as manage_preferences_block,
+    ):
+        f.write(manage_preferences_block.read())
 
     with open(subject_path, "w") as f:
         f.write(get_header(subject, parsed_email_template.get("subject"), "subject"))
 
+    already_printed_once = False
+
     def send_one_email(
-        context: dict[str, Any], to_user_id: int | None = None, to_email: str | None = None
+        context: dict[str, Any], to_user: UserProfile | None = None, to_email: str | None = None
     ) -> None:
-        assert to_user_id is not None or to_email is not None
+        assert to_user is not None or to_email is not None
+        if dry_run:
+            nonlocal already_printed_once
+            if already_printed_once:
+                return
+            else:
+                already_printed_once = True
         with suppress(EmailNotDeliveredError):
-            send_email(
+            send_immediate_email(
                 email_id,
-                to_user_ids=[to_user_id] if to_user_id is not None else None,
+                to_user_ids=[to_user.id] if to_user is not None else None,
                 to_emails=[to_email] if to_email is not None else None,
                 from_address=from_address,
                 reply_to_email=reply_to,
@@ -578,6 +707,20 @@ def custom_email_sender(
                 context=context,
                 dry_run=dry_run,
             )
+            if to_user is not None and not dry_run:
+                RealmAuditLog.objects.create(
+                    realm=to_user.realm,
+                    acting_user=None,
+                    modified_user=to_user,
+                    event_type=AuditLogEventType.CUSTOM_EMAIL_SENT,
+                    event_time=timezone_now(),
+                    extra_data={
+                        "campaign_name": campaign_name,
+                        "email_subject": get_header(
+                            subject, parsed_email_template.get("subject"), "subject"
+                        ),
+                    },
+                )
 
     return send_one_email
 
@@ -601,16 +744,49 @@ def send_custom_email(
     )
     """
     email_sender = custom_email_sender(**options, dry_run=dry_run)
+    campaign_name = options["campaign_name"]
 
     users = users.select_related("realm")
+
+    # Filter out users who already received this email.
     if distinct_email:
+        # This deduplication logic is unsound, because the audit logs
+        # get attached to one USER who received the email, but we
+        # deduplicate based on the CURRENT email address of that user.
+        #
+        # Email addresses change rarely, so we expect failures to be
+        # rare, and the impact of failures is likely to be minor.
+        already_sent_emails = (
+            RealmAuditLog.objects.filter(
+                event_type=AuditLogEventType.CUSTOM_EMAIL_SENT,
+                extra_data__campaign_name=campaign_name,
+                modified_user__isnull=False,
+            )
+            .annotate(lower_email=Lower("modified_user__delivery_email"))
+            .values_list("lower_email", flat=True)
+            .distinct()
+        )
+
+        already_sent_count = already_sent_emails.count()
         users = (
             users.annotate(lower_email=Lower("delivery_email"))
+            .exclude(lower_email__in=already_sent_emails)
             .distinct("lower_email")
             .order_by("lower_email", "id")
         )
     else:
+        # For regular emails: exclude by user ID
+        already_sent_users = RealmAuditLog.objects.filter(
+            event_type=AuditLogEventType.CUSTOM_EMAIL_SENT, extra_data__campaign_name=campaign_name
+        ).values_list("modified_user_id", flat=True)
+
+        already_sent_count = already_sent_users.count()
+        users = users.exclude(id__in=already_sent_users)
         users = users.order_by("id")
+
+    if already_sent_count:
+        print(f"Excluded {already_sent_count} users who already received this email")
+
     for user_profile in users:
         context: dict[str, object] = {
             "realm": user_profile.realm,
@@ -621,12 +797,9 @@ def send_custom_email(
         if add_context is not None:
             add_context(context, user_profile)
         email_sender(
-            to_user_id=user_profile.id,
+            to_user=user_profile,
             context=context,
         )
-
-        if dry_run:
-            break
     return users
 
 
@@ -662,9 +835,6 @@ def send_custom_server_email(
             context=context,
         )
 
-        if dry_run:
-            break
-
 
 def log_email_config_errors() -> None:
     """
@@ -676,3 +846,23 @@ def log_email_config_errors() -> None:
             "An SMTP username was set (EMAIL_HOST_USER), but password is unset (EMAIL_HOST_PASSWORD).  "
             "To disable SMTP authentication, set EMAIL_HOST_USER to an empty string."
         )
+
+
+def maybe_remove_from_suppression_list(email_addresses: list[str]) -> None:
+    if settings.EMAIL_HOST is None:
+        return
+
+    maybe_aws = re.match(r"^email-smtp(?:-fips)?\.([^.]+)\.amazonaws\.com$", settings.EMAIL_HOST)
+    if maybe_aws is None:
+        return
+
+    import boto3
+    import botocore
+
+    if boto3.session.Session().get_credentials() is None:
+        return
+
+    client = boto3.client("sesv2", region_name=maybe_aws[1])
+    for email_address in email_addresses:
+        with contextlib.suppress(botocore.exceptions.ClientError):
+            client.delete_suppressed_destination(EmailAddress=email_address)

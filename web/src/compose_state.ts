@@ -1,14 +1,15 @@
 import $ from "jquery";
 
-import * as compose_pm_pill from "./compose_pm_pill";
-import {$t} from "./i18n";
-import * as people from "./people";
-import * as sub_store from "./sub_store";
+import * as compose_pm_pill from "./compose_pm_pill.ts";
+import * as stream_data from "./stream_data.ts";
+import * as sub_store from "./sub_store.ts";
 
 let message_type: "stream" | "private" | undefined;
 let recipient_edited_manually = false;
 let is_content_unedited_restored_draft = false;
 let last_focused_compose_type_input: HTMLTextAreaElement | undefined;
+let preview_render_count = 0;
+let is_processing_forward_message = false;
 
 // We use this variable to keep track of whether user has viewed the topic resolved
 // banner for the current compose session, for a narrow. This prevents the banner
@@ -17,6 +18,8 @@ let last_focused_compose_type_input: HTMLTextAreaElement | undefined;
 // the narrow and the user should still be able to see the banner once after
 // performing these actions
 let recipient_viewed_topic_resolved_banner = false;
+let recipient_viewed_topic_moved_banner = false;
+let recipient_guest_ids_for_dm_warning: number[] = [];
 
 export function set_recipient_edited_manually(flag: boolean): void {
     recipient_edited_manually = flag;
@@ -58,6 +61,38 @@ export function has_recipient_viewed_topic_resolved_banner(): boolean {
     return recipient_viewed_topic_resolved_banner;
 }
 
+export function set_recipient_viewed_topic_moved_banner(flag: boolean): void {
+    recipient_viewed_topic_moved_banner = flag;
+}
+
+export function has_recipient_viewed_topic_moved_banner(): boolean {
+    return recipient_viewed_topic_moved_banner;
+}
+
+export function set_recipient_guest_ids_for_dm_warning(guest_ids: number[]): void {
+    recipient_guest_ids_for_dm_warning = guest_ids;
+}
+
+export function get_recipient_guest_ids_for_dm_warning(): number[] {
+    return recipient_guest_ids_for_dm_warning;
+}
+
+export function get_preview_render_count(): number {
+    return preview_render_count;
+}
+
+export function set_preview_render_count(count: number): void {
+    preview_render_count = count;
+}
+
+export function set_is_processing_forward_message(val: boolean): void {
+    is_processing_forward_message = val;
+}
+
+export function get_is_processing_forward_message(): boolean {
+    return is_processing_forward_message;
+}
+
 export function composing(): boolean {
     // This is very similar to get_message_type(), but it returns
     // a boolean.
@@ -66,7 +101,9 @@ export function composing(): boolean {
 
 function get_or_set(
     input_selector: string,
-    keep_leading_whitespace?: boolean,
+    // For the compose box, it's important to preserve leading spaces,
+    // but not newlines.
+    keep_leading_spaces?: boolean,
     no_trim?: boolean,
 ): (newval?: string) => string {
     // We can't hoist the assignment of '$elem' out of this lambda,
@@ -80,8 +117,8 @@ function get_or_set(
         }
         if (no_trim) {
             return oldval;
-        } else if (keep_leading_whitespace) {
-            return oldval.trimEnd();
+        } else if (keep_leading_spaces) {
+            return oldval.trimEnd().replace(/^(\r?\n)+/, "");
         }
         return oldval.trim();
     };
@@ -106,12 +143,16 @@ export function stream_id(): number | undefined {
     return undefined;
 }
 
-export function stream_name(): string {
+export let stream_name = (): string => {
     const stream_id = selected_recipient_id;
     if (typeof stream_id === "number") {
         return sub_store.maybe_get_stream_name(stream_id) ?? "";
     }
     return "";
+};
+
+export function rewire_stream_name(value: typeof stream_name): void {
+    stream_name = value;
 }
 
 export function set_stream_id(stream_id: number | ""): void {
@@ -123,10 +164,10 @@ export function set_compose_recipient_id(recipient_id: number | "direct"): void 
 }
 
 // TODO: Break out setter and getter into their own functions.
-export const topic = get_or_set("input#stream_message_recipient_topic");
+export let topic = get_or_set("input#stream_message_recipient_topic");
 
-export function empty_topic_placeholder(): string {
-    return $t({defaultMessage: "(no topic)"});
+export function rewire_topic(value: typeof topic): void {
+    topic = value;
 }
 
 // We can't trim leading whitespace in `compose_textarea` because
@@ -138,6 +179,15 @@ const untrimmed_message_content = get_or_set("textarea#compose-textarea", true, 
 function cursor_at_start_of_whitespace_in_compose(): boolean {
     const cursor_position = $("textarea#compose-textarea").caret();
     return message_content() === "" && cursor_position === 0;
+}
+
+export function focus_in_formatting_buttons(): boolean {
+    const is_focused_formatting_button =
+        document.activeElement?.classList.contains("compose_control_button");
+    if (is_focused_formatting_button) {
+        return true;
+    }
+    return false;
 }
 
 export function focus_in_empty_compose(
@@ -175,7 +225,7 @@ export function focus_in_empty_compose(
     // Check whether the current input element is empty for each input type.
     switch (focused_element_id) {
         case "private_message_recipient":
-            return private_message_recipient().length === 0;
+            return private_message_recipient_ids().length === 0;
         case "stream_message_recipient_topic":
             return topic() === "";
         case "compose_select_recipient_widget_wrapper":
@@ -185,14 +235,19 @@ export function focus_in_empty_compose(
     return false;
 }
 
-export function private_message_recipient(): string;
-export function private_message_recipient(value: string): undefined;
-export function private_message_recipient(value?: string): string | undefined {
-    if (typeof value === "string") {
-        compose_pm_pill.set_from_emails(value);
-        return undefined;
-    }
+export function private_message_recipient_emails(): string {
     return compose_pm_pill.get_emails();
+}
+
+export function private_message_recipient_ids(): number[] {
+    return compose_pm_pill.get_user_ids();
+}
+
+// This sets new user ids with `skip_pill_callbacks=true`.
+// If anything in `UserPillWidget.onPillCreate` is desired, call
+// that directly after calling `set_private_message_recipient_ids`.
+export function set_private_message_recipient_ids(value: number[]): void {
+    compose_pm_pill.set_from_user_ids(value, true);
 }
 
 export function has_message_content(): boolean {
@@ -210,21 +265,10 @@ export function has_savable_message_content(): boolean {
 
 export function has_full_recipient(): boolean {
     if (message_type === "stream") {
-        return stream_id() !== undefined && topic() !== "";
+        const has_topic = topic() !== "" || stream_data.can_use_empty_topic(stream_id());
+        return stream_id() !== undefined && has_topic;
     }
-    return private_message_recipient() !== "";
-}
-
-export function update_email(user_id: number, new_email: string): void {
-    let reply_to = private_message_recipient();
-
-    if (!reply_to) {
-        return;
-    }
-
-    reply_to = people.update_email_in_reply_to(reply_to, user_id, new_email);
-
-    private_message_recipient(reply_to);
+    return private_message_recipient_ids().length > 0;
 }
 
 let _can_restore_drafts = true;

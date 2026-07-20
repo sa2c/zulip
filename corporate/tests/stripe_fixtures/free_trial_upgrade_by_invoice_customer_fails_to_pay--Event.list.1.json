@@ -1,53 +1,80 @@
 {
   "data": [
     {
-      "api_version": "2020-08-27",
+      "api_version": "2025-11-17.clover",
       "created": 1000000000,
       "data": {
         "object": {
+          "amount": 56000,
+          "amount_capturable": 0,
+          "amount_details": {
+            "tip": {}
+          },
+          "amount_received": 0,
           "application": null,
+          "application_fee_amount": null,
           "automatic_payment_methods": null,
-          "cancellation_reason": null,
-          "client_secret": "seti_1P41lPDEQaroqDjs559Q8nrc_secret_PtpQDlcWpB7kvOoSCJwsNrx3ncE7OBy",
+          "canceled_at": 1000000000,
+          "cancellation_reason": "requested_by_customer",
+          "capture_method": "automatic",
+          "client_secret": "NORMALIZED",
+          "confirmation_method": "automatic",
           "created": 1000000000,
-          "customer": "cus_NORMALIZED0002",
-          "description": null,
-          "flow_directions": null,
-          "id": "seti_1P41lPDEQaroqDjs559Q8nrc",
-          "last_setup_error": null,
-          "latest_attempt": null,
+          "currency": "usd",
+          "customer": "cus_NORMALIZED",
+          "description": "Payment for Invoice",
+          "excluded_payment_method_types": null,
+          "id": "free_trial_upgrade_by_invoice_customer_fails_to_pay--Event.list.1.json",
+          "last_payment_error": null,
+          "latest_charge": null,
           "livemode": false,
-          "mandate": null,
           "metadata": {},
           "next_action": null,
-          "object": "setup_intent",
+          "object": "payment_intent",
           "on_behalf_of": null,
+          "payment_details": {
+            "customer_reference": null,
+            "order_reference": "in_1SVX4CDwzgQ85STgmZPeNm"
+          },
           "payment_method": null,
           "payment_method_configuration_details": null,
           "payment_method_options": {
             "card": {
+              "installments": null,
               "mandate_options": null,
               "network": null,
               "request_three_d_secure": "automatic"
+            },
+            "link": {
+              "persistent_token": null
             }
           },
           "payment_method_types": [
-            "card"
+            "card",
+            "link"
           ],
-          "single_use_mandate": null,
-          "status": "requires_payment_method",
-          "usage": "off_session"
+          "processing": null,
+          "receipt_email": "hamlet@zulip.com",
+          "review": null,
+          "setup_future_usage": null,
+          "shipping": null,
+          "source": null,
+          "statement_descriptor": "Zulip Cloud Standard",
+          "statement_descriptor_suffix": null,
+          "status": "canceled",
+          "transfer_data": null,
+          "transfer_group": null
         }
       },
-      "id": "evt_1P41lPDEQaroqDjsi31akMfi",
+      "id": "free_trial_upgrade_by_invoice_customer_fails_to_pay--Event.list.1.json",
       "livemode": false,
       "object": "event",
       "pending_webhooks": 0,
       "request": {
-        "id": "req_NORMALIZED0001",
-        "idempotency_key": "c2fdd486-bdfd-49ff-9d6a-4816a6b3544e"
+        "id": "free_trial_upgrade_by_invoice_customer_fails_to_pay--Event.list.1.json",
+        "idempotency_key": "00000000-0000-0000-0000-000000000000"
       },
-      "type": "setup_intent.created"
+      "type": "payment_intent.canceled"
     }
   ],
   "has_more": true,

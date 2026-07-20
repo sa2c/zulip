@@ -1,26 +1,31 @@
+import asyncio
 import base64
 import os
 import re
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Union, cast
 from unittest import TestResult, mock, skipUnless
 from urllib.parse import parse_qs, quote, urlencode
 
+import aioapns
+import firebase_admin.messaging as firebase_messaging
 import lxml.html
 import orjson
 import responses
 from django.apps import apps
 from django.conf import settings
+from django.core.files.uploadedfile import UploadedFile
 from django.core.mail import EmailMessage
 from django.core.signals import got_request_exception
 from django.db import connection, transaction
 from django.db.migrations.executor import MigrationExecutor
 from django.db.migrations.state import StateApps
+from django.db.models import QuerySet
 from django.db.utils import IntegrityError
 from django.http import HttpRequest, HttpResponse, HttpResponseBase
 from django.http.response import ResponseHeaders
@@ -32,34 +37,40 @@ from django.urls import resolve
 from django.utils import translation
 from django.utils.module_loading import import_string
 from django.utils.timezone import now as timezone_now
-from django_stubs_ext import ValuesQuerySet
 from fakeldap import MockLDAP
+from firebase_admin import exceptions as firebase_exceptions
 from openapi_core.contrib.django import DjangoOpenAPIRequest, DjangoOpenAPIResponse
 from requests import PreparedRequest
 from two_factor.plugins.phonenumber.models import PhoneDevice
 from typing_extensions import override
 
-from corporate.models import Customer, CustomerPlan, LicenseLedger
+from corporate.models.customers import Customer
+from corporate.models.licenses import LicenseLedger
+from corporate.models.plans import CustomerPlan
+from zerver.actions.custom_profile_fields import do_update_user_custom_profile_data_if_changed
 from zerver.actions.message_send import check_send_message, check_send_stream_message
-from zerver.actions.realm_settings import (
-    do_change_realm_permission_group_setting,
-    do_set_realm_property,
-)
+from zerver.actions.realm_settings import do_change_realm_permission_group_setting
 from zerver.actions.streams import bulk_add_subscriptions, bulk_remove_subscriptions
+from zerver.actions.user_settings import do_change_full_name, do_change_user_setting
+from zerver.actions.users import do_change_user_role
 from zerver.decorator import do_two_factor_login
 from zerver.lib.cache import bounce_key_prefix_for_testing
+from zerver.lib.email_notifications import MissedMessageData, handle_missedmessage_emails
 from zerver.lib.initial_password import initial_password
 from zerver.lib.mdiff import diff_strings
 from zerver.lib.message import access_message
 from zerver.lib.notification_data import UserMessageNotificationsData
 from zerver.lib.per_request_cache import flush_per_request_caches
+from zerver.lib.push_notifications import APNsContext
 from zerver.lib.redis_utils import bounce_redis_key_prefix_for_testing
+from zerver.lib.response import MutableJsonResponse
 from zerver.lib.sessions import get_session_dict_user
 from zerver.lib.soft_deactivation import do_soft_deactivate_users
 from zerver.lib.stream_subscription import get_subscribed_stream_ids_for_user
 from zerver.lib.streams import (
     create_stream_if_needed,
     get_default_value_for_history_public_to_subscribers,
+    get_default_values_for_stream_permission_group_settings,
 )
 from zerver.lib.subscription_info import gather_subscriptions
 from zerver.lib.test_console_output import (
@@ -71,20 +82,23 @@ from zerver.lib.test_console_output import (
 from zerver.lib.test_helpers import (
     cache_tries_captured,
     find_key_by_email,
+    get_test_image_file,
     instrument_url,
     queries_captured,
 )
 from zerver.lib.thumbnail import ThumbnailFormat
 from zerver.lib.topic import RESOLVED_TOPIC_PREFIX, filter_by_topic_name_via_message
+from zerver.lib.types import ProfileDataElementUpdateDict
+from zerver.lib.upload import upload_message_attachment_from_request
 from zerver.lib.user_groups import get_system_user_group_for_user
-from zerver.lib.users import get_api_key
 from zerver.lib.webhooks.common import (
+    call_fixture_to_headers,
     check_send_webhook_message,
-    get_fixture_http_headers,
     standardize_headers,
 )
 from zerver.models import (
     Client,
+    Device,
     Message,
     NamedUserGroup,
     PushDeviceToken,
@@ -100,15 +114,22 @@ from zerver.models import (
     UserProfile,
     UserStatus,
 )
-from zerver.models.groups import SystemGroups
+from zerver.models.clients import get_client
 from zerver.models.realms import clear_supported_auth_backends_cache, get_realm
-from zerver.models.streams import get_realm_stream, get_stream
+from zerver.models.recipients import get_or_create_direct_message_group
+from zerver.models.streams import StreamTopicsPolicyEnum, get_realm_stream, get_stream
 from zerver.models.users import get_system_bot, get_user, get_user_by_delivery_email
 from zerver.openapi.openapi import validate_test_request, validate_test_response
 from zerver.tornado.event_queue import clear_client_event_queues_for_testing
 
 if settings.ZILENCER_ENABLED:
-    from zilencer.models import RemoteZulipServer, get_remote_server_by_uuid
+    from zilencer.models import (
+        RemotePushDevice,
+        RemotePushDeviceToken,
+        RemoteRealm,
+        RemoteZulipServer,
+        get_remote_server_by_uuid,
+    )
 
 if TYPE_CHECKING:
     from django.test.client import _MonkeyPatchedWSGIResponse as TestHttpResponse
@@ -322,11 +343,13 @@ Output:
         self,
         url: str,
         info: Mapping[str, Any] = {},
+        *,
         skip_user_agent: bool = False,
         follow: bool = False,
         secure: bool = False,
         intentionally_undocumented: bool = False,
         headers: Mapping[str, Any] | None = None,
+        query_params: Mapping[str, Any] | None = None,
         **extra: str,
     ) -> "TestHttpResponse":
         """
@@ -342,6 +365,7 @@ Output:
             follow=follow,
             secure=secure,
             headers=headers,
+            query_params=query_params,
             intentionally_undocumented=intentionally_undocumented,
             **extra,
         )
@@ -351,10 +375,12 @@ Output:
         self,
         url: str,
         info: Mapping[str, Any] = {},
+        *,
         skip_user_agent: bool = False,
         follow: bool = False,
         secure: bool = False,
         headers: Mapping[str, Any] | None = None,
+        query_params: Mapping[str, Any] | None = None,
         intentionally_undocumented: bool = False,
         **extra: str,
     ) -> "TestHttpResponse":
@@ -376,6 +402,7 @@ Output:
             follow=follow,
             secure=secure,
             headers=headers,
+            query_params=query_params,
             intentionally_undocumented=intentionally_undocumented,
             **extra,
         )
@@ -384,9 +411,12 @@ Output:
         self,
         url: str,
         payload: Mapping[str, Any] = {},
+        *,
         skip_user_agent: bool = False,
         follow: bool = False,
         secure: bool = False,
+        headers: Mapping[str, Any] | None = None,
+        query_params: Mapping[str, Any] | None = None,
         **extra: str,
     ) -> "TestHttpResponse":
         data = orjson.dumps(payload)
@@ -398,7 +428,8 @@ Output:
             content_type="application/json",
             follow=follow,
             secure=secure,
-            headers=None,
+            headers=headers,
+            query_params=query_params,
             **extra,
         )
 
@@ -407,10 +438,12 @@ Output:
         self,
         url: str,
         info: Mapping[str, Any] = {},
+        *,
         skip_user_agent: bool = False,
         follow: bool = False,
         secure: bool = False,
         headers: Mapping[str, Any] | None = None,
+        query_params: Mapping[str, Any] | None = None,
         **extra: str,
     ) -> "TestHttpResponse":
         encoded = urlencode(info)
@@ -418,17 +451,25 @@ Output:
         django_client = self.client  # see WRAPPER_COMMENT
         self.set_http_headers(extra, skip_user_agent)
         return django_client.put(
-            url, encoded, follow=follow, secure=secure, headers=headers, **extra
+            url,
+            encoded,
+            follow=follow,
+            secure=secure,
+            headers=headers,
+            query_params=query_params,
+            **extra,
         )
 
     def json_put(
         self,
         url: str,
         payload: Mapping[str, Any] = {},
+        *,
         skip_user_agent: bool = False,
         follow: bool = False,
         secure: bool = False,
         headers: Mapping[str, Any] | None = None,
+        query_params: Mapping[str, Any] | None = None,
         **extra: str,
     ) -> "TestHttpResponse":
         data = orjson.dumps(payload)
@@ -441,6 +482,7 @@ Output:
             follow=follow,
             secure=secure,
             headers=headers,
+            query_params=query_params,
             **extra,
         )
 
@@ -449,10 +491,12 @@ Output:
         self,
         url: str,
         info: Mapping[str, Any] = {},
+        *,
         skip_user_agent: bool = False,
         follow: bool = False,
         secure: bool = False,
         headers: Mapping[str, Any] | None = None,
+        query_params: Mapping[str, Any] | None = None,
         intentionally_undocumented: bool = False,
         **extra: str,
     ) -> "TestHttpResponse":
@@ -469,6 +513,7 @@ Output:
                 "Content-Type": "application/x-www-form-urlencoded",  # https://code.djangoproject.com/ticket/33230
                 **(headers or {}),
             },
+            query_params=query_params,
             intentionally_undocumented=intentionally_undocumented,
             **extra,
         )
@@ -478,16 +523,24 @@ Output:
         self,
         url: str,
         info: Mapping[str, Any] = {},
+        *,
         skip_user_agent: bool = False,
         follow: bool = False,
         secure: bool = False,
         headers: Mapping[str, Any] | None = None,
+        query_params: Mapping[str, Any] | None = None,
         **extra: str,
     ) -> "TestHttpResponse":
         django_client = self.client  # see WRAPPER_COMMENT
         self.set_http_headers(extra, skip_user_agent)
         return django_client.options(
-            url, dict(info), follow=follow, secure=secure, headers=headers, **extra
+            url,
+            dict(info),
+            follow=follow,
+            secure=secure,
+            headers=headers,
+            query_params=query_params,
+            **extra,
         )
 
     @instrument_url
@@ -495,25 +548,37 @@ Output:
         self,
         url: str,
         info: Mapping[str, Any] = {},
+        *,
         skip_user_agent: bool = False,
         follow: bool = False,
         secure: bool = False,
         headers: Mapping[str, Any] | None = None,
+        query_params: Mapping[str, Any] | None = None,
         **extra: str,
     ) -> "TestHttpResponse":
         django_client = self.client  # see WRAPPER_COMMENT
         self.set_http_headers(extra, skip_user_agent)
-        return django_client.head(url, info, follow=follow, secure=secure, headers=headers, **extra)
+        return django_client.head(
+            url,
+            info,
+            follow=follow,
+            secure=secure,
+            headers=headers,
+            query_params=query_params,
+            **extra,
+        )
 
     @instrument_url
     def client_post(
         self,
         url: str,
         info: str | bytes | Mapping[str, Any] = {},
+        *,
         skip_user_agent: bool = False,
         follow: bool = False,
         secure: bool = False,
         headers: Mapping[str, Any] | None = None,
+        query_params: Mapping[str, Any] | None = None,
         intentionally_undocumented: bool = False,
         content_type: str | None = None,
         **extra: str,
@@ -529,6 +594,9 @@ Output:
                 encoded = urlencode(info, doseq=True)
             else:
                 content_type = MULTIPART_CONTENT
+        elif content_type.startswith("multipart/form-data"):
+            # To support overriding webhooks' default content_type (application/json)
+            content_type = MULTIPART_CONTENT
         return django_client.post(
             url,
             encoded,
@@ -538,6 +606,7 @@ Output:
                 "Content-Type": content_type,  # https://code.djangoproject.com/ticket/33230
                 **(headers or {}),
             },
+            query_params=query_params,
             content_type=content_type,
             intentionally_undocumented=intentionally_undocumented,
             **extra,
@@ -566,6 +635,7 @@ Output:
         follow: bool = False,
         secure: bool = False,
         headers: Mapping[str, Any] | None = None,
+        query_params: Mapping[str, Any] | None = None,
         intentionally_undocumented: bool = False,
         **extra: str,
     ) -> "TestHttpResponse":
@@ -577,6 +647,7 @@ Output:
             follow=follow,
             secure=secure,
             headers=headers,
+            query_params=query_params,
             intentionally_undocumented=intentionally_undocumented,
             **extra,
         )
@@ -596,6 +667,7 @@ Output:
         webhook_bot="webhook-bot@zulip.com",
         outgoing_webhook_bot="outgoing-webhook@zulip.com",
         default_bot="default-bot@zulip.com",
+        imported_user="imported-user@zulip.com",
     )
 
     mit_user_map = dict(
@@ -730,6 +802,7 @@ Output:
             follow=False,
             secure=False,
             headers=None,
+            query_params=None,
             intentionally_undocumented=False,
             **extra,
         )
@@ -830,6 +903,7 @@ Output:
         enable_marketing_emails: bool | None = None,
         email_address_visibility: int | None = None,
         is_demo_organization: bool = False,
+        next: str = "",
         **extra: str,
     ) -> "TestHttpResponse":
         """
@@ -856,7 +930,7 @@ Output:
             "source_realm_id": source_realm_id,
             "is_demo_organization": is_demo_organization,
             "how_realm_creator_found_zulip": "other",
-            "how_realm_creator_found_zulip_extra_context": "I found it on the internet.",
+            "how_realm_creator_found_zulip_other_text": "I found it on the internet.",
         }
         if enable_marketing_emails is not None:
             payload["enable_marketing_emails"] = enable_marketing_emails
@@ -866,6 +940,8 @@ Output:
             payload["password"] = password
         if realm_in_root_domain is not None:
             payload["realm_in_root_domain"] = realm_in_root_domain
+        if next:
+            payload["next"] = next
         return self.client_post(
             "/accounts/register/",
             payload,
@@ -873,6 +949,7 @@ Output:
             follow=False,
             secure=False,
             headers=None,
+            query_params=None,
             intentionally_undocumented=False,
             **extra,
         )
@@ -886,6 +963,8 @@ Output:
         realm_type: int = Realm.ORG_TYPES["business"]["id"],
         realm_default_language: str = "en",
         realm_in_root_domain: str | None = None,
+        captcha: str | None = None,
+        import_from: str = "none",
     ) -> "TestHttpResponse":
         payload = {
             "email": email,
@@ -893,13 +972,67 @@ Output:
             "realm_type": realm_type,
             "realm_default_language": realm_default_language,
             "realm_subdomain": realm_subdomain,
+            "import_from": import_from,
         }
+        if captcha is not None:
+            payload["captcha"] = captcha
         if realm_in_root_domain is not None:
             payload["realm_in_root_domain"] = realm_in_root_domain
         return self.client_post(
             "/new/",
             payload,
         )
+
+    def submit_demo_creation_form(
+        self,
+        *,
+        org_type: int = Realm.ORG_TYPES["business"]["id"],
+        language: str = "en",
+        captcha: str | None = None,
+    ) -> "TestHttpResponse":
+        payload = {
+            "realm_type": org_type,
+            "realm_default_language": language,
+            "how_realm_creator_found_zulip": "ai_chatbot",
+            "how_realm_creator_found_zulip_which_ai_chatbot": "I don't remember.",
+            "terms": True,
+        }
+        if captcha is not None:
+            payload["captcha"] = captcha
+        return self.client_post(
+            "/new/demo/",
+            payload,
+        )
+
+    def create_demo_organization_owner(self) -> UserProfile:
+        assert settings.DEMO_ORG_DEADLINE_DAYS is not None
+
+        # Create a demo organization
+        result = self.submit_demo_creation_form()
+        realm = Realm.objects.filter(
+            demo_organization_scheduled_deletion_date__isnull=False
+        ).latest("date_created")
+        self.assertEqual(result.status_code, 302)
+        self.assertTrue(
+            result["Location"].startswith(
+                f"http://{realm.string_id}.testserver/accounts/login/subdomain"
+            )
+        )
+        expected_deletion_date = realm.date_created + timedelta(
+            days=settings.DEMO_ORG_DEADLINE_DAYS
+        )
+        self.assertEqual(realm.demo_organization_scheduled_deletion_date, expected_deletion_date)
+        result = self.client_get(result["Location"], subdomain=realm.string_id)
+        self.assertEqual(result.status_code, 302)
+        self.assertEqual(result["Location"], f"http://{realm.string_id}.testserver")
+
+        # Get demo organization owner account
+        user_profile = realm.get_first_human_user()
+        assert user_profile is not None
+        self.assert_logged_in_user_id(user_profile.id)
+        self.assertEqual(user_profile.delivery_email, "")
+
+        return user_profile
 
     def get_confirmation_url_from_outbox(
         self,
@@ -952,7 +1085,7 @@ Output:
         # TODO: use encode_user where possible
         assert "@" in email
         user = get_user_by_delivery_email(email, get_realm(realm))
-        api_key = get_api_key(user)
+        api_key = user.api_key
 
         return self.encode_credentials(email, api_key)
 
@@ -974,6 +1107,7 @@ Output:
             follow=False,
             secure=False,
             headers=None,
+            query_params=None,
             intentionally_undocumented=False,
             **extra,
         )
@@ -993,6 +1127,7 @@ Output:
             follow=False,
             secure=False,
             headers=None,
+            query_params=None,
             intentionally_undocumented=False,
             **extra,
         )
@@ -1000,6 +1135,7 @@ Output:
     def api_get(
         self, user: UserProfile, url: str, info: Mapping[str, Any] = {}, **extra: str
     ) -> "TestHttpResponse":
+        assert not url.startswith("/json/"), "Invalid URL for API authentication"
         extra["HTTP_AUTHORIZATION"] = self.encode_user(user)
         return self.client_get(
             url,
@@ -1008,6 +1144,7 @@ Output:
             follow=False,
             secure=False,
             headers=None,
+            query_params=None,
             intentionally_undocumented=False,
             **extra,
         )
@@ -1017,9 +1154,11 @@ Output:
         user: UserProfile,
         url: str,
         info: str | bytes | Mapping[str, Any] = {},
+        *,
         intentionally_undocumented: bool = False,
         **extra: str,
     ) -> "TestHttpResponse":
+        assert not url.startswith("/json/"), "Invalid URL for API authentication"
         extra["HTTP_AUTHORIZATION"] = self.encode_user(user)
         return self.client_post(
             url,
@@ -1028,13 +1167,31 @@ Output:
             follow=False,
             secure=False,
             headers=None,
+            query_params=None,
             intentionally_undocumented=intentionally_undocumented,
+            **extra,
+        )
+
+    def api_put(
+        self, user: UserProfile, url: str, info: Mapping[str, Any] = {}, **extra: str
+    ) -> "TestHttpResponse":
+        assert not url.startswith("/json/"), "Invalid URL for API authentication"
+        extra["HTTP_AUTHORIZATION"] = self.encode_user(user)
+        return self.client_put(
+            url,
+            info,
+            skip_user_agent=False,
+            follow=False,
+            secure=False,
+            headers=None,
+            query_params=None,
             **extra,
         )
 
     def api_patch(
         self, user: UserProfile, url: str, info: Mapping[str, Any] = {}, **extra: str
     ) -> "TestHttpResponse":
+        assert not url.startswith("/json/"), "Invalid URL for API authentication"
         extra["HTTP_AUTHORIZATION"] = self.encode_user(user)
         return self.client_patch(
             url,
@@ -1043,6 +1200,7 @@ Output:
             follow=False,
             secure=False,
             headers=None,
+            query_params=None,
             intentionally_undocumented=False,
             **extra,
         )
@@ -1050,6 +1208,7 @@ Output:
     def api_delete(
         self, user: UserProfile, url: str, info: Mapping[str, Any] = {}, **extra: str
     ) -> "TestHttpResponse":
+        assert not url.startswith("/json/"), "Invalid URL for API authentication"
         extra["HTTP_AUTHORIZATION"] = self.encode_user(user)
         return self.client_delete(
             url,
@@ -1058,6 +1217,7 @@ Output:
             follow=False,
             secure=False,
             headers=None,
+            query_params=None,
             intentionally_undocumented=False,
             **extra,
         )
@@ -1104,7 +1264,7 @@ Output:
         read_by_sender: bool = True,
     ) -> int:
         to_user_ids = [u.id for u in to_users]
-        assert len(to_user_ids) >= 2
+        assert len(to_user_ids) >= 1
 
         (sending_client, _) = Client.objects.get_or_create(name="test suite")
 
@@ -1168,14 +1328,18 @@ Output:
         anchor: int | str = 1,
         num_before: int = 100,
         num_after: int = 100,
-        use_first_unread_anchor: bool = False,
+        use_first_unread_anchor: bool | None = None,
         include_anchor: bool = True,
     ) -> dict[str, list[dict[str, Any]]]:
         post_params = {
             "anchor": anchor,
             "num_before": num_before,
             "num_after": num_after,
-            "use_first_unread_anchor": orjson.dumps(use_first_unread_anchor).decode(),
+            **(
+                {}
+                if use_first_unread_anchor is None
+                else {"use_first_unread_anchor": orjson.dumps(use_first_unread_anchor).decode()}
+            ),
             "include_anchor": orjson.dumps(include_anchor).decode(),
         }
         result = self.client_get("/json/messages", dict(post_params))
@@ -1187,10 +1351,26 @@ Output:
         anchor: str | int = 1,
         num_before: int = 100,
         num_after: int = 100,
-        use_first_unread_anchor: bool = False,
+        use_first_unread_anchor: bool | None = None,
     ) -> list[dict[str, Any]]:
         data = self.get_messages_response(anchor, num_before, num_after, use_first_unread_anchor)
         return data["messages"]
+
+    def get_user_ids_for_whom_message_read(self, message_id: int) -> set[int]:
+        user_ids = set(
+            UserMessage.objects.filter(message_id=message_id)
+            .extra(where=[UserMessage.where_read()])  # noqa: S610
+            .values_list("user_profile_id", flat=True)
+        )
+        return user_ids
+
+    def get_user_ids_for_whom_message_unread(self, message_id: int) -> set[int]:
+        user_ids = set(
+            UserMessage.objects.filter(message_id=message_id)
+            .extra(where=[UserMessage.where_unread()])  # noqa: S610
+            .values_list("user_profile_id", flat=True)
+        )
+        return user_ids
 
     def users_subscribed_to_stream(self, stream_name: str, realm: Realm) -> list[UserProfile]:
         stream = Stream.objects.get(name=stream_name, realm=realm)
@@ -1224,23 +1404,32 @@ Output:
             json = orjson.loads(result.content)
         except orjson.JSONDecodeError:  # nocoverage
             json = {"msg": "Error parsing JSON in response!"}
-        self.assertEqual(result.status_code, 200, json["msg"])
-        self.assertEqual(json.get("result"), "success")
-        # We have a msg key for consistency with errors, but it typically has an
-        # empty value.
-        self.assertIn("msg", json)
-        self.assertNotEqual(json["msg"], "Error parsing JSON in response!")
-        # Check ignored parameters.
-        if ignored_parameters is None:
-            self.assertNotIn("ignored_parameters_unsupported", json)
-        else:
-            self.assertIn("ignored_parameters_unsupported", json)
-            self.assert_length(json["ignored_parameters_unsupported"], len(ignored_parameters))
-            for param in ignored_parameters:
-                self.assertTrue(param in json["ignored_parameters_unsupported"])
+
+        try:
+            self.assertEqual(result.status_code, 200, json["msg"])
+            self.assertEqual(json.get("result"), "success")
+            # We have a msg key for consistency with errors, but it typically has an
+            # empty value.
+            self.assertIn("msg", json)
+            self.assertNotEqual(json["msg"], "Error parsing JSON in response!")
+            # Check ignored parameters.
+            if ignored_parameters is None:
+                self.assertNotIn("ignored_parameters_unsupported", json)
+            else:
+                self.assertIn("ignored_parameters_unsupported", json)
+                self.assert_length(json["ignored_parameters_unsupported"], len(ignored_parameters))
+                for param in ignored_parameters:
+                    self.assertTrue(param in json["ignored_parameters_unsupported"])
+        except AssertionError as e:  # nocoverage
+            if isinstance(result, MutableJsonResponse):
+                raise e from result.exception
+            raise
+
         return json
 
-    def get_json_error(self, result: "TestHttpResponse", status_code: int = 400) -> str:
+    def get_json_error(
+        self, result: Union["TestHttpResponse", HttpResponse], status_code: int = 400
+    ) -> str:
         try:
             json = orjson.loads(result.content)
         except orjson.JSONDecodeError:  # nocoverage
@@ -1250,22 +1439,29 @@ Output:
         return json["msg"]
 
     def assert_json_error(
-        self, result: "TestHttpResponse", msg: str, status_code: int = 400
+        self, result: Union["TestHttpResponse", HttpResponse], msg: str, status_code: int = 400
     ) -> None:
         """
         Invalid POSTs return an error status code and JSON of the form
         {"result": "error", "msg": "reason"}.
         """
-        self.assertEqual(self.get_json_error(result, status_code=status_code), msg)
+        try:
+            self.assertEqual(self.get_json_error(result, status_code=status_code), msg)
+        except AssertionError as e:  # nocoverage
+            if isinstance(result, MutableJsonResponse):
+                raise e from result.exception
+            raise
 
-    def assert_length(self, items: Collection[Any] | ValuesQuerySet[Any, Any], count: int) -> None:
+    def assert_length(self, items: Collection[Any] | QuerySet[Any, Any], count: int) -> None:
         actual_count = len(items)
         if actual_count != count:  # nocoverage
             print("\nITEMS:\n")
             for item in items:
                 print(item)
             print(f"\nexpected length: {count}\nactual length: {actual_count}")
-            raise AssertionError(f"{type(items)} is of unexpected size!")
+            raise AssertionError(
+                f"{type(items)} is of unexpected size! Expected count: {count}, actual count: {actual_count}."
+            )
 
     @contextmanager
     def assert_memcached_count(self, count: int) -> Iterator[None]:
@@ -1302,9 +1498,17 @@ Output:
             )
 
     def assert_json_error_contains(
-        self, result: "TestHttpResponse", msg_substring: str, status_code: int = 400
+        self,
+        result: Union["TestHttpResponse", HttpResponse],
+        msg_substring: str,
+        status_code: int = 400,
     ) -> None:
-        self.assertIn(msg_substring, self.get_json_error(result, status_code=status_code))
+        try:
+            self.assertIn(msg_substring, self.get_json_error(result, status_code=status_code))
+        except AssertionError as e:  # nocoverage
+            if isinstance(result, MutableJsonResponse):
+                raise e from result.exception
+            raise
 
     def assert_in_response(
         self, substring: str, response: Union["TestHttpResponse", HttpResponse]
@@ -1341,6 +1545,31 @@ Output:
         self.assertEqual(stream.recipient_id, message.recipient_id)
         self.assertEqual(stream.name, stream_name)
 
+    def assert_stream_subscriber_count(
+        self,
+        counts_before: dict[int, int],
+        counts_after: dict[int, int],
+        expected_difference: int,
+    ) -> None:
+        # Normally they should always be equal,
+        # but just in case this was called in some test where user/s streams have changed
+        # and we forgot to update streams,
+        # so this assertion catches that.
+        self.assertEqual(
+            set(counts_before),
+            set(counts_after),
+            msg="Different streams! You should compare subscriber_count for the same streams.",
+        )
+
+        for stream_id, count_before in counts_before.items():
+            self.assertEqual(
+                count_before + expected_difference,
+                counts_after[stream_id],
+                msg=f"""
+                stream of ID ({stream_id}) should have a subscriber_count of {count_before + expected_difference}.
+                """,
+            )
+
     def webhook_fixture_data(self, type: str, action: str, file_type: str = "json") -> str:
         fn = os.path.join(
             os.path.dirname(__file__),
@@ -1367,15 +1596,13 @@ Output:
         invite_only: bool = False,
         is_web_public: bool = False,
         history_public_to_subscribers: bool | None = None,
+        topics_policy: int = StreamTopicsPolicyEnum.inherit.value,
     ) -> Stream:
         if realm is None:
             realm = get_realm("zulip")
 
         history_public_to_subscribers = get_default_value_for_history_public_to_subscribers(
-            realm, invite_only, history_public_to_subscribers
-        )
-        administrators_user_group = NamedUserGroup.objects.get(
-            name=SystemGroups.ADMINISTRATORS, realm=realm, is_system_group=True
+            invite_only, history_public_to_subscribers
         )
 
         try:
@@ -1385,7 +1612,8 @@ Output:
                 invite_only=invite_only,
                 is_web_public=is_web_public,
                 history_public_to_subscribers=history_public_to_subscribers,
-                can_remove_subscribers_group=administrators_user_group,
+                topics_policy=topics_policy,
+                **get_default_values_for_stream_permission_group_settings(realm),
             )
         except IntegrityError:  # nocoverage -- this is for bugs in the tests
             raise Exception(
@@ -1424,8 +1652,12 @@ Output:
         try:
             stream = get_stream(stream_name, user_profile.realm)
         except Stream.DoesNotExist:
-            stream, from_stream_creation = create_stream_if_needed(
-                realm, stream_name, invite_only=invite_only, is_web_public=is_web_public
+            stream, _from_stream_creation = create_stream_if_needed(
+                realm,
+                stream_name,
+                invite_only=invite_only,
+                is_web_public=is_web_public,
+                acting_user=user_profile,
             )
         bulk_add_subscriptions(realm, [stream], [user_profile], acting_user=None)
         return stream
@@ -1436,7 +1668,7 @@ Output:
         bulk_remove_subscriptions(realm, [user_profile], [stream], acting_user=None)
 
     # Subscribe to a stream by making an API request
-    def common_subscribe_to_streams(
+    def subscribe_via_post(
         self,
         user: UserProfile,
         subscriptions_raw: list[str] | list[dict[str, str]],
@@ -1459,10 +1691,7 @@ Output:
             "invite_only": orjson.dumps(invite_only).decode(),
         }
         post_data.update(extra_post_data)
-        # We wrap the API call with a 'transaction.atomic()' context
-        # manager as it helps us with NOT rolling back the entire
-        # test transaction due to error responses.
-        with transaction.atomic():
+        with self.artificial_transaction_savepoint():
             result = self.api_post(
                 user,
                 "/api/v1/users/me/subscriptions",
@@ -1474,20 +1703,49 @@ Output:
             self.assert_json_success(result)
         return result
 
+    # Create a stream by making an API request
+    def create_channel_via_post(
+        self,
+        user: UserProfile,
+        subscribers: list[int] | None = None,
+        name: str | None = None,
+        extra_post_data: Mapping[str, Any] = {},
+        invite_only: bool = False,
+        is_web_public: bool = False,
+        **extra: str,
+    ) -> "TestHttpResponse":
+        if subscribers is None:
+            subscribers = [user.id]
+
+        post_data = {
+            "name": name,
+            "subscribers": orjson.dumps(subscribers).decode(),
+            "is_web_public": orjson.dumps(is_web_public).decode(),
+            "invite_only": orjson.dumps(invite_only).decode(),
+        }
+
+        post_data.update(extra_post_data)
+        with self.artificial_transaction_savepoint():
+            result = self.api_post(
+                user,
+                "/api/v1/channels/create",
+                post_data,
+                intentionally_undocumented=False,
+                **extra,
+            )
+
+        return result
+
     def subscribed_stream_name_list(self, user: UserProfile) -> str:
         # This is currently only used for producing error messages.
         subscribed_streams = gather_subscriptions(user)[0]
 
         return "".join(sorted(f"        * {stream['name']}\n" for stream in subscribed_streams))
 
-    def check_user_subscribed_only_to_streams(self, user_name: str, streams: list[Stream]) -> None:
-        streams = sorted(streams, key=lambda x: x.name)
+    def check_user_subscribed_only_to_streams(self, user_name: str, streams: set[Stream]) -> None:
+        stream_names = {stream.name for stream in streams}
         subscribed_streams = gather_subscriptions(self.nonreg_user(user_name))[0]
-
-        self.assert_length(subscribed_streams, len(streams))
-
-        for x, y in zip(subscribed_streams, streams, strict=False):
-            self.assertEqual(x["name"], y.name)
+        self.assertEqual(stream_names, {stream["name"] for stream in subscribed_streams})
 
     def resolve_topic_containing_message(
         self,
@@ -1498,7 +1756,7 @@ Output:
         """
         Mark all messages within the topic associated with message `target_message_id` as resolved.
         """
-        message = access_message(acting_user, target_message_id)
+        message = access_message(acting_user, target_message_id, is_modifying_message=False)
         return self.api_patch(
             acting_user,
             f"/api/v1/messages/{target_message_id}",
@@ -1544,6 +1802,7 @@ Output:
             follow=False,
             secure=False,
             headers=None,
+            query_params=None,
             intentionally_undocumented=False,
             **extra,
         )
@@ -1647,7 +1906,7 @@ Output:
             # as the actual value of the attribute in LDAP.
             for attr, value in attrs.items():
                 if isinstance(value, str) and value.startswith("file:"):
-                    with open(value[5:], "rb") as f:
+                    with open(value.removeprefix("file:"), "rb") as f:
                         attrs[attr] = [f.read()]
 
         ldap_patcher = mock.patch("django_auth_ldap.config.ldap.initialize")
@@ -1714,98 +1973,6 @@ Output:
         # See email_display_from, above.
         return email_message.from_email
 
-    def check_has_permission_policies(
-        self, policy: str, validation_func: Callable[[UserProfile], bool]
-    ) -> None:
-        realm = get_realm("zulip")
-
-        owner = "desdemona"
-        admin = "iago"
-        moderator = "shiva"
-        member = "hamlet"
-        new_member = "othello"
-        guest = "polonius"
-
-        def set_age(user_name: str, age: int) -> None:
-            user = self.example_user(user_name)
-            user.date_joined = timezone_now() - timedelta(days=age)
-            user.save()
-
-        do_set_realm_property(realm, "waiting_period_threshold", 1000, acting_user=None)
-        set_age(member, age=realm.waiting_period_threshold + 1)
-        set_age(new_member, age=realm.waiting_period_threshold - 1)
-
-        def allow(user_name: str) -> None:
-            # Fetch a clean object for the user.
-            user = self.example_user(user_name)
-            with self.assert_database_query_count(0):
-                self.assertTrue(validation_func(user))
-
-        def prevent(user_name: str) -> None:
-            # Fetch a clean object for the user.
-            user = self.example_user(user_name)
-            with self.assert_database_query_count(0):
-                self.assertFalse(validation_func(user))
-
-        def set_policy(level: int) -> None:
-            do_set_realm_property(realm, policy, level, acting_user=None)
-
-        set_policy(Realm.POLICY_NOBODY)
-        prevent(owner)
-        prevent(admin)
-        prevent(moderator)
-        prevent(member)
-        prevent(new_member)
-        prevent(guest)
-
-        set_policy(Realm.POLICY_OWNERS_ONLY)
-        allow(owner)
-        prevent(admin)
-        prevent(moderator)
-        prevent(member)
-        prevent(new_member)
-        prevent(guest)
-
-        set_policy(Realm.POLICY_ADMINS_ONLY)
-        allow(owner)
-        allow(admin)
-        prevent(moderator)
-        prevent(member)
-        prevent(new_member)
-        prevent(guest)
-
-        set_policy(Realm.POLICY_MODERATORS_ONLY)
-        allow(owner)
-        allow(admin)
-        allow(moderator)
-        prevent(member)
-        prevent(new_member)
-        prevent(guest)
-
-        set_policy(Realm.POLICY_FULL_MEMBERS_ONLY)
-        allow(owner)
-        allow(admin)
-        allow(moderator)
-        allow(member)
-        prevent(new_member)
-        prevent(guest)
-
-        set_policy(Realm.POLICY_MEMBERS_ONLY)
-        allow(owner)
-        allow(admin)
-        allow(moderator)
-        allow(member)
-        allow(new_member)
-        prevent(guest)
-
-        set_policy(Realm.POLICY_EVERYONE)
-        allow(owner)
-        allow(admin)
-        allow(moderator)
-        allow(member)
-        allow(new_member)
-        allow(guest)
-
     def subscribe_realm_to_manual_license_management_plan(
         self, realm: Realm, licenses: int, licenses_at_next_renewal: int, billing_schedule: int
     ) -> tuple[CustomerPlan, LicenseLedger]:
@@ -1833,6 +2000,23 @@ Output:
     ) -> tuple[CustomerPlan, LicenseLedger]:
         return self.subscribe_realm_to_manual_license_management_plan(
             realm, licenses, licenses_at_next_renewal, CustomerPlan.BILLING_SCHEDULE_MONTHLY
+        )
+
+    def register_push_device(self, user_profile_id: int) -> None:
+        Device.objects.create(
+            user_id=user_profile_id,
+            push_key_id=10,
+            push_token_id=1,
+            push_token_kind=Device.PushTokenKind.FCM,
+            push_key=base64.b64decode("MTaUDJDMWypQ1WufZ1NRTHSSvgYtXh1qVNSjN3aBiEFt"),
+        )
+
+    def register_push_device_token(self, user_profile_id: int) -> None:
+        PushDeviceToken.objects.create(
+            user_id=user_profile_id,
+            kind=PushDeviceToken.APNS,
+            token="test-token",
+            ios_app_id="com.zulip.flutter",
         )
 
     def create_user_notifications_data_object(
@@ -1892,7 +2076,7 @@ Output:
             user_notifications_data=user_notifications_data,
             message_id=message_id,
             acting_user_id=acting_user_id,
-            mentioned_user_group_id=kwargs.get("mentioned_user_group_id", None),
+            mentioned_user_group_id=kwargs.get("mentioned_user_group_id"),
             idle=kwargs.get("idle", True),
             already_notified=kwargs.get(
                 "already_notified", {"email_notified": False, "push_notified": False}
@@ -1910,7 +2094,7 @@ Output:
         """
         dct = {}
 
-        for realm_emoji in RealmEmoji.objects.all():
+        for realm_emoji in RealmEmoji.objects.all().iterator():
             dct[realm_emoji.id] = realm_emoji
 
         if not dct:
@@ -1997,7 +2181,7 @@ Output:
         self.send_personal_message(shiva, polonius)
         self.send_group_direct_message(aaron, [polonius, zoe])
 
-        members_group = NamedUserGroup.objects.get(name="role:members", realm=realm)
+        members_group = NamedUserGroup.objects.get(name="role:members", realm_for_sharding=realm)
         do_change_realm_permission_group_setting(
             realm, "can_access_all_users_group", members_group, acting_user=None
         )
@@ -2027,6 +2211,24 @@ Output:
         ):
             yield
 
+    def create_attachment_helper(self, user: UserProfile) -> str:
+        with tempfile.NamedTemporaryFile() as attach_file:
+            attach_file.write(b"Hello, World!")
+            attach_file.flush()
+            with open(attach_file.name, "rb") as fp:
+                file_path = upload_message_attachment_from_request(UploadedFile(fp), user)[0]
+                return file_path
+
+    @contextmanager
+    def artificial_transaction_savepoint(self) -> Iterator[None]:
+        # Sometimes we need to wrap some test code, such as an API call with a
+        # 'transaction.atomic' context manager as it helps us with NOT rolling
+        # back the entire test transaction due to errors expected by the test.
+        # Otherwise, those errors can prevent the test from continuing, and throw
+        # TransactionManagementError instead.
+        with transaction.atomic(savepoint=True):
+            yield
+
 
 class ZulipTestCase(ZulipTestCaseMixin, TestCase):
     @contextmanager
@@ -2042,11 +2244,18 @@ class ZulipTestCase(ZulipTestCaseMixin, TestCase):
         # So explicitly change parameter name to 'notice' to work around this problem
         with (
             mock.patch("zerver.tornado.event_queue.process_notification", lst.append),
-            # Some `send_event` calls need to be executed only after the current transaction
-            # commits (using `on_commit` hooks). Because the transaction in Django tests never
-            # commits (rather, gets rolled back after the test completes), such events would
-            # never be sent in tests, and we would be unable to verify them. Hence, we use
-            # this helper to make sure the `send_event` calls actually run.
+            # Some `send_event_rollback_unsafe` calls need to be
+            # executed only after the current transaction commits
+            # (mainly those using the `send_event_on_commit` wrapper, which
+            # sends the actual event inside an `on_commit` hook).
+            #
+            # Because the outer transaction in Django tests never
+            # commits (it gets rolled back when the test completes
+            # to restore the database to the desired state for the
+            # next test), such events would never be sent in
+            # tests, and we would be unable to verify them.
+            # Hence, we use this helper to make sure the
+            # `send_event_rollback_unsafe` calls actually run.
             self.captureOnCommitCallbacks(execute=True),
         ):
             yield lst
@@ -2182,8 +2391,76 @@ class ZulipTestCase(ZulipTestCaseMixin, TestCase):
                 )
         return message_id
 
+    def upload_image(self, image_name: str) -> str:
+        with get_test_image_file(image_name) as image_file:
+            response = self.assert_json_success(
+                self.client_post("/json/user_uploads", {"file": image_file})
+            )
+            return re.sub(r"/user_uploads/", "", response["url"])
 
-def get_row_ids_in_all_tables() -> Iterator[tuple[str, set[int]]]:
+    def upload_and_thumbnail_image(self, image_name: str) -> str:
+        with self.captureOnCommitCallbacks(execute=True):
+            # Running captureOnCommitCallbacks includes inserting into
+            # the Rabbitmq queue, which in testing means we
+            # immediately run the worker for it, producing the thumbnails.
+            return self.upload_image(image_name)
+
+    def handle_missedmessage_emails(
+        self, user_profile_id: int, message_ids: dict[int, MissedMessageData]
+    ) -> None:
+        with self.captureOnCommitCallbacks(execute=True):
+            handle_missedmessage_emails(user_profile_id, message_ids)
+
+    def build_streams_subscriber_count(self, streams: Iterable[Stream]) -> dict[int, int]:
+        """
+        Callers MUST pass a new db-fetched version of streams each time.
+        """
+        return {stream.id: stream.subscriber_count for stream in streams}
+
+    def fetch_streams_subscriber_count(self, stream_ids: set[int]) -> dict[int, int]:
+        return self.build_streams_subscriber_count(streams=Stream.objects.filter(id__in=stream_ids))
+
+    def fetch_other_streams_subscriber_count(self, stream_ids: set[int]) -> dict[int, int]:
+        return self.build_streams_subscriber_count(
+            streams=Stream.objects.exclude(id__in=stream_ids)
+        )
+
+    def set_user_role(self, user: UserProfile, role: int) -> None:
+        """
+        Test helper for switching a user to a given role. Hardcodes
+        acting_user=None, which means the change is treated as
+        though it was done by a management command, not another
+        user.
+
+        Tests using this should consider using users who have the
+        appropriate initial role; this is usually more readable and
+        a bit faster.
+        """
+        do_change_user_role(user, role, acting_user=None, notify=False)
+
+    def get_dm_group_recipient(self, sender: UserProfile, *other_users: UserProfile) -> Recipient:
+        direct_group_message = get_or_create_direct_message_group(
+            id_list=[sender.id] + [user.id for user in other_users],
+        )
+        assert direct_group_message.recipient is not None
+        return direct_group_message.recipient
+
+    def set_user_setting(self, user: UserProfile, setting_name: str, value: bool) -> None:
+        with self.captureOnCommitCallbacks(execute=True):
+            do_change_user_setting(user, setting_name, value, acting_user=None)
+
+    def set_user_custom_profile_data(
+        self, user_profile: UserProfile, data: list[ProfileDataElementUpdateDict]
+    ) -> None:
+        do_update_user_custom_profile_data_if_changed(
+            user_profile, data, acting_user=None, notify=False
+        )
+
+    def set_full_name(self, user_profile: UserProfile, full_name: str) -> None:
+        do_change_full_name(user_profile, full_name, acting_user=None, notify=False)
+
+
+def get_row_pks_in_all_tables() -> Iterator[tuple[str, set[int]]]:
     all_models = apps.get_models(include_auto_created=True)
     ignored_tables = {"django_session"}
 
@@ -2191,8 +2468,8 @@ def get_row_ids_in_all_tables() -> Iterator[tuple[str, set[int]]]:
         table_name = model._meta.db_table
         if table_name in ignored_tables:
             continue
-        ids = model._default_manager.all().values_list("id", flat=True)
-        yield table_name, set(ids)
+        pks = model._default_manager.all().values_list("pk", flat=True)
+        yield table_name, set(pks)
 
 
 class ZulipTransactionTestCase(ZulipTestCaseMixin, TransactionTestCase):
@@ -2220,7 +2497,7 @@ class ZulipTransactionTestCase(ZulipTestCaseMixin, TransactionTestCase):
     @override
     def setUp(self) -> None:
         super().setUp()
-        self.models_ids_set = dict(get_row_ids_in_all_tables())
+        self.models_pks_set = dict(get_row_pks_in_all_tables())
 
     @override
     def tearDown(self) -> None:
@@ -2230,11 +2507,11 @@ class ZulipTransactionTestCase(ZulipTestCaseMixin, TransactionTestCase):
         test database.
         """
         super().tearDown()
-        for table_name, ids in get_row_ids_in_all_tables():
+        for table_name, pks in get_row_pks_in_all_tables():
             self.assertSetEqual(
-                self.models_ids_set[table_name],
-                ids,
-                f"{table_name} got a different set of ids after this test",
+                self.models_pks_set[table_name],
+                pks,
+                f"{table_name} got a different set of primary key values after this test",
             )
 
     def _fixture_teardown(self) -> None:
@@ -2256,78 +2533,71 @@ class WebhookTestCase(ZulipTestCase):
     * Tests can override get_body for cases where there is no
       available fixture file.
 
-    * Tests should specify WEBHOOK_DIR_NAME to enforce that all event
-      types are declared in the @webhook_view decorator. This is
-      important for ensuring we document all fully supported event types.
+    * We enforce that all event types are declared in the @webhook_view
+      decorator. This is important for ensuring we document all fully
+      supported event types.
     """
 
-    CHANNEL_NAME: str | None = None
     TEST_USER_EMAIL = "webhook-bot@zulip.com"
-    URL_TEMPLATE: str
+    URL_TEMPLATE: str = ""
     WEBHOOK_DIR_NAME: str | None = None
-    # This last parameter is a workaround to handle webhooks that do not
-    # name the main function api_{WEBHOOK_DIR_NAME}_webhook.
-    VIEW_FUNCTION_NAME: str | None = None
+    DEFAULT_URL_TEMPLATE: str = (
+        "/api/v1/external/{webhook_dir_name}?stream={stream}&api_key={api_key}"
+    )
 
-    @property
-    def test_user(self) -> UserProfile:
-        return self.get_user_from_email(self.TEST_USER_EMAIL, get_realm("zulip"))
+    def get_webhook_dir_name(self) -> str:
+        module_parts = self.__module__.split(".")
+        if len(module_parts) >= 3 and module_parts[0] == "zerver" and module_parts[1] == "webhooks":
+            return module_parts[2]
+        raise AssertionError(f"Cannot determine webhook directory from module: {self.__module__}")
 
     @override
     def setUp(self) -> None:
         super().setUp()
+        self.test_user = self.get_user_from_email(self.TEST_USER_EMAIL, get_realm("zulip"))
+        self.webhook_dir_name = self.WEBHOOK_DIR_NAME or self.get_webhook_dir_name()
+        self.channel_name = self.webhook_dir_name
+        self.url_template = self.URL_TEMPLATE or self.DEFAULT_URL_TEMPLATE
         self.url = self.build_webhook_url()
 
-        if self.WEBHOOK_DIR_NAME is not None:
-            # If VIEW_FUNCTION_NAME is explicitly specified and
-            # WEBHOOK_DIR_NAME is not None, an exception will be
-            # raised when a test triggers events that are not
-            # explicitly specified via the event_types parameter to
-            # the @webhook_view decorator.
-            if self.VIEW_FUNCTION_NAME is None:
-                function = import_string(
-                    f"zerver.webhooks.{self.WEBHOOK_DIR_NAME}.view.api_{self.WEBHOOK_DIR_NAME}_webhook"
-                )
-            else:
-                function = import_string(
-                    f"zerver.webhooks.{self.WEBHOOK_DIR_NAME}.view.{self.VIEW_FUNCTION_NAME}"
-                )
-            all_event_types = None
+        function = import_string(
+            f"zerver.webhooks.{self.webhook_dir_name}.view.api_{self.webhook_dir_name}_webhook"
+        )
 
-            if hasattr(function, "_all_event_types"):
-                all_event_types = function._all_event_types
+        all_event_types = None
+        if hasattr(function, "_all_event_types"):
+            all_event_types = function._all_event_types
+        if all_event_types is None:
+            return  # nocoverage
 
-            if all_event_types is None:
-                return  # nocoverage
-
-            def side_effect(*args: Any, **kwargs: Any) -> None:
-                complete_event_type = (
-                    kwargs.get("complete_event_type")
-                    if len(args) < 5
-                    else args[4]  # complete_event_type is the argument at index 4
-                )
-                if (
-                    complete_event_type is not None
-                    and all_event_types is not None
-                    and complete_event_type not in all_event_types
-                ):  # nocoverage
-                    raise Exception(
-                        f"""
+        def side_effect(*args: Any, **kwargs: Any) -> int | None:
+            complete_event_type = (
+                kwargs.get("complete_event_type")
+                if len(args) < 5
+                else args[4]  # complete_event_type is the argument at index 4
+            )
+            if (
+                complete_event_type is not None
+                and all_event_types is not None
+                and complete_event_type not in all_event_types
+            ):  # nocoverage
+                raise Exception(
+                    f"""
 Error: This test triggered a message using the event "{complete_event_type}", which was not properly
 registered via the @webhook_view(..., event_types=[...]). These registrations are important for Zulip
 self-documenting the supported event types for this integration.
 
 You can fix this by adding "{complete_event_type}" to ALL_EVENT_TYPES for this webhook.
 """.strip()
-                    )
-                check_send_webhook_message(*args, **kwargs)
+                )
+            return check_send_webhook_message(*args, **kwargs)
 
-            self.patch = mock.patch(
-                f"zerver.webhooks.{self.WEBHOOK_DIR_NAME}.view.check_send_webhook_message",
-                side_effect=side_effect,
-            )
-            self.patch.start()
-            self.addCleanup(self.patch.stop)
+        self.patch = mock.patch(
+            f"zerver.webhooks.{self.webhook_dir_name}.view.check_send_webhook_message",
+            side_effect=side_effect,
+        )
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
 
     def api_channel_message(
         self,
@@ -2366,7 +2636,7 @@ You can fix this by adding "{complete_event_type}" to ALL_EVENT_TYPES for this w
         We use `fixture_name` to find the payload data in of our test
         fixtures.  Then we verify that a message gets sent to a stream:
 
-            self.CHANNEL_NAME: stream name
+            self.channel_name: stream name
             expected_topic_name: topic name
             expected_message: content
 
@@ -2378,16 +2648,14 @@ You can fix this by adding "{complete_event_type}" to ALL_EVENT_TYPES for this w
 
         When no message is expected to be sent, set `expect_noop` to True.
         """
-        assert self.CHANNEL_NAME is not None
-        self.subscribe(self.test_user, self.CHANNEL_NAME)
+        self.subscribe(self.test_user, self.channel_name)
 
         payload = self.get_payload(fixture_name)
         if content_type is not None:
             extra["content_type"] = content_type
-        if self.WEBHOOK_DIR_NAME is not None:
-            headers = get_fixture_http_headers(self.WEBHOOK_DIR_NAME, fixture_name)
-            headers = standardize_headers(headers)
-            extra.update(headers)
+        headers = call_fixture_to_headers(self.webhook_dir_name, fixture_name)
+        headers = standardize_headers(headers)
+        extra.update(headers)
         try:
             msg = self.send_webhook_payload(
                 self.test_user,
@@ -2415,7 +2683,7 @@ one or more new messages.
 
         self.assert_channel_message(
             message=msg,
-            channel_name=self.CHANNEL_NAME,
+            channel_name=self.channel_name,
             topic_name=expected_topic_name,
             content=expected_message,
         )
@@ -2450,10 +2718,9 @@ one or more new messages.
         payload = self.get_payload(fixture_name)
         extra["content_type"] = content_type
 
-        if self.WEBHOOK_DIR_NAME is not None:
-            headers = get_fixture_http_headers(self.WEBHOOK_DIR_NAME, fixture_name)
-            headers = standardize_headers(headers)
-            extra.update(headers)
+        headers = call_fixture_to_headers(self.webhook_dir_name, fixture_name)
+        headers = standardize_headers(headers)
+        extra.update(headers)
 
         if sender is None:
             sender = self.test_user
@@ -2468,13 +2735,15 @@ one or more new messages.
 
         return msg
 
-    def build_webhook_url(self, *args: str, **kwargs: str) -> str:
-        url = self.URL_TEMPLATE
-        if url.find("api_key") >= 0:
-            api_key = get_api_key(self.test_user)
-            url = self.URL_TEMPLATE.format(api_key=api_key, stream=self.CHANNEL_NAME)
-        else:
-            url = self.URL_TEMPLATE.format(stream=self.CHANNEL_NAME)
+    def build_webhook_url(self, *args: str, legacy_name: str | None = None, **kwargs: str) -> str:
+        url = self.url_template
+        assert url.find("api_key") >= 0
+        api_key = self.test_user.api_key
+        url = self.url_template.format(
+            webhook_dir_name=self.webhook_dir_name if legacy_name is None else legacy_name,
+            api_key=api_key,
+            stream=self.channel_name,
+        )
 
         has_arguments = kwargs or args
         if has_arguments and url.find("?") == -1:
@@ -2496,8 +2765,7 @@ one or more new messages.
         return self.get_body(fixture_name)
 
     def get_body(self, fixture_name: str) -> str:
-        assert self.WEBHOOK_DIR_NAME is not None
-        body = self.webhook_fixture_data(self.WEBHOOK_DIR_NAME, fixture_name)
+        body = self.webhook_fixture_data(self.webhook_dir_name, fixture_name)
         # fail fast if we don't have valid json
         orjson.loads(body)
         return body
@@ -2522,9 +2790,9 @@ class MigrationsTestCase(ZulipTransactionTestCase):  # nocoverage
     @override
     def setUp(self) -> None:
         super().setUp()
-        assert (
-            self.migrate_from and self.migrate_to
-        ), f"TestCase '{type(self).__name__}' must define migrate_from and migrate_to properties"
+        assert self.migrate_from and self.migrate_to, (
+            f"TestCase '{type(self).__name__}' must define migrate_from and migrate_to properties"
+        )
         migrate_from: list[tuple[str, str]] = [(self.app, self.migrate_from)]
         migrate_to: list[tuple[str, str]] = [(self.app, self.migrate_to)]
         executor = MigrationExecutor(connection)
@@ -2609,3 +2877,257 @@ class BouncerTestCase(ZulipTestCase):
         token_kind = PushDeviceToken.FCM
 
         return {"user_id": user_id, "token": token, "token_kind": token_kind}
+
+
+class PushNotificationTestCase(BouncerTestCase):
+    @override
+    def setUp(self) -> None:
+        super().setUp()
+        self.user_profile = self.example_user("hamlet")
+        self.sending_client = get_client("test")
+        self.sender = self.example_user("hamlet")
+        self.dm_recipient_user = self.example_user("othello")
+        self.dm_group = get_or_create_direct_message_group(
+            [self.sender.id, self.dm_recipient_user.id]
+        )
+
+    def get_message(self, type: int, type_id: int, realm_id: int) -> Message:
+        recipient, _ = Recipient.objects.get_or_create(
+            type_id=type_id,
+            type=type,
+        )
+
+        message = Message(
+            sender=self.sender,
+            recipient=recipient,
+            realm_id=realm_id,
+            content="This is test content",
+            rendered_content="This is test content",
+            date_sent=timezone_now(),
+            sending_client=self.sending_client,
+            is_channel_message=type == Recipient.STREAM,
+        )
+        message.set_topic_name("Test topic")
+        message.save()
+
+        return message
+
+    @contextmanager
+    def mock_apns(self) -> Iterator[tuple[APNsContext, mock.AsyncMock]]:
+        apns = mock.Mock(spec=aioapns.APNs)
+        apns.send_notification = mock.AsyncMock()
+        apns_context = APNsContext(
+            apns=apns,
+            loop=asyncio.new_event_loop(),
+        )
+        try:
+            with mock.patch("zerver.lib.push_notifications.get_apns_context") as mock_get:
+                mock_get.return_value = apns_context
+                yield apns_context, apns.send_notification
+        finally:
+            apns_context.loop.close()
+
+    def setup_apns_tokens(self) -> None:
+        self.tokens = [("aAAa", "org.zulip.Zulip"), ("bBBb", "com.zulip.flutter")]
+        for token, appid in self.tokens:
+            PushDeviceToken.objects.create(
+                kind=PushDeviceToken.APNS,
+                token=token,
+                user=self.user_profile,
+                ios_app_id=appid,
+            )
+
+        self.remote_tokens = [
+            ("cCCc", "dDDd", "org.zulip.Zulip"),
+            ("eEEe", "fFFf", "com.zulip.flutter"),
+        ]
+        for id_token, uuid_token, appid in self.remote_tokens:
+            # We want to set up both types of RemotePushDeviceToken here:
+            # the legacy one with user_id and the new with user_uuid.
+            # This allows tests to work with either, without needing to
+            # do their own setup.
+            RemotePushDeviceToken.objects.create(
+                kind=RemotePushDeviceToken.APNS,
+                token=id_token,
+                ios_app_id=appid,
+                user_id=self.user_profile.id,
+                server=self.server,
+            )
+            RemotePushDeviceToken.objects.create(
+                kind=RemotePushDeviceToken.APNS,
+                token=uuid_token,
+                ios_app_id=appid,
+                user_uuid=self.user_profile.uuid,
+                server=self.server,
+            )
+
+    @contextmanager
+    def mock_fcm(self) -> Iterator[tuple[mock.MagicMock, mock.MagicMock]]:
+        with (
+            mock.patch("zerver.lib.push_notifications.fcm_app") as mock_fcm_app,
+            mock.patch("zerver.lib.push_notifications.firebase_messaging") as mock_fcm_messaging,
+        ):
+            yield mock_fcm_app, mock_fcm_messaging
+
+    def setup_fcm_tokens(self) -> None:
+        self.fcm_tokens = ["1111", "2222"]
+        for token in self.fcm_tokens:
+            PushDeviceToken.objects.create(
+                kind=PushDeviceToken.FCM,
+                token=token,
+                user=self.user_profile,
+                ios_app_id=None,
+            )
+
+        self.remote_fcm_tokens = [("dddd", "eeee")]
+        for id_token, uuid_token in self.remote_fcm_tokens:
+            RemotePushDeviceToken.objects.create(
+                kind=RemotePushDeviceToken.FCM,
+                token=id_token,
+                user_id=self.user_profile.id,
+                server=self.server,
+            )
+            RemotePushDeviceToken.objects.create(
+                kind=RemotePushDeviceToken.FCM,
+                token=uuid_token,
+                user_uuid=self.user_profile.uuid,
+                server=self.server,
+            )
+
+    def make_fcm_success_response(self, tokens: list[str]) -> firebase_messaging.BatchResponse:
+        responses = [
+            firebase_messaging.SendResponse(exception=None, resp=dict(name=str(idx)))
+            for idx, _ in enumerate(tokens)
+        ]
+        return firebase_messaging.BatchResponse(responses)
+
+    def make_fcm_error_response(
+        self, token: str, exception: firebase_exceptions.FirebaseError
+    ) -> firebase_messaging.BatchResponse:
+        error_response = firebase_messaging.SendResponse(exception=exception, resp=None)
+        return firebase_messaging.BatchResponse([error_response])
+
+
+class E2EEPushNotificationTestCase(BouncerTestCase):
+    def register_push_devices_for_notification(
+        self, is_server_self_hosted: bool = False
+    ) -> tuple[RemotePushDevice, RemotePushDevice]:
+        hamlet = self.example_user("hamlet")
+        realm = hamlet.realm
+
+        # Hamlet registers both an Android and an Apple device for push notification.
+        Device.objects.create(
+            user=hamlet,
+            push_key_id=10,
+            push_token_id=1,
+            push_token_kind=Device.PushTokenKind.APNS,
+            push_key=base64.b64decode("MXPC4WK2YfyfCBdK6ElnzSpKJtcpFSZrYiJto4YCETzx"),
+        )
+        Device.objects.create(
+            user=hamlet,
+            push_key_id=20,
+            push_token_id=2,
+            push_token_kind=Device.PushTokenKind.FCM,
+            push_key=base64.b64decode("Mc3u6xraEI79aGk6Nd+boqi/ODfT+JcsEIATzG7C/m+V"),
+        )
+
+        realm_and_remote_realm_fields: dict[str, Realm | RemoteRealm | None] = {
+            "realm": realm,
+            "remote_realm": None,
+        }
+        if is_server_self_hosted:
+            remote_realm = RemoteRealm.objects.get(uuid=realm.uuid)
+            realm_and_remote_realm_fields = {"realm": None, "remote_realm": remote_realm}
+
+        registered_device_apple = RemotePushDevice.objects.create(
+            token_id=1,
+            token_kind=RemotePushDevice.TokenKind.APNS,
+            token="push-device-token-1",
+            ios_app_id="abc",
+            **realm_and_remote_realm_fields,
+        )
+        registered_device_android = RemotePushDevice.objects.create(
+            token_id=2,
+            token_kind=RemotePushDevice.TokenKind.FCM,
+            token="push-device-token-3",
+            **realm_and_remote_realm_fields,
+        )
+
+        return registered_device_apple, registered_device_android
+
+    def register_old_push_devices_for_notification(self) -> tuple[PushDeviceToken, PushDeviceToken]:
+        hamlet = self.example_user("hamlet")
+
+        registered_device_android = PushDeviceToken.objects.create(
+            kind=PushDeviceToken.FCM,
+            token="token-fcm",
+            user=hamlet,
+            ios_app_id=None,
+        )
+        registered_device_apple = PushDeviceToken.objects.create(
+            kind=PushDeviceToken.APNS,
+            token="token-apns",
+            user=hamlet,
+            ios_app_id="abc",
+        )
+        return registered_device_apple, registered_device_android
+
+    @contextmanager
+    def mock_fcm(self, for_legacy: bool = False) -> Iterator[mock.MagicMock]:
+        if for_legacy:
+            with (
+                mock.patch("zerver.lib.push_notifications.fcm_app"),
+                mock.patch(
+                    "zerver.lib.push_notifications.firebase_messaging"
+                ) as mock_fcm_messaging,
+            ):
+                yield mock_fcm_messaging
+        else:
+            with (
+                mock.patch("zilencer.lib.push_notifications.fcm_app"),
+                mock.patch(
+                    "zilencer.lib.push_notifications.firebase_messaging"
+                ) as mock_fcm_messaging,
+            ):
+                yield mock_fcm_messaging
+
+    @contextmanager
+    def mock_apns(self, for_legacy: bool = False) -> Iterator[mock.AsyncMock]:
+        apns = mock.Mock(spec=aioapns.APNs)
+        apns.send_notification = mock.AsyncMock()
+        apns_context = APNsContext(
+            apns=apns,
+            loop=asyncio.new_event_loop(),
+        )
+        target = (
+            "zerver.lib.push_notifications.get_apns_context"
+            if for_legacy
+            else "zilencer.lib.push_notifications.get_apns_context"
+        )
+        try:
+            with mock.patch(target) as mock_get:
+                mock_get.return_value = apns_context
+                yield apns.send_notification
+        finally:
+            apns_context.loop.close()
+
+    def make_fcm_success_response(
+        self, for_legacy: bool = False
+    ) -> firebase_messaging.BatchResponse:
+        if for_legacy:
+            device_ids_count = PushDeviceToken.objects.filter(kind=PushDeviceToken.FCM).count()
+        else:
+            device_ids_count = RemotePushDevice.objects.filter(
+                token_kind=RemotePushDevice.TokenKind.FCM
+            ).count()
+        responses = [
+            firebase_messaging.SendResponse(exception=None, resp=dict(name=str(idx)))
+            for idx in range(device_ids_count)
+        ]
+        return firebase_messaging.BatchResponse(responses)
+
+    def make_fcm_error_response(
+        self, exception: firebase_exceptions.FirebaseError
+    ) -> firebase_messaging.BatchResponse:
+        error_response = firebase_messaging.SendResponse(exception=exception, resp=None)
+        return firebase_messaging.BatchResponse([error_response])

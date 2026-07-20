@@ -24,14 +24,22 @@ class kandra::profile::base {
     'emacs-nox',
     # Prevent accidental reboots
     'molly-guard',
+    # For extracting Teleport certs
+    'sqlite3',
     # Useful tools in a production environment
     'screen',
     'strace',
     'bind9-host',
     'git',
     'nagios-plugins-contrib',
+    'ripgrep',
+    'bat',
   ]
   zulip::safepackage { $org_base_packages: ensure => installed }
+  file { '/usr/local/bin/bat':
+    ensure => link,
+    target => '/usr/bin/batcat',
+  }
 
   # Uninstall the AWS kernel, but only after we install the usual one
   package { ['linux-image-aws', 'linux-headers-aws', 'linux-aws-*', 'linux-image-*-aws', 'linux-modules-*-aws']:
@@ -50,12 +58,10 @@ class kandra::profile::base {
     mode   => '0644',
     source => 'puppet:///modules/kandra/apt/apt.conf.d/50unattended-upgrades',
   }
-  if $facts['os']['distro']['release']['major'] == '22.04' {
-    file { '/etc/needrestart/conf.d/zulip.conf':
-      ensure => file,
-      mode   => '0644',
-      source => 'puppet:///modules/kandra/needrestart/zulip.conf',
-    }
+  file { '/etc/needrestart/conf.d/zulip.conf':
+    ensure => file,
+    mode   => '0644',
+    source => 'puppet:///modules/kandra/needrestart/zulip.conf',
   }
 
   user { 'root': }
@@ -83,7 +89,7 @@ class kandra::profile::base {
     file { '/etc/chrony/chrony.conf':
       ensure  => file,
       mode    => '0644',
-      source  => "puppet:///modules/kandra/chrony-${facts['os']['distro']['release']['major']}.conf",
+      source  => 'puppet:///modules/kandra/chrony.conf',
       require => Package['chrony'],
       notify  => Service['chrony'],
     }

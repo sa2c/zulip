@@ -30,12 +30,12 @@ from zerver.context_processors import get_valid_realm_from_request
 from zerver.lib.exceptions import (
     AccessDeniedError,
     AnomalousWebhookPayloadError,
+    BotRequiredError,
     InvalidAPIKeyError,
     InvalidAPIKeyFormatError,
     InvalidJSONError,
     JsonableError,
     OrganizationAdministratorRequiredError,
-    OrganizationMemberRequiredError,
     OrganizationOwnerRequiredError,
     RealmDeactivatedError,
     UnauthorizedError,
@@ -43,15 +43,19 @@ from zerver.lib.exceptions import (
     UserDeactivatedError,
     WebhookError,
 )
-from zerver.lib.queue import queue_json_publish
+from zerver.lib.queue import queue_json_publish_rollback_unsafe
 from zerver.lib.rate_limiter import is_local_addr, rate_limit_request_by_ip, rate_limit_user
-from zerver.lib.request import REQ, RequestNotes, has_request_variables
+from zerver.lib.request import RequestNotes
 from zerver.lib.response import json_method_not_allowed
 from zerver.lib.subdomains import get_subdomain, user_matches_subdomain
 from zerver.lib.timestamp import datetime_to_timestamp, timestamp_to_datetime
+from zerver.lib.typed_endpoint import typed_endpoint
 from zerver.lib.users import is_2fa_verified
 from zerver.lib.utils import has_api_key_format
-from zerver.lib.webhooks.common import notify_bot_owner_about_invalid_json
+from zerver.lib.webhooks.common import (
+    MissingHTTPEventHeaderError,
+    notify_bot_owner_about_invalid_json,
+)
 from zerver.models import UserProfile
 from zerver.models.clients import get_client
 from zerver.models.users import get_user_profile_by_api_key
@@ -90,7 +94,13 @@ def update_user_activity(
         "time": datetime_to_timestamp(timezone_now()),
         "client_id": request_notes.client.id,
     }
-    queue_json_publish("user_activity", event, lambda event: None)
+
+    queue_name = "user_activity"
+    if settings.USER_ACTIVITY_SHARDS > 1:  # nocoverage
+        shard_id = user_profile.id % settings.USER_ACTIVITY_SHARDS + 1
+        queue_name = f"user_activity_shard{shard_id}"
+
+    queue_json_publish_rollback_unsafe(queue_name, event, lambda event: None)
 
 
 # Based on django.views.decorators.http.require_http_methods
@@ -157,7 +167,7 @@ def require_realm_admin(
     return wrapper
 
 
-def require_organization_member(
+def require_bot_user(
     func: Callable[Concatenate[HttpRequest, UserProfile, ParamT], HttpResponse],
 ) -> Callable[Concatenate[HttpRequest, UserProfile, ParamT], HttpResponse]:
     @wraps(func)
@@ -168,8 +178,26 @@ def require_organization_member(
         *args: ParamT.args,
         **kwargs: ParamT.kwargs,
     ) -> HttpResponse:
-        if user_profile.role > UserProfile.ROLE_MEMBER:
-            raise OrganizationMemberRequiredError
+        if not user_profile.is_bot:
+            raise BotRequiredError
+        return func(request, user_profile, *args, **kwargs)
+
+    return wrapper
+
+
+def check_if_user_can_manage_default_streams(
+    func: Callable[Concatenate[HttpRequest, UserProfile, ParamT], HttpResponse],
+) -> Callable[Concatenate[HttpRequest, UserProfile, ParamT], HttpResponse]:
+    @wraps(func)
+    def wrapper(
+        request: HttpRequest,
+        user_profile: UserProfile,
+        /,
+        *args: ParamT.args,
+        **kwargs: ParamT.kwargs,
+    ) -> HttpResponse:
+        if not user_profile.can_manage_default_streams():
+            raise OrganizationAdministratorRequiredError
         return func(request, user_profile, *args, **kwargs)
 
     return wrapper
@@ -187,7 +215,7 @@ def require_billing_access(
         **kwargs: ParamT.kwargs,
     ) -> HttpResponse:
         if not user_profile.has_billing_access:
-            raise JsonableError(_("Must be a billing administrator or an organization owner"))
+            raise JsonableError(_("Insufficient permission"))
         return func(request, user_profile, *args, **kwargs)
 
     return wrapper
@@ -255,20 +283,31 @@ def validate_account_and_subdomain(request: HttpRequest, user_profile: UserProfi
     if not user_profile.is_active:
         raise UserDeactivatedError
 
-    # Either the subdomain matches, or we're accessing Tornado from
-    # and to localhost (aka spoofing a request as the user).
-    if not user_matches_subdomain(get_subdomain(request), user_profile) and not (
+    remote_addr = request.META.get("REMOTE_ADDR", None)
+    server_name = request.META.get("SERVER_NAME", None)
+
+    if (
         settings.RUNNING_INSIDE_TORNADO
-        and request.META["SERVER_NAME"] == "127.0.0.1"
-        and request.META["REMOTE_ADDR"] == "127.0.0.1"
-    ):
-        logging.warning(
-            "User %s (%s) attempted to access API on wrong subdomain (%s)",
-            user_profile.delivery_email,
-            user_profile.realm.subdomain,
-            get_subdomain(request),
-        )
-        raise JsonableError(_("Account is not associated with this subdomain"))
+        and remote_addr == "127.0.0.1"
+        and server_name == "127.0.0.1"
+    ):  # nocoverage
+        # We're accessing Tornado from and to localhost (aka spoofing
+        # a request as the user)
+        return
+    if remote_addr == "127.0.0.1" and server_name == "localhost":  # nocoverage
+        # For tusd hook requests.
+        return
+
+    if user_matches_subdomain(get_subdomain(request), user_profile):
+        return
+
+    logging.warning(
+        "User %s (%s) attempted to access API on wrong subdomain (%s)",
+        user_profile.delivery_email,
+        user_profile.realm.subdomain,
+        get_subdomain(request),
+    )
+    raise JsonableError(_("Account is not associated with this subdomain"))
 
 
 def access_user_by_api_key(
@@ -305,6 +344,12 @@ def log_unsupported_webhook_event(request: HttpRequest, summary: str) -> None:
 
 def log_exception_to_webhook_logger(request: HttpRequest, err: Exception) -> None:
     extra = {"request": request}
+
+    # We deliberately skip logging this client error, as it results from a malformed request
+    # and doesn't indicate an issue on our end.
+    if isinstance(err, MissingHTTPEventHeaderError):
+        return
+
     # We intentionally omit the stack_info for these events, where
     # they are intentionally raised, and the stack_info between that
     # point and this one is not interesting.
@@ -333,10 +378,10 @@ def webhook_view(
     # Variadic generics are necessary: https://github.com/python/typing/issues/193
     def _wrapped_view_func(view_func: Callable[..., HttpResponse]) -> Callable[..., HttpResponse]:
         @csrf_exempt
-        @has_request_variables
         @wraps(view_func)
+        @typed_endpoint
         def _wrapped_func_arguments(
-            request: HttpRequest, /, api_key: str = REQ(), *args: object, **kwargs: object
+            request: HttpRequest, /, *args: object, api_key: str, **kwargs: object
         ) -> HttpResponse:
             user_profile = validate_api_key(
                 request,
@@ -520,7 +565,9 @@ def human_users_only(
         request: HttpRequest, /, *args: ParamT.args, **kwargs: ParamT.kwargs
     ) -> HttpResponse:
         assert request.user.is_authenticated
-        if request.user.is_bot:
+        # Check bot_type here, rather than is_bot, because  the
+        # narrow user cache only has that (nullable) type
+        if request.user.bot_type is not None:
             raise JsonableError(_("This endpoint does not accept bot requests."))
         return view_func(request, *args, **kwargs)
 
@@ -638,7 +685,7 @@ def require_non_guest_user(
     return _wrapped_view_func
 
 
-def require_member_or_admin(
+def require_human_non_guest_user(
     view_func: Callable[Concatenate[HttpRequest, UserProfile, ParamT], HttpResponse],
 ) -> Callable[Concatenate[HttpRequest, UserProfile, ParamT], HttpResponse]:
     @wraps(view_func)
@@ -651,17 +698,19 @@ def require_member_or_admin(
     ) -> HttpResponse:
         if user_profile.is_guest:
             raise JsonableError(_("Not allowed for guest users"))
-        if user_profile.is_bot:
+        # Check bot_type here, rather than is_bot, because  the
+        # narrow user cache only has that (nullable) type
+        if user_profile.bot_type is not None:
             raise JsonableError(_("This endpoint does not accept bot requests."))
         return view_func(request, user_profile, *args, **kwargs)
 
     return _wrapped_view_func
 
 
-def require_user_group_edit_permission(
+def require_user_group_create_permission(
     view_func: Callable[Concatenate[HttpRequest, UserProfile, ParamT], HttpResponse],
 ) -> Callable[Concatenate[HttpRequest, UserProfile, ParamT], HttpResponse]:
-    @require_member_or_admin
+    @require_non_guest_user
     @wraps(view_func)
     def _wrapped_view_func(
         request: HttpRequest,
@@ -670,7 +719,7 @@ def require_user_group_edit_permission(
         *args: ParamT.args,
         **kwargs: ParamT.kwargs,
     ) -> HttpResponse:
-        if not user_profile.can_edit_user_groups():
+        if not user_profile.can_create_user_groups():
             raise JsonableError(_("Insufficient permission"))
         return view_func(request, user_profile, *args, **kwargs)
 
@@ -685,10 +734,10 @@ def authenticated_uploads_api_view(
 ) -> Callable[[Callable[..., HttpResponse]], Callable[..., HttpResponse]]:
     def _wrapped_view_func(view_func: Callable[..., HttpResponse]) -> Callable[..., HttpResponse]:
         @csrf_exempt
-        @has_request_variables
         @wraps(view_func)
+        @typed_endpoint
         def _wrapped_func_arguments(
-            request: HttpRequest, /, api_key: str = REQ(), *args: object, **kwargs: object
+            request: HttpRequest, /, *args: object, api_key: str, **kwargs: object
         ) -> HttpResponse:
             user_profile = validate_api_key(request, None, api_key, False)
             if not skip_rate_limiting:
@@ -888,7 +937,7 @@ def authenticated_json_view(
         *args: ParamT.args,
         **kwargs: ParamT.kwargs,
     ) -> HttpResponse:
-        if not request.user.is_authenticated:
+        if not request.user.is_authenticated:  # nocoverage
             raise UnauthorizedError
 
         user_profile = request.user
@@ -910,8 +959,8 @@ def authenticated_json_view(
 # from command-line tools into Django.  We protect them from the
 # outside world by checking a shared secret, and also the originating
 # IP (for now).
-@has_request_variables
-def authenticate_internal_api(request: HttpRequest, secret: str = REQ("secret")) -> bool:
+@typed_endpoint
+def authenticate_internal_api(request: HttpRequest, *, secret: str) -> bool:
     return is_local_addr(request.META["REMOTE_ADDR"]) and constant_time_compare(
         secret, settings.SHARED_SECRET
     )
@@ -929,14 +978,14 @@ def internal_api_view(
 
     def _wrapped_view_func(
         view_func: Callable[Concatenate[HttpRequest, ParamT], HttpResponse],
-    ) -> Callable[Concatenate[HttpRequest, ParamT], HttpResponse]:
+    ) -> Callable[..., HttpResponse]:
         @csrf_exempt
         @require_post
         @wraps(view_func)
         def _wrapped_func_arguments(
             request: HttpRequest, /, *args: ParamT.args, **kwargs: ParamT.kwargs
         ) -> HttpResponse:
-            if not authenticate_internal_api(request):
+            if not authenticate_internal_api(request):  # type: ignore[call-arg] # @typed_endpoint fills in secret from the request
                 raise AccessDeniedError
             request_notes = RequestNotes.get_notes(request)
             is_tornado_request = request_notes.tornado_handler_id is not None
@@ -954,7 +1003,7 @@ def internal_api_view(
     return _wrapped_view_func
 
 
-def to_utc_datetime(var_name: str, timestamp: str) -> datetime:
+def to_utc_datetime(timestamp: str) -> datetime:
     return timestamp_to_datetime(float(timestamp))
 
 

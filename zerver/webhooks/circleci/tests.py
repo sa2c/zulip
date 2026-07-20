@@ -2,10 +2,6 @@ from zerver.lib.test_classes import WebhookTestCase
 
 
 class CircleCiHookTests(WebhookTestCase):
-    CHANNEL_NAME = "circleci"
-    URL_TEMPLATE = "/api/v1/external/circleci?stream={stream}&api_key={api_key}"
-    WEBHOOK_DIR_NAME = "circleci"
-
     def test_ping(self) -> None:
         expected_topic_name = "Test event"
         expected_message = "Webhook 'Testing' test event successful."
@@ -41,11 +37,11 @@ Triggered on [`8ab595d2de9: app.py edited online with Bitbucket`](https://bitbuc
         self.check_webhook("bitbucket_workflow_completed", expected_topic_name, expected_message)
 
     def test_github_job_completed(self) -> None:
-        expected_topic_name = "circleci-webhook-test"
+        expected_topic_name = "main branch - build notifications"
         expected_message = """
 Job `build-and-test` within Pipeline #4 has succeeded.
 
-Triggered on [`a5e30a90822: .circleci: Update Webhook URL.`](https://github.com/zulip-testing/circleci-webhook-test/commit/a5e30a908224e46626a796d058289475f6d387b5) on branch `main` by Hari Prashant Bhimaraju.
+Triggered on [`a5e30a90822: Fix remove-op on reaction event.`](https://github.com/zulip-testing/circleci-webhook-test/commit/a5e30a908224e46626a796d058289475f6d387b5) on branch `main` by Hari Prashant Bhimaraju.
 """.strip()
         self.check_webhook("github_job_completed", expected_topic_name, expected_message)
 

@@ -2,12 +2,15 @@ import $ from "jquery";
 
 import render_cannot_send_direct_message_error from "../templates/compose_banner/cannot_send_direct_message_error.hbs";
 import render_compose_banner from "../templates/compose_banner/compose_banner.hbs";
+import render_long_paste_options from "../templates/compose_banner/long_paste_options.hbs";
 import render_stream_does_not_exist_error from "../templates/compose_banner/stream_does_not_exist_error.hbs";
+import render_topics_required_error_banner from "../templates/compose_banner/topics_required_error_banner.hbs";
+import render_unknown_zoom_user_error from "../templates/compose_banner/unknown_zoom_user_error.hbs";
 
-import {$t} from "./i18n";
-import * as scroll_util from "./scroll_util";
-import * as stream_data from "./stream_data";
-import type {StreamSubscription} from "./sub_store";
+import {$t} from "./i18n.ts";
+import * as scroll_util from "./scroll_util.ts";
+import * as stream_data from "./stream_data.ts";
+import type {StreamSubscription} from "./sub_store.ts";
 
 export let scroll_to_message_banner_message_id: number | null = null;
 export function set_scroll_to_message_banner_message_id(val: number | null): void {
@@ -36,13 +39,17 @@ export const CLASSNAMES = {
     ...MESSAGE_SENT_CLASSNAMES,
     non_interleaved_view_messages_fading: "non_interleaved_view_messages_fading",
     interleaved_view_messages_fading: "interleaved_view_messages_fading",
+    topic_is_moved: "topic_is_moved",
+    convert_pasted_text_to_file: "convert_pasted_text_to_file",
     // unmute topic notifications are styled like warnings but have distinct behaviour
     unmute_topic_notification: "unmute_topic_notification warning-style",
     // warnings
     topic_resolved: "topic_resolved",
     recipient_not_subscribed: "recipient_not_subscribed",
+    group_entirely_not_subscribed: "group_entirely_not_subscribed",
     wildcard_warning: "wildcard_warning",
     private_stream_warning: "private_stream_warning",
+    guest_in_dm_recipient_warning: "guest_in_dm_recipient_warning",
     unscheduled_message: "unscheduled_message",
     search_view: "search_view",
     // errors
@@ -57,9 +64,9 @@ export const CLASSNAMES = {
     invalid_recipients: "invalid_recipients",
     deactivated_user: "deactivated_user",
     topic_missing: "topic_missing",
-    zephyr_not_running: "zephyr_not_running",
     generic_compose_error: "generic_compose_error",
     user_not_subscribed: "user_not_subscribed",
+    unknown_zoom_user: "unknown_zoom_user",
 };
 
 export function get_compose_banner_container($textarea: JQuery): JQuery {
@@ -71,11 +78,16 @@ export function get_compose_banner_container($textarea: JQuery): JQuery {
 // This function provides a convenient way to add new elements
 // to a banner container. The function accepts a container element
 // as a parameter, to which a banner should be appended.
+// Returns a boolean value indicating whether the append had succeeded.
 export function append_compose_banner_to_banner_list(
     $banner: JQuery,
     $list_container: JQuery,
-): void {
+): boolean {
+    if ($banner.hasClass("warning") && has_error()) {
+        return false;
+    }
     scroll_util.get_content_element($list_container).append($banner);
+    return true;
 }
 
 export function update_or_append_banner(
@@ -121,7 +133,7 @@ export function clear_message_sent_banners(
 function hide_compose_spinner(): void {
     $(".compose-submit-button .loader").hide();
     $(".compose-submit-button span").show();
-    $(".compose-submit-button").removeClass("disable-btn");
+    $(".compose-submit-button").removeClass("compose-button-disabled");
 }
 
 export function clear_errors(): void {
@@ -134,6 +146,7 @@ export function clear_warnings(): void {
 
 export function clear_uploads(): void {
     $("#compose_banners .upload_banner").remove();
+    $(`#compose_banners .${CSS.escape(CLASSNAMES.convert_pasted_text_to_file)}`).remove();
 }
 
 export function clear_unmute_topic_notifications(): void {
@@ -195,8 +208,11 @@ export function show_error_message(
 }
 
 export function cannot_send_direct_message_error(error_message: string): void {
-    // Remove any existing banners with this warning.
-    $(`#compose_banners .${CSS.escape(CLASSNAMES.cannot_send_direct_message)}`).remove();
+    // If a banner with this classname already exists, avoid removing
+    // and re-creating it.
+    if ($(`#compose_banners .${CSS.escape(CLASSNAMES.cannot_send_direct_message)}`).length > 0) {
+        return;
+    }
 
     const new_row_html = render_cannot_send_direct_message_error({
         banner_type: ERROR,
@@ -205,14 +221,19 @@ export function cannot_send_direct_message_error(error_message: string): void {
     });
     append_compose_banner_to_banner_list($(new_row_html), $("#compose_banners"));
     hide_compose_spinner();
+}
 
-    $("#private_message_recipient").trigger("focus").trigger("select");
+export function topic_missing_error(empty_string_topic_display_name: string): void {
+    const new_row_html = render_topics_required_error_banner({
+        banner_type: ERROR,
+        empty_string_topic_display_name,
+        classname: CLASSNAMES.topic_missing,
+    });
+    append_compose_banner_to_banner_list($(new_row_html), $("#compose_banners"));
+    hide_compose_spinner();
 }
 
 export function show_stream_does_not_exist_error(stream_name: string): void {
-    // Remove any existing banners with this warning.
-    $(`#compose_banners .${CSS.escape(CLASSNAMES.stream_does_not_exist)}`).remove();
-
     const new_row_html = render_stream_does_not_exist_error({
         banner_type: ERROR,
         channel_name: stream_name,
@@ -225,17 +246,13 @@ export function show_stream_does_not_exist_error(stream_name: string): void {
     $("#compose_select_recipient_widget").trigger("click");
 }
 
-export function show_stream_not_subscribed_error(sub: StreamSubscription): void {
-    const $banner_container = $("#compose_banners");
-    if ($(`#compose_banners .${CSS.escape(CLASSNAMES.user_not_subscribed)}`).length) {
-        return;
-    }
+export function show_stream_not_subscribed_error(
+    sub: StreamSubscription,
+    banner_text: string,
+): void {
     const new_row_html = render_compose_banner({
         banner_type: ERROR,
-        banner_text: $t({
-            defaultMessage:
-                "You're not subscribed to this channel. You will not be notified if other users reply to your message.",
-        }),
+        banner_text,
         button_text: stream_data.can_toggle_subscription(sub)
             ? $t({defaultMessage: "Subscribe"})
             : null,
@@ -244,5 +261,46 @@ export function show_stream_not_subscribed_error(sub: StreamSubscription): void 
         // closing the banner would be more confusing than helpful.
         hide_close_button: true,
     });
-    append_compose_banner_to_banner_list($(new_row_html), $banner_container);
+    append_compose_banner_to_banner_list($(new_row_html), $("#compose_banners"));
+}
+
+export function show_unknown_zoom_user_error(email: string): void {
+    // Remove any existing banners with this warning.
+    $(`#compose_banners .${CSS.escape(CLASSNAMES.unknown_zoom_user)}`).remove();
+
+    const new_row_html = render_unknown_zoom_user_error({
+        banner_type: ERROR,
+        email,
+        classname: CLASSNAMES.unknown_zoom_user,
+    });
+    append_compose_banner_to_banner_list($(new_row_html), $("#compose_banners"));
+}
+
+export function has_error(): boolean {
+    return $("#compose_banners .error").length > 0;
+}
+
+export function show_convert_pasted_text_to_file_banner({
+    show_paste_button,
+    convert_to_file_cb,
+    paste_to_compose_cb,
+    $textarea,
+}: {
+    show_paste_button: boolean;
+    convert_to_file_cb: () => void;
+    paste_to_compose_cb: () => void;
+    $textarea: JQuery<HTMLTextAreaElement>;
+}): JQuery {
+    const $banner_container = get_compose_banner_container($textarea);
+    const $new_row = $(
+        render_long_paste_options({
+            banner_type: INFO,
+            classname: CLASSNAMES.convert_pasted_text_to_file,
+            show_paste_button,
+        }),
+    );
+    $new_row.on("click", ".main-view-banner-action-button.convert-to-file", convert_to_file_cb);
+    $new_row.on("click", ".main-view-banner-action-button.paste-to-compose", paste_to_compose_cb);
+    update_or_append_banner($new_row, CLASSNAMES.convert_pasted_text_to_file, $banner_container);
+    return $new_row;
 }

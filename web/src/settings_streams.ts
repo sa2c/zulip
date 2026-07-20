@@ -5,19 +5,20 @@ import render_add_default_streams from "../templates/settings/add_default_stream
 import render_admin_default_streams_list from "../templates/settings/admin_default_streams_list.hbs";
 import render_default_stream_choice from "../templates/settings/default_stream_choice.hbs";
 
-import * as channel from "./channel";
-import * as dialog_widget from "./dialog_widget";
-import * as dropdown_widget from "./dropdown_widget";
-import * as hash_parser from "./hash_parser";
-import {$t_html} from "./i18n";
-import * as ListWidget from "./list_widget";
-import * as loading from "./loading";
-import * as scroll_util from "./scroll_util";
-import * as settings_profile_fields from "./settings_profile_fields";
-import {current_user} from "./state_data";
-import * as stream_data from "./stream_data";
-import * as sub_store from "./sub_store";
-import * as ui_report from "./ui_report";
+import * as channel from "./channel.ts";
+import * as dialog_widget from "./dialog_widget.ts";
+import * as dropdown_widget from "./dropdown_widget.ts";
+import * as hash_parser from "./hash_parser.ts";
+import {$t, $t_html} from "./i18n.ts";
+import * as ListWidget from "./list_widget.ts";
+import * as loading from "./loading.ts";
+import * as scroll_util from "./scroll_util.ts";
+import * as settings_profile_fields from "./settings_profile_fields.ts";
+import {current_user} from "./state_data.ts";
+import * as stream_data from "./stream_data.ts";
+import type {StreamSubscription} from "./sub_store";
+import * as sub_store from "./sub_store.ts";
+import * as ui_report from "./ui_report.ts";
 
 function add_choice_row($widget: JQuery): void {
     if ($widget.closest(".choice-row").next().hasClass("choice-row")) {
@@ -46,11 +47,11 @@ function create_choice_row(): void {
     $container.append($(row_html));
 
     // List of non-default streams that are not yet selected.
-    function get_options(): {name: string; unique_id: number}[] {
+    function get_options(): {name: string; unique_id: number; stream: StreamSubscription}[] {
         const chosen_default_streams = get_chosen_default_streams();
 
         return stream_data
-            .get_non_default_stream_names()
+            .get_default_stream_options()
             .filter((e) => !chosen_default_streams.has(e.unique_id));
     }
 
@@ -133,6 +134,10 @@ export function build_default_stream_table(): void {
 }
 
 export function update_default_streams_table(): void {
+    if (current_user.is_guest) {
+        return;
+    }
+
     if (["organization", "settings"].includes(hash_parser.get_current_hash_category())) {
         $("#admin_default_streams_table").expectOne().find("tr.default_stream_row").remove();
         build_default_stream_table();
@@ -167,7 +172,7 @@ function delete_choice_row(e: JQuery.ClickEvent): void {
 }
 
 function show_add_default_streams_modal(): void {
-    const html_body = render_add_default_streams();
+    const modal_content_html = render_add_default_streams();
 
     function add_default_streams(e: JQuery.ClickEvent): void {
         e.preventDefault();
@@ -214,9 +219,9 @@ function show_add_default_streams_modal(): void {
     }
 
     dialog_widget.launch({
-        html_heading: $t_html({defaultMessage: "Add default channels"}),
-        html_body,
-        html_submit_button: $t_html({defaultMessage: "Add"}),
+        modal_title_html: $t_html({defaultMessage: "Add default channels"}),
+        modal_content_html,
+        modal_submit_button_text: $t({defaultMessage: "Add"}),
         help_link: "/help/set-default-channels-for-new-users",
         id: "add-default-stream-modal",
         loading_spinner: true,
