@@ -1473,10 +1473,7 @@
     --color-text-default: light-dark(hsl(0deg 0% 20%), hsl(0deg 0% 87%));
     /* Unlike the light theme, the dark theme renders message
        text in the default color. */
-    --color-text-message-default: light-dark(
-        hsl(0deg 0% 15%),
-        var(--color-text-default)
-    );
+    --color-text-message-default: black;
     --color-text-message-blockquote-border: light-dark(
         hsl(0deg 0% 15% / 25%),
         hsl(0deg 0% 87% / 40%)
