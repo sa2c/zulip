@@ -811,7 +811,7 @@
     );
 
     /* Colors used across the app */
-    --color-date: light-dark(hsl(0deg 0% 15% / 75%), hsl(0deg 0% 100% / 75%));
+    --color-date: white;
     --color-background-private-message-header: #233264;
     --color-background-private-message-content: #b3c7fc;
     --color-background-stream-message-content: light-dark(
