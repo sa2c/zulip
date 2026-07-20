@@ -290,7 +290,6 @@ li.show-more-topics {
     padding: var(--left-sidebar-direct-messages-bottom-divider-padding) 0;
     position: sticky;
     top: var(--line-height-sidebar-row-prominent);
-    background: var(--color-background);
     z-index: 3;
 }
 
@@ -338,11 +337,6 @@ li.show-more-topics {
     position: sticky;
     top: 0;
     z-index: 3;
-
-    /* The active direct messages section has a different background color */
-    &:not(.active-direct-messages-section) {
-        background-color: var(--color-background);
-    }
 
     #toggle-direct-messages-section-icon {
         grid-area: starting-anchor-element;
@@ -458,7 +452,6 @@ li.show-more-topics {
         auto;
     position: sticky;
     top: 0;
-    background: var(--color-background);
     /* Must be padding not margin so that the sticky headers don't show behind it */
     padding: 0 var(--left-sidebar-right-margin)
         var(--sidebar-filter-bottom-spacing) 5px;
@@ -509,7 +502,6 @@ li.show-more-topics {
         )
         minmax(0, max-content) var(--left-sidebar-vdots-width);
     cursor: pointer;
-    background-color: var(--color-background);
     position: sticky;
     /* height of DM header + 1px divider line and its top/bottom padding */
     top: calc(

@@ -1824,7 +1824,6 @@ textarea.new_message_textarea {
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
-            color: var(--color-text-default);
         }
 
         .select-channel-label {

@@ -44,7 +44,6 @@
         #inbox-filters {
             .inbox-search-wrapper {
                 flex-grow: 1;
-                max-width: var(--width-inbox-search);
             }
         }
 
@@ -63,13 +62,6 @@
 
         #inbox-list {
             overflow: hidden;
-            /* search box left border (1px) + search box right border (1px)
-               + dropdown left border (1px) + dropdown right border (1px) = 4px at 16px em */
-            max-width: calc(
-                var(--width-inbox-search) +
-                    var(--width-inbox-filters-dropdown) + 0.25em
-            );
-
             .inbox-channel-topic-list {
                 margin: 0;
             }
