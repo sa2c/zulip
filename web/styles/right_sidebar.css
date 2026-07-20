@@ -278,7 +278,6 @@
         )
         / var(--right-sidebar-header-icon-toggle-width) minmax(0, 1fr);
     cursor: pointer;
-    background-color: var(--color-background);
     position: sticky;
     top: 0;
     z-index: 1;
